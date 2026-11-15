@@ -312,8 +312,18 @@ jobs:
           if (-not (Test-Path $db)) { throw "app.db not found at $db after first launch" }
           Write-Host "app.db exists: $db"
 
+# The extension's icons (icons/icon{16,32,48,128}.png) are
+      # generated, not committed (see scripts/generate-icons.py), and
+      # Chrome's Extensions.loadUnpacked refuses to load an extension
+      # whose manifest names icons that are missing — run #4 died
+      # here with "Could not load icon 'icons/icon16.png' specified
+      # in 'action'". build-windows generates them for the Tauri
+      # build; this job needs them too, so generate them here before
+      # the test runs.
       - name: Install capture-test dependencies
-        run: python -m pip install websocket-client
+        run: |
+          python -m pip install websocket-client pillow
+          python scripts/generate-icons.py
 
       - name: Run browser capture test
         shell: pwsh
