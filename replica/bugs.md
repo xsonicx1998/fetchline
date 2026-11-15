@@ -3309,6 +3309,127 @@ same "could not reach the host" failure at the popup step,
 that gives a place to iterate on the real handshake with
 logs, instead of guessing on his PC.
 
+## Round 35 — BUG-042 follow-up: branded Chrome 137+ silently ignores --load-extension, so Phase 2 never installs the extension — 2026-11-15
+
+Symptom (new repo xsonicx1998/fetchline, CI run #2
+43745800633, head 57ab16a5): build-windows SUCCESS,
+smoke-test SUCCESS, extension-capture-test FAILED at step 6
+"Run browser capture test" after 36.0 s, exit 1. Log read
+via the cloud browser as xsonicx1998: PHASE 1 PASSED; PHASE 2
+FAILED in discovery. Exact FAIL line (only one): `FAIL:
+browser: could not discover the extension ID (no
+chrome-extension:// target with the expected id and no
+Preferences entry)`. Line 19: expected id
+mioamdgogndabpcjbdekggcnlkkfpmbj not among CDP targets (seen:
+only the four Chrome component extensions, Hangouts among
+them); the Preferences fallback found nothing either. PHASE 3
+never ran; no popup step was reached. The 36 s is exactly the
+discovery budget (6 s Phase 1 + 20 s CDP poll + 10 s
+Preferences poll) — Path A, discovery exhaustion, NOT the
+popup handshake.
+
+Root cause — test harness only, proven from the log +
+Chrome's own documented behaviour, not guessed: the test
+launched headless Chrome with `--load-extension=<dir>`, and
+branded Google Chrome IGNORES that flag. Chrome 126+ first
+made it ephemeral (the extension is accessible as a
+filesystem resource but is never registered in the profile:
+no service worker starts, nothing is written to Preferences
+/ Secure Preferences); Chrome 137 REMOVED it from branded
+builds outright (Chromium RFC, March 2025 — the flag was
+abused to push unwanted software; removal notice 4 April
+2025). The flag is accepted and the extension is silently
+never registered — which is precisely what run #2 logged:
+the worker never appears in /json/list AND no Preferences
+entry exists, while the component extensions do appear. The
+runner's Chrome is the branded build at `C:\Program
+Files\Google\Chrome\Application\chrome.exe`, so
+--load-extension is dead there; the user's real Chrome loads
+the same extension fine because he loads it through
+chrome://extensions (a real install), not the flag. Adding
+--enable-unsafe-extension-debugging alone does NOT restore
+--load-extension on branded Chrome 137+ (verified against
+Chrome 151; the --disable-features=DisableLoadExtension-
+CommandLineSwitch workaround died in Chrome 142) — so the
+one-flag fix was checked and rejected before betting the
+iteration on it. The supported replacements are Chromium /
+Chrome for Testing (where --load-extension still works) or
+installing through CDP — and this test must run against the
+branded Chrome the user actually has, so it uses the CDP
+route.
+
+Fix (`scripts/capture-test.py`, test-only; no product code,
+no assertion weakened):
+- New `PipeCDP` class: a minimal CDP client over Chrome's
+  --remote-debugging-pipe. Messages are JSON separated by NUL
+  bytes; the reader runs on a thread (select() cannot wait on
+  a pipe on Windows). Transport setup follows Chromium's own
+  pipe_builder.cc (ChromeDriver): POSIX uses fds 3/4; Windows
+  passes the two pipe HANDLE values with
+  --remote-debugging-io-pipes (inherited handles keep their
+  value in the child). The POSIX fd placement moves the
+  parent ends out of the way first — a naive dup2 order can
+  close a pipe end still needed (dup2(wB, 4) closing wA when
+  the pipes come back as 3,4,5,6); caught while writing the
+  fake-peer test, fixed before pushing.
+- New `install_extension_via_pipe()`: opens the pipe, probes
+  `Browser.getVersion` (readiness), then calls
+  `Extensions.loadUnpacked` with the extension dir. That CDP
+  command exists ONLY on the pipe transport, gated on
+  --remote-debugging-pipe + --enable-unsafe-extension-
+  debugging (web-ext's approach since Chrome 126); it writes
+  to Secure Preferences exactly like clicking "Load unpacked"
+  in chrome://extensions, so the extension becomes a real
+  install with a normal service-worker lifecycle. The
+  returned id is checked against the stable id (strict
+  `installed != expected -> FAIL`, same rule as discovery).
+- `phase_browser` now installs via the pipe first, then
+  launches the test Chrome WITHOUT --load-extension and WITH
+  --enable-unsafe-extension-debugging, loading the extension
+  from the profile it was just registered in. The rest of
+  Phase 2 is unchanged: CDP worker poll, Preferences
+  fallback, popup handshake, strict discovered == expected.
+- The Preferences fallback now checks BOTH
+  `Default/Preferences` and `Default/Secure Preferences`
+  (registration is mirrored between them on different flush
+  schedules). On discovery failure the test now stops Chrome
+  cleanly, re-reads the profile (Chrome flushes on exit —
+  distinguishes "registered but worker never appeared" from
+  "never installed"), and appends Chrome's stderr tail to
+  the report. Chrome's stderr is captured to a file instead
+  of DEVNULL in both launches — the old code destroyed the
+  only evidence of a silent load failure (the uploaded
+  artifact only carries capture-test-report.txt, so the tail
+  rides inside it).
+- Pipe and port are never combined in one launch
+  (Puppeteer's launcher asserts pipe XOR port): install in
+  launch A (pipe), test in launch B (port 9222).
+
+Verified locally: `py_compile` OK; 14 synthetic pipe tests
+pass against a fake Chrome speaking \0-delimited CDP on
+fds 3/4 (happy path probe + loadUnpacked; event
+interleaving skipped; 1-byte chunked replies reassembled;
+wrong id returned as-is for the caller to fail; error reply
+-> RuntimeError; early exit -> RuntimeError; silence ->
+TimeoutError; install fn returns the installed id; both
+Preferences files path-match; no match; missing files;
+stderr tail). Those tests validate the harness code only —
+Chrome's side of the pipe is covered by Chromium's
+documented behaviour, not by the fake. Phase 1 dry-run green
+locally against the release host (ping/get_settings/
+download_link + pending_links row). Full engine suite
+413/413, 0 failed; `cargo check --tests` 0 warnings; `npm
+run build` passes; extension validators pass. Phases 2–3
+need the CI run.
+
+Note: this still does NOT explain the user's PC failure
+(his extension shows the stable id; the host runs
+standalone; no crash in Event Viewer). If run #3 reaches
+the popup and fails there with "could not reach the host",
+that reproduces his failure on the runner for the first
+time and the iteration continues from the popup's error,
+not from discovery.
+
 ## Known limitations, not bugs (round-24 additions)
 
 - The Tauri shell never compiles or runs on this VM, so a

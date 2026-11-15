@@ -15,27 +15,34 @@ pinned file must answer ok with a ``pending_link_id`` — then the
 row is read back from SQLite and must be there, source
 ``browser``, status ``pending``.
 
-Phase 2 — real browser transport: load the unpacked extension in
-headless Chrome, discover its extension ID, and verify the
-GENUINE installed handshake: the MSI must have written the
-HKCU native-messaging registry key and shipped the host manifest
-+ fetchline-host.exe into the install dir. The test reads the
-key and the installed manifest and checks they point at the
-installed host with the extension's stable id — it does NOT
-write its own manifest or key (that was the old runner-only
-workaround for the packaging gap; the installer now provides
-both). Then it opens popup.html and polls its status text over
-CDP until it reports "Connected to the Fetchline desktop app".
-This is the step that proves Chrome itself can spawn the
-installed host — Phase 1 alone only proves the host binary, not
-Chrome's side of it. The extension id is stable because
-manifest.json carries a public `key` (Chrome derives the id
-from it); the test derives the expected id from that key and
-requires the discovered id to match it. Discovery looks for a
-CDP target carrying the EXPECTED id (BUG-042: /json/list also
-lists Chrome's built-in Hangouts component extension, whose id
-used to be mistaken for ours) and falls back to the Preferences
-entry for the extension dir, which Chrome writes on registration.
+Phase 2 — real browser transport: install the unpacked extension
+in headless Chrome with the CDP ``Extensions.loadUnpacked``
+command (pipe transport — branded Chrome 137+ silently ignores
+the old ``--load-extension`` flag, so the extension was never
+registered: no worker in /json/list, nothing in Preferences),
+discover its extension ID, and verify the GENUINE installed
+handshake: the MSI must have written the HKCU native-messaging
+registry key and shipped the host manifest + fetchline-host.exe
+into the install dir. The test reads the key and the installed
+manifest and checks they point at the installed host with the
+extension's stable id — it does NOT write its own manifest or
+key (that was the old runner-only workaround for the packaging
+gap; the installer now provides both). Then it opens popup.html
+and polls its status text over CDP until it reports "Connected
+to the Fetchline desktop app". This is the step that proves
+Chrome itself can spawn the installed host — Phase 1 alone only
+proves the host binary, not Chrome's side of it. The extension
+id is stable because manifest.json carries a public `key`
+(Chrome derives the id from it); the test derives the expected
+id from that key and requires the discovered id to match it.
+Discovery looks for a CDP target carrying the EXPECTED id
+(BUG-042: /json/list also lists Chrome's built-in Hangouts
+component extension, whose id used to be mistaken for ours)
+and falls back to the Preferences / Secure Preferences entry
+for the extension dir, which Chrome writes on registration.
+Chrome's stderr is captured to a file (and its tail appended
+to the report on failure) instead of being discarded — a
+silent extension-load failure leaves no other trace.
 
 Phase 3 — drain to file: launch the installed desktop app,
 wait for it to drain the queue (startup + 30 s tick) and download
@@ -75,6 +82,7 @@ import base64
 import hashlib
 import json
 import os
+import queue
 import re
 import shutil
 import sqlite3
@@ -82,6 +90,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -247,21 +256,298 @@ def find_expected_target_id(port, expected_id, timeout=20):
     return None, sorted(seen)
 
 
-def extension_id_from_preferences(profile_dir, extension_dir):
-    """Fallback: the ID is stored in the profile's Preferences once
-    the unpacked extension is installed; its ``path`` is the dir."""
-    prefs_path = os.path.join(profile_dir, "Default", "Preferences")
-    try:
-        with open(prefs_path, "r", encoding="utf-8") as f:
-            prefs = json.load(f)
-    except (OSError, ValueError):
-        return None
-    settings = prefs.get("extensions", {}).get("settings", {})
+def extension_id_from_profile(profile_dir, extension_dir):
+    """Fallback: the ID is stored in the profile once the extension
+    is a real install. Chrome keeps the registration in
+    ``Default/Preferences`` (``extensions.settings``) and mirrors
+    protected extension data in ``Default/Secure Preferences`` —
+    check BOTH files: a freshly started Chrome may not have
+    flushed the live registration to disk yet, and the two files
+    are written on different schedules. Returns (id_or_None,
+    source_file_or_None). The path must match the extension dir,
+    so an id can only come back for the extension this test
+    installed, never for a stray entry."""
     want = os.path.normcase(os.path.abspath(extension_dir))
-    for ext_id, entry in settings.items():
-        if isinstance(entry, dict) and os.path.normcase(entry.get("path", "")) == want:
-            return ext_id
-    return None
+    for name in ("Preferences", "Secure Preferences"):
+        prefs_path = os.path.join(profile_dir, "Default", name)
+        try:
+            with open(prefs_path, "r", encoding="utf-8") as f:
+                prefs = json.load(f)
+        except (OSError, ValueError):
+            continue
+        settings = prefs.get("extensions", {}).get("settings", {})
+        for ext_id, entry in settings.items():
+            if isinstance(entry, dict) and os.path.normcase(entry.get("path", "")) == want:
+                return ext_id, name
+    return None, None
+
+
+def chrome_stderr_tail(stderr_path, n=30):
+    """Last ``n`` non-empty lines of Chrome's stderr log (the
+    launch writes it to a file because the step log is the only
+    evidence the CI artifact carries). Missing/unreadable file
+    yields an empty list — never a crash."""
+    try:
+        with open(stderr_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = [ln.rstrip("\n") for ln in f if ln.strip()]
+    except OSError:
+        return []
+    return lines[-n:]
+
+
+def stop_chrome(proc):
+    """Terminate a Chrome Popen object if it is still running.
+    Idempotent: safe to call twice (the phase's finally block
+    calls it again after a failure path already stopped Chrome)."""
+    if proc is None:
+        return
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            proc.wait(timeout=10)
+    except Exception:  # noqa: BLE001 - fall back to kill
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+class PipeCDP:
+    """Minimal CDP client over Chrome's --remote-debugging-pipe.
+
+    Chrome speaks JSON messages separated by NUL bytes on the
+    pipe: the client writes commands, Chrome writes replies and
+    events back. This transport is the ONLY way to reach the
+    ``Extensions`` CDP domain (it is unavailable over the
+    websocket/port transport), and ``Extensions.loadUnpacked``
+    is the supported way to install an unpacked extension in a
+    branded Chrome — see install_extension_via_pipe().
+
+    Transport setup (Chromium's own pipe_builder.cc, used by
+    ChromeDriver): on POSIX Chrome reads commands on fd 3 and
+    writes replies on fd 4; on Windows the parent passes the
+    two pipe HANDLE values with --remote-debugging-io-pipes
+    (inherited handles keep their value in the child) and
+    Chrome reads/writes those handles. The reader runs on a
+    thread because select() cannot wait on a pipe on Windows.
+    """
+
+    def __init__(self, chrome_exe, profile_dir, stderr_path):
+        self._stderr_path = stderr_path
+        self._queue = queue.Queue()
+        self._next_id = 0
+        self._write_fd = None
+        self._read_fd = None
+        # Pipe A: parent -> child (commands). Parent keeps wA,
+        # child reads rA. Pipe B: child -> parent (replies).
+        # Parent reads rB, child writes wB.
+        rA, wA = os.pipe()
+        rB, wB = os.pipe()
+        args = [
+            chrome_exe,
+            "--headless=new",
+            "--no-first-run",
+            "--no-sandbox",
+            "--disable-gpu",
+            f"--user-data-dir={profile_dir}",
+            "--remote-debugging-pipe",
+            "--enable-unsafe-extension-debugging",
+            "about:blank",
+        ]
+        if os.name == "nt":
+            import msvcrt
+
+            os.set_inheritable(rA, True)
+            os.set_inheritable(wB, True)
+            in_handle = msvcrt.get_osfhandle(rA)
+            out_handle = msvcrt.get_osfhandle(wB)
+            args.append(
+                "--remote-debugging-io-pipes=%d,%d" % (in_handle, out_handle)
+            )
+            child_fds = (rA, wB)
+            self._write_fd = wA
+            self._read_fd = rB
+        else:
+            # POSIX: Chrome reads commands on fd 3, writes on fd 4.
+            # Move the parent ends out of the way first (fresh
+            # fds), then place the child ends on 3/4: dup2 closes
+            # its target first, so a naive order could close a
+            # pipe end still needed (e.g. dup2(wB, 4) closing wA
+            # when the pipes came back as 3,4,5,6).
+            self._write_fd = os.dup(wA)
+            self._read_fd = os.dup(rB)
+            os.close(wA)
+            os.close(rB)
+            if rA != 3:
+                os.dup2(rA, 3)
+                os.close(rA)
+            if wB != 4:
+                os.dup2(wB, 4)
+                os.close(wB)
+            child_fds = (3, 4)
+        err = open(stderr_path, "wb")
+        self._err_file = err
+        try:
+            self._proc = subprocess.Popen(
+                args,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=err,
+                pass_fds=child_fds,
+            )
+        except Exception:
+            err.close()
+            raise
+        # The parent's copies of the child ends must close, or
+        # the reader would never see EOF when Chrome exits.
+        if os.name == "nt":
+            os.close(rA)
+            os.close(wB)
+        else:
+            os.close(3)
+            os.close(4)
+        self._reader = threading.Thread(target=self._read_loop, daemon=True)
+        self._reader.start()
+
+    def _read_loop(self):
+        buf = b""
+        try:
+            while True:
+                chunk = os.read(self._read_fd, 65536)
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\0" in buf:
+                    raw, buf = buf.split(b"\0", 1)
+                    if not raw:
+                        continue
+                    try:
+                        msg = json.loads(raw.decode("utf-8"))
+                    except ValueError:
+                        continue
+                    self._queue.put(msg)
+        except OSError:
+            pass
+        finally:
+            self._queue.put(None)  # EOF marker
+
+    def call(self, method, params=None, timeout=30):
+        """Send one CDP command and wait for its reply, skipping
+        events (messages with no matching id). Raises
+        TimeoutError / RuntimeError with Chrome's own error text
+        when the reply is an error or the browser dies first."""
+        self._next_id += 1
+        mid = self._next_id
+        payload = json.dumps(
+            {"id": mid, "method": method, "params": params or {}}
+        ).encode("utf-8") + b"\0"
+        os.write(self._write_fd, payload)
+        deadline = time.time() + timeout
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"no reply to {method} in {timeout}s (Chrome may not have started)"
+                )
+            if self._proc.poll() is not None:
+                raise RuntimeError(
+                    f"Chrome exited (code {self._proc.returncode}) while waiting for {method}"
+                )
+            try:
+                msg = self._queue.get(timeout=min(remaining, 1))
+            except queue.Empty:
+                continue
+            if msg is None:
+                code = self._proc.poll()
+                if code is not None:
+                    raise RuntimeError(
+                        f"Chrome exited (code {code}) — the DevTools pipe closed"
+                    )
+                raise RuntimeError("Chrome closed the DevTools pipe")
+            if msg.get("id") != mid:
+                continue  # event, or another call's reply
+            if "error" in msg:
+                raise RuntimeError(f"{method} failed: {msg['error']}")
+            return msg.get("result", {})
+
+    def close(self):
+        stop_chrome(self._proc)
+        try:
+            os.close(self._write_fd)
+        except OSError:
+            pass
+        try:
+            os.close(self._read_fd)
+        except OSError:
+            pass
+        self._reader.join(timeout=5)
+        try:
+            self._err_file.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def install_extension_via_pipe(chrome_exe, extension_dir, profile_dir, expected_id):
+    """Install the unpacked extension with Chrome's
+    ``Extensions.loadUnpacked`` CDP command and return the
+    installed id.
+
+    WHY NOT --load-extension (BUG-042 follow-up, root cause):
+    branded Google Chrome REMOVED --load-extension in v137
+    (Chromium RFC, March 2025 — the flag was abused to push
+    unwanted software). Chrome 126+ had already made it
+    ephemeral (extension accessible but never registered in
+    the profile: no service worker, no Preferences entry);
+    v137 dropped it outright — the flag is accepted and the
+    extension is silently never registered. That is exactly
+    what run #2 logged: only component extensions in
+    /json/list, nothing in Preferences. Adding
+    --enable-unsafe-extension-debugging does NOT restore it
+    on branded Chrome 137+ (verified against Chrome 151).
+    The supported replacements are Chromium / Chrome for
+    Testing (where --load-extension still works) or installing
+    through CDP — and this test must run against the branded
+    Chrome the user actually has, so it uses the CDP route:
+    Extensions.loadUnpacked writes to Secure Preferences
+    exactly like clicking "Load unpacked" in
+    chrome://extensions, so the extension becomes a real
+    install with a normal service-worker lifecycle. The
+    command exists only on the pipe transport, gated on
+    --remote-debugging-pipe + --enable-unsafe-extension-
+    debugging (web-ext's approach since Chrome 126).
+
+    The strict check is unchanged: the returned id must equal
+    the stable id derived from manifest.json's key — a
+    path-derived id would fail here, not later."""
+    stderr_path = os.path.abspath("chrome-install-stderr.log")
+    log("  installing extension via CDP pipe (Extensions.loadUnpacked) — "
+        "--load-extension is ignored by branded Chrome 137+")
+    pipe = None
+    try:
+        pipe = PipeCDP(chrome_exe, profile_dir, stderr_path)
+        pipe.call("Browser.getVersion", timeout=60)  # readiness probe
+        result = pipe.call(
+            "Extensions.loadUnpacked",
+            {"path": os.path.abspath(extension_dir)},
+            timeout=60,
+        )
+    except (TimeoutError, RuntimeError, OSError) as e:
+        for line in chrome_stderr_tail(stderr_path, 30):
+            log("    chrome install stderr: " + line)
+        fail("browser", f"could not install the extension via CDP pipe: {e}")
+    finally:
+        if pipe is not None:
+            pipe.close()
+    installed_id = result.get("id") if isinstance(result, dict) else None
+    if not installed_id:
+        for line in chrome_stderr_tail(stderr_path, 30):
+            log("    chrome install stderr: " + line)
+        fail(
+            "browser",
+            f"Extensions.loadUnpacked returned no id: {result!r}",
+        )
+    log(f"  CDP install returned id {installed_id}")
+    return installed_id
 
 
 def chrome_id_from_key(key_b64):
@@ -383,25 +669,56 @@ def phase_browser(chrome_exe, extension_dir, host_exe):
     # failure more slowly.
     expected_id = verify_installed_handshake(extension_dir, host_exe)
     profile_dir = tempfile.mkdtemp(prefix="fl-chrome-profile-")
-    chrome = subprocess.Popen(
-        [
-            chrome_exe,
-            "--headless=new",
-            "--no-first-run",
-            "--no-sandbox",
-            "--disable-gpu",
-            f"--user-data-dir={profile_dir}",
-            "--remote-debugging-port=9222",
-            f"--load-extension={extension_dir}",
-            "about:blank",
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    chrome_stderr_path = os.path.abspath("chrome-stderr.log")
+    chrome = None
+    chrome_err = None
     try:
+        # Install the extension for real (BUG-042 follow-up):
+        # branded Chrome 137+ silently ignores --load-extension,
+        # so the extension must be registered through CDP. The
+        # install writes to Secure Preferences, exactly like
+        # "Load unpacked" in chrome://extensions — after this the
+        # extension has a normal service-worker lifecycle and a
+        # later Chrome launch loads it from the profile.
+        installed_id = install_extension_via_pipe(
+            chrome_exe, extension_dir, profile_dir, expected_id
+        )
+        if installed_id != expected_id:
+            fail(
+                "browser",
+                f"CDP install returned id {installed_id}, not the stable id "
+                f"{expected_id} derived from manifest.json's key — the "
+                "extension was not installed with its shipped key",
+            )
+        log("  installed id matches the stable id from manifest.json's key")
+        # Test launch: NO --load-extension (dead in branded Chrome
+        # 137+ — it would be silently ignored); the extension
+        # loads from the profile it was just registered in, with
+        # --enable-unsafe-extension-debugging as the install step
+        # requires. Chrome's stderr goes to a file so a load
+        # failure leaves evidence in the uploaded report instead
+        # of vanishing into DEVNULL (the old code threw it away).
+        chrome_err = open(chrome_stderr_path, "wb")
+        chrome = subprocess.Popen(
+            [
+                chrome_exe,
+                "--headless=new",
+                "--no-first-run",
+                "--no-sandbox",
+                "--disable-gpu",
+                f"--user-data-dir={profile_dir}",
+                "--remote-debugging-port=9222",
+                "--enable-unsafe-extension-debugging",
+                "about:blank",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=chrome_err,
+        )
         try:
             chrome_targets(9222, timeout=30)
         except TimeoutError as e:
+            for line in chrome_stderr_tail(chrome_stderr_path, 30):
+                log("    chrome stderr: " + line)
             fail("browser", str(e))
         # The extension's service worker starts lazily, so poll for
         # a target carrying the expected id. Any other
@@ -420,12 +737,31 @@ def phase_browser(chrome_exe, extension_dir, host_exe):
             # Preferences is written when Chrome registers the
             # extension; poll briefly in case it is not flushed yet.
             pref_deadline = time.time() + 10
+            pref_source = None
             while time.time() < pref_deadline:
-                ext_id = extension_id_from_preferences(profile_dir, extension_dir)
+                ext_id, pref_source = extension_id_from_profile(profile_dir, extension_dir)
                 if ext_id:
                     break
                 time.sleep(1)
+            if ext_id:
+                log(f"  extension ID from {pref_source}: {ext_id}")
         if not ext_id:
+            # Last diagnostic before failing: Chrome flushes the
+            # profile on a clean exit, so stop it cleanly and
+            # re-read — if the extension IS in the profile now, it
+            # was registered but its worker never appeared in CDP
+            # (a different failure from "never installed"); if it
+            # is still absent, the install did not stick. Either
+            # way the report carries Chrome's stderr tail, which
+            # is what the next diagnosis needs.
+            stop_chrome(chrome)
+            chrome = None
+            post_id, post_src = extension_id_from_profile(profile_dir, extension_dir)
+            if post_id:
+                log(f"  after clean shutdown, {post_src} DOES list the extension "
+                    f"(id {post_id}) — registered, but its worker never appeared in CDP")
+            for line in chrome_stderr_tail(chrome_stderr_path, 30):
+                log("    chrome stderr: " + line)
             fail("browser", "could not discover the extension ID (no chrome-extension:// target with the expected id and no Preferences entry)")
         log(f"  extension ID: {ext_id}")
         if ext_id != expected_id:
@@ -501,15 +837,15 @@ def phase_browser(chrome_exe, extension_dir, host_exe):
                 pass
         log(f"  popup status text: {status_text!r}")
         if "Connected to the Fetchline desktop app" not in status_text:
+            for line in chrome_stderr_tail(chrome_stderr_path, 30):
+                log("    chrome stderr: " + line)
             fail("browser", f"popup did not report a connection (status text: {status_text!r}) — Chrome could not reach the host")
         log("PHASE 2 PASSED")
     finally:
-        try:
-            chrome.terminate()
-            chrome.wait(timeout=10)
-        except Exception:  # noqa: BLE001
+        stop_chrome(chrome)
+        if chrome_err is not None:
             try:
-                chrome.kill()
+                chrome_err.close()
             except Exception:  # noqa: BLE001
                 pass
         shutil.rmtree(profile_dir, ignore_errors=True)
