@@ -61,10 +61,10 @@ and the menu/watcher wiring itself is covered by the Node
 fake-``chrome`` tests (``npm run test:extension*``).
 
 Usage (PowerShell, from the repo root):
-  python scripts/capture-test.py --host-exe "C:\\Program Files\\Fetchline\\fetchline-host.exe"
+  python scripts/capture-test.py --host-exe "C:\\Program Files\\Sonic Manager\\fetchline-host.exe"
     --db-path <app.db> --extension-dir app/extension
     --chrome-exe "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
-    --app-exe "C:\\Program Files\\Fetchline\\fetchline.exe"
+    --app-exe "C:\\Program Files\\Sonic Manager\\fetchline.exe"
     --url <pinned file URL> --expected-sha256 <hex>
     --downloads-dir <Downloads folder>
     [--skip-browser] [--skip-drain]

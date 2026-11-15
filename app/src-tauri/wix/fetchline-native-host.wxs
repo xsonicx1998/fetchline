@@ -11,7 +11,7 @@
   Each key's default value is the installed manifest path, resolved
   at install time via [INSTALLDIR] — so a custom install folder
   still works (unlike the manifests' own "path" field, which ships
-  with the default C:\Program Files\Fetchline\fetchline-host.exe;
+  with the default C:\Program Files\Sonic Manager\fetchline-host.exe;
   see the README checklist if the user picks a custom folder).
 
   Chrome and Edge share the Chromium manifest (allowed_origins);

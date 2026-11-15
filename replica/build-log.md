@@ -2685,3 +2685,31 @@ itself, runner-only). Packaging only — no engine change, no licence work.
   ("file finished before the pause") did not reproduce in run #9
   and is not a real defect; if it recurs it needs a test-only
   timing fix (wait-for-active before pausing).
+
+## Round 42 — MSI host-manifest path fix (BUG-046) — 2026-11-16
+
+- BUG-046 (see bugs.md): run #11's capture test failed Phase 2 at
+  the manifest check — the MSI ships `com.fetchline.host.json` and
+  `com.fetchline.host.firefox.json` with the old hardcoded
+  `"path": "C:\\Program Files\\Fetchline\\fetchline-host.exe"`, but
+  the rename moved the install folder to `C:\Program Files\Sonic
+  Manager\`. The registry key was already correct; only the
+  manifest FILE's path field was stale. Only NSIS rewrites the
+  path at install time, so the MSI was broken for every default
+  install since the rename.
+- Fix (this push): both manifests' `path` now reads `C:\Program
+  Files\Sonic Manager\fetchline-host.exe`. Stale old-path references
+  updated in the comments of `register-native-host.ps1`,
+  `fetchline-native-host.nsh`, `fetchline-native-host.wxs`, and the
+  `capture-test.py` docstring example (cosmetic). No identifier
+  changed; workflow file untouched (browser route only).
+- Verified on Linux: both manifests parse as JSON (name
+  `com.fetchline.host`, type `stdio`, allowed_origins /
+  allowed_extensions unchanged); full engine suite **416/416 pass,
+  0 failed** (confirmed twice); `cargo check --tests` 0 warnings;
+  `npm run build` passes. Repo-wide grep: no
+  `C:\Program Files\Fetchline` left in code, only historical
+  build-log entries.
+- This run also finally exercises the BUG-045 popup-string fix —
+  Phase 2 previously died before the popup handshake, so the popup
+  check is unproven until this run.

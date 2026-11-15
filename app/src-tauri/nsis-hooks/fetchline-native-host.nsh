@@ -9,7 +9,7 @@
 ; $INSTDIR set:
 ;   1. Point both shipped manifests at the real install dir. The
 ;      manifests ship with the default MSI path
-;      (C:\Program Files\Fetchline\fetchline-host.exe), which is
+;      (C:\Program Files\Sonic Manager\fetchline-host.exe), which is
 ;      wrong for the default NSIS install (per-user, under
 ;      %LOCALAPPDATA%) and for any custom install dir, so the
 ;      "path" field is rewritten by register-native-host.ps1

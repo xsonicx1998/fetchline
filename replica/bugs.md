@@ -3980,6 +3980,52 @@ anywhere the test or the popup reads.
 Status: fixed as described. The fix rides in the same push as the
 theme finish below, so the run it triggers is the proof.
 
+## Round 42 — BUG-046 (MSI ships a host manifest pointing at the old install folder) — 2026-11-16
+
+BUG-046 — product bug (packaging), proven from run #11's
+capture-test-report.txt. Phase 1 PASSED (host protocol — BUG-043
+fix holds); Phase 2 FAILED at the manifest check: `installed
+manifest path is 'C:\Program Files\Fetchline\fetchline-host.exe',
+expected the installed host 'C:\Program Files\Sonic Manager\
+fetchline-host.exe'`. The registry key correctly points at
+`C:\Program Files\Sonic Manager\com.fetchline.host.json`, but the
+manifest FILE's `path` field is stale.
+
+Root cause: `app/extension/com.fetchline.host.json:7` and
+`app/extension/com.fetchline.host.firefox.json:7` still hardcode
+`"path": "C:\\Program Files\\Fetchline\\fetchline-host.exe"`. The
+MSI bundles these manifests as-is via bundle.resources; only the
+NSIS installer rewrites the path at install time
+(register-native-host.ps1). The Round 40 rename moved the install
+folder to `C:\Program Files\Sonic Manager\`, so the MSI's manifest
+points at a host that no longer exists there. Run #7 was green
+pre-rename because the hardcoded path matched the install folder
+then. Note the MSI caveat from the packaging fix still applies in
+the other direction: a custom MSI install folder breaks the
+manifest path again — the default install is what CI tests, and
+the NSIS installer rewrites the path for any folder.
+
+Fix (product, this round): both manifests' `path` now reads
+`C:\Program Files\Sonic Manager\fetchline-host.exe`. The stale
+old-path references in the comments of register-native-host.ps1,
+fetchline-native-host.nsh, fetchline-native-host.wxs, and the
+capture-test.py docstring example were updated to the new path
+(cosmetic — the workflow passes the real paths explicitly). No
+identifier changed (`com.fetchline.host`, `com.fetchline.app`
+untouched); the workflow file was not touched (browser route
+only).
+
+Status: fixed as described. Verified on Linux: both manifests
+parse as JSON with name `com.fetchline.host`, type `stdio`, and
+unchanged allowed_origins/allowed_extensions; full engine suite
+416/416 pass, 0 failed; `cargo check --tests` 0 warnings; `npm
+run build` passes. A repo-wide grep finds no remaining
+`C:\Program Files\Fetchline` in code — only historical
+build-log.md entries, which are records of the past and are left
+as-is. The run this push triggers is the proof — it also finally
+exercises the BUG-045 popup-string fix, since Phase 2 previously
+died before the popup handshake.
+
 ## Known limitations, not bugs (round-24 additions)
 
 - The Tauri shell never compiles or runs on this VM, so a

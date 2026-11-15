@@ -4,6 +4,6 @@
   ],
   "description": "Fetchline native messaging host \u2014 lets the Fetchline browser extension send links to the Fetchline desktop app",
   "name": "com.fetchline.host",
-  "path": "C:\\Program Files\\Fetchline\\fetchline-host.exe",
+  "path": "C:\\Program Files\\Sonic Manager\\fetchline-host.exe",
   "type": "stdio"
 }

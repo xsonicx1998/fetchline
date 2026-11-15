@@ -1,7 +1,7 @@
 # Fetchline native-messaging host manifest fix-up (NSIS POSTINSTALL).
 #
 # The installer ships the two host manifests with the default MSI
-# path (C:\Program Files\Fetchline\fetchline-host.exe). The default
+# path (C:\Program Files\Sonic Manager\fetchline-host.exe). The default
 # NSIS install is per-user under %LOCALAPPDATA% (and the user may
 # pick any folder), so the "path" field must point at the real
 # install dir or Chrome/Firefox can never spawn the host.
