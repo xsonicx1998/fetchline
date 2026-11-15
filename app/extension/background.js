@@ -1,0 +1,380 @@
+// Fetchline browser extension — background service worker (MV3).
+//
+// What it does, and nothing more:
+//  * Adds a "Download with Fetchline" item to the right-click menu on
+//    links and on image / video / audio elements (the menu API hands
+//    us the URL, so no content script is injected into any page).
+//  * Watches downloads the browser starts. When catching is on, the
+//    site is not opted out and the file type is in the catch list,
+//    it cancels the browser download and hands the URL to the
+//    desktop app instead. Page loads are never blocked.
+//  * Records every hand-off in chrome.storage.local for the popup
+//    to show (Milestone 2): the last hand-off's outcome and time,
+//    and the pending count the host reports — never a URL.
+//  * Talks to the desktop app over Native Messaging
+//    (chrome.runtime.sendNativeMessage, host "com.fetchline.host").
+//
+// What it deliberately does NOT do: it never reads page content,
+// and it never logs a URL or a message body — failures are counted,
+// not printed. Since the S13 finish it DOES send cookies, but only
+// the cookies for the exact URL being handed over (see cookiesFor
+// below): a login-only link needs its session cookie on the probe
+// and on the download itself, and sending anything else would be
+// pointless — the host attaches them to that download's requests
+// only, for that host only, and never logs them.
+
+const HOST_NAME = "com.fetchline.host";
+
+// File types the download watcher hands to Fetchline. A page that
+// only links to one of these still needs a click or a right-click;
+// the watcher only fires for downloads the browser itself started.
+// Keep this list conservative: small web assets (images on a page,
+// stylesheets, scripts) are not downloads and never reach us.
+const DEFAULT_CATCH_EXTENSIONS = [
+  "zip", "rar", "7z", "tar", "gz",
+  "exe", "msi", "dmg", "iso", "apk",
+  "pdf", "epub",
+  "mp4", "mkv", "avi", "mov", "webm",
+  "mp3", "flac", "wav", "aac", "ogg",
+  "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+];
+
+const STORE_KEYS = {
+  catchEnabled: "catchEnabled",       // extension catch toggle, default true
+  excludedSites: "excludedSites",     // extension-local per-site opt-outs
+  desktopIntegration: "desktopIntegration", // last known desktop flag (null = unknown)
+  desktopExcluded: "desktopExcluded", // last known desktop excluded-sites list
+  pendingCount: "pendingCount",       // links waiting in pending_links (Milestone 2)
+  lastHandoff: "lastHandoff",         // {at, ok, message} of the last hand-off (Milestone 2)
+};
+
+function hostOf(url) {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function extensionOf(url) {
+  try {
+    const path = new URL(url).pathname;
+    const dot = path.lastIndexOf(".");
+    if (dot === -1) return "";
+    return path.slice(dot + 1).toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+// The extension of a download's local filename ("file.zip", or a
+// full path like "/home/user/Downloads/file.zip" — Chrome's
+// downloads API reports the absolute local path). This must NOT go
+// through extensionOf: a bare filename is not a URL, and
+// `new URL("file.zip")` throws, so extensionOf returns "" and the
+// watcher would skip every download that already has a filename
+// (BUG-023: the watcher was effectively dead — see watcher.test.js).
+function extensionOfFilename(filename) {
+  if (!filename) return "";
+  const base = filename.split(/[\\/]/).pop() || "";
+  const dot = base.lastIndexOf(".");
+  if (dot === -1) return "";
+  return base.slice(dot + 1).toLowerCase();
+}
+
+function isExcluded(host, state) {
+  if (!host) return false;
+  const lists = [state[STORE_KEYS.excludedSites] || [], state[STORE_KEYS.desktopExcluded] || []];
+  return lists.some((list) =>
+    list.some((entry) => {
+      const e = String(entry).toLowerCase();
+      return host === e || host.endsWith(`.${e}`);
+    }),
+  );
+}
+
+async function loadState() {
+  const stored = await chrome.storage.local.get([
+    STORE_KEYS.catchEnabled,
+    STORE_KEYS.excludedSites,
+    STORE_KEYS.desktopIntegration,
+    STORE_KEYS.desktopExcluded,
+    STORE_KEYS.pendingCount,
+    STORE_KEYS.lastHandoff,
+  ]);
+  return {
+    [STORE_KEYS.catchEnabled]: stored[STORE_KEYS.catchEnabled] !== false, // default ON
+    [STORE_KEYS.excludedSites]: stored[STORE_KEYS.excludedSites] || [],
+    [STORE_KEYS.desktopIntegration]: stored[STORE_KEYS.desktopIntegration] ?? null,
+    [STORE_KEYS.desktopExcluded]: stored[STORE_KEYS.desktopExcluded] || [],
+    [STORE_KEYS.pendingCount]: stored[STORE_KEYS.pendingCount] ?? null,
+    [STORE_KEYS.lastHandoff]: stored[STORE_KEYS.lastHandoff] || null,
+  };
+}
+
+// Record the last hand-off for the popup to show (Milestone 2):
+// whether it worked, when, and what the host said. Only the outcome
+// is stored — never a URL or a message body.
+async function recordHandoff(ok, message, pendingCount) {
+  const update = {
+    [STORE_KEYS.lastHandoff]: { at: Date.now(), ok, message: message || "" },
+  };
+  if (typeof pendingCount === "number") {
+    update[STORE_KEYS.pendingCount] = pendingCount;
+  }
+  await chrome.storage.local.set(update).catch(() => {});
+}
+
+function sendToHost(message) {
+  return new Promise((resolve, reject) => {
+    try {
+      chrome.runtime.sendNativeMessage(HOST_NAME, message, (reply) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        resolve(reply || null);
+      });
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+// Cookies for one hand-off (S13 finish): the cookies the browser
+// holds for the exact URL being handed over, as name/value pairs
+// only — no domain, path, expiry or flags, because the Cookie
+// header needs nothing else and the host must never learn more
+// than it needs. The host attaches them to that download's probe
+// and segment requests, for that host only; it never logs them,
+// and the desktop app keeps them in memory only (a restart drops
+// them) and wipes them from the pending row when the drain decides
+// the link. No cookies are ever read for a URL that is not being
+// handed over, and a page the host expands itself (Download All)
+// carries none — the host cannot use them there. Guarded: a
+// context without chrome.cookies simply sends no cookies.
+async function cookiesFor(url) {
+  try {
+    if (!chrome.cookies || typeof chrome.cookies.getAll !== "function") return [];
+    const all = await chrome.cookies.getAll({ url });
+    return (all || []).map((c) => ({ name: c.name, value: c.value }));
+  } catch {
+    return [];
+  }
+}
+
+// Ask the desktop app for its browser-integration flag and excluded
+// sites, and cache them. The desktop setting is the direction of
+// truth: when it is off, this extension must not catch anything.
+// A missing host (desktop app not installed / not running) is a
+// normal state, not an error to surface — catching simply stays
+// governed by the extension's own toggle until the host answers.
+async function refreshDesktopSettings() {
+  try {
+    const reply = await sendToHost({ type: "get_settings" });
+    if (reply && reply.ok) {
+      const update = {
+        [STORE_KEYS.desktopIntegration]: reply.browser_integration !== false,
+        [STORE_KEYS.desktopExcluded]: reply.excluded_sites || [],
+      };
+      if (typeof reply.pending_count === "number") {
+        update[STORE_KEYS.pendingCount] = reply.pending_count;
+      }
+      await chrome.storage.local.set(update);
+    }
+  } catch {
+    // Host unreachable: keep the last cached values.
+  }
+}
+
+async function handToFetchline(message) {
+  // Attach the target URL's cookies, if the browser has any: the
+  // download_link URL, or the chosen video variant's URL. A
+  // download_all carries no cookies — the host expands the page
+  // itself (see cookiesFor). Only a non-empty list is attached, so
+  // a hand-off with no cookies for its URL is byte-identical to
+  // the old no-cookie message.
+  let cookieUrl = null;
+  if (message.type === "download_link" && message.url) cookieUrl = message.url;
+  if (
+    message.type === "video_found" &&
+    message.variants &&
+    message.variants[0] &&
+    message.variants[0].url
+  ) {
+    cookieUrl = message.variants[0].url;
+  }
+  if (cookieUrl) {
+    const cookies = await cookiesFor(cookieUrl);
+    if (cookies.length > 0) message.cookies = cookies;
+  }
+  let reply;
+  try {
+    reply = await sendToHost(message);
+  } catch (err) {
+    await recordHandoff(false, `Could not reach Fetchline: ${err.message || err}`);
+    throw err;
+  }
+  if (reply && reply.ok === false) {
+    const error = reply.error || "Fetchline refused the link";
+    await recordHandoff(false, error);
+    throw new Error(error);
+  }
+  await recordHandoff(
+    true,
+    (reply && reply.message) || "Sent to Fetchline",
+    reply && typeof reply.pending_count === "number" ? reply.pending_count : undefined,
+  );
+  return reply;
+}
+
+// -- context menus -------------------------------------------------------
+
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.contextMenus.create({
+    id: "fetchline-download",
+    title: "Download with Fetchline",
+    contexts: ["link", "image", "video", "audio"],
+  });
+  chrome.contextMenus.create({
+    id: "fetchline-download-all",
+    title: "Download all links on this page with Fetchline",
+    contexts: ["page"],
+  });
+  void refreshDesktopSettings();
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  void refreshDesktopSettings();
+});
+
+chrome.contextMenus.onClicked.addListener(async (info) => {
+  try {
+    if (info.menuItemId === "fetchline-download-all") {
+      // No content script, so the extension cannot list the page's
+      // links itself. The host expands the page: it fetches the page
+      // and enqueues every downloadable link it finds.
+      await handToFetchline({ type: "download_all", page_url: info.pageUrl, links: [] });
+      return;
+    }
+    if (info.menuItemId === "fetchline-download") {
+      // linkUrl for links; srcUrl for media elements.
+      const url = info.linkUrl || info.srcUrl;
+      if (!url) return;
+      await handToFetchline({ type: "download_link", url, referrer: info.pageUrl || null });
+    }
+  } catch {
+    // The user gets no toast from a service worker; the popup shows
+    // the connection state, and the link stays where it was (the
+    // browser download was never started for a menu click).
+  }
+});
+
+// -- download interception -----------------------------------------------
+
+chrome.downloads.onCreated.addListener(async (item) => {
+  try {
+    if (!item || !item.url) return;
+    if (!item.url.startsWith("http://") && !item.url.startsWith("https://")) return;
+    if (item.state && item.state !== "in_progress") return;
+    const state = await loadState();
+    if (!state[STORE_KEYS.catchEnabled]) return;
+    // Desktop setting wins: off means do not catch, whatever the
+    // extension toggle says. Unknown (host never answered) means
+    // the extension toggle decides on its own.
+    if (state[STORE_KEYS.desktopIntegration] === false) return;
+    const host = hostOf(item.url);
+    if (isExcluded(host, state)) return;
+    // The filename's own suffix first (Chrome reports the local
+    // path, which may be the only place the type appears — a
+    // download URL need not end in .zip); fall back to the URL.
+    const ext = extensionOfFilename(item.filename) || extensionOf(item.url);
+    if (!DEFAULT_CATCH_EXTENSIONS.includes(ext)) return;
+    // Cancel the browser download first, then hand the URL over, so
+    // the file is never downloaded twice.
+    await chrome.downloads.cancel({ id: item.id });
+    await chrome.downloads.erase({ id: item.id }).catch(() => {});
+    await handToFetchline({
+      type: "download_link",
+      url: item.url,
+      referrer: item.referrer || null,
+    });
+  } catch {
+    // If the hand-off fails the browser download is already
+    // cancelled; there is no safe automatic retry from here (the
+    // URL would download twice if the first hand-off actually
+    // landed). The user can right-click the link and try again.
+  }
+});
+
+// Let the popup ask for a fresh connection check on demand.
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message && message.type === "refresh_desktop_settings") {
+    refreshDesktopSettings().then(() => sendResponse({ ok: true }));
+    return true;
+  }
+  if (message && message.type === "ping_host") {
+    sendToHost({ type: "ping" })
+      .then((reply) => sendResponse({ ok: !!(reply && reply.ok !== false), reply }))
+      .catch((err) => sendResponse({ ok: false, error: String(err) }));
+    return true;
+  }
+  // Video grabber (S08): the content script reports one chosen
+  // variant, and this worker is the only path to the host — the
+  // content script never talks to Native Messaging itself.
+  if (message && message.type === "video_found") {
+    handToFetchline({
+      type: "video_found",
+      page_url: message.page_url,
+      variants: message.variants || [],
+    })
+      .then((reply) => sendResponse({ ok: true, reply }))
+      .catch((err) => sendResponse({ ok: false, error: String(err) }));
+    return true;
+  }
+  // The content script's scan summary, cached for the popup to read.
+  if (message && message.type === "videos_found") {
+    void chrome.storage.local.set({
+      lastVideoScan: {
+        pageUrl: message.pageUrl,
+        total: message.total || 0,
+        downloadable: message.downloadable || 0,
+        at: Date.now(),
+      },
+    });
+    return false;
+  }
+  // Video grabber (S08): inject the detector into the ACTIVE tab
+  // only, and only because the user clicked "Find videos on this
+  // page" in the popup. activeTab grants temporary access to that
+  // one tab; there is no content_scripts entry, no host permission
+  // and no <all_urls>, so no page is ever scanned unprompted.
+  // Excluded sites and a switched-off desktop flag refuse the scan
+  // here, before anything is injected.
+  if (message && message.type === "scan_page_for_videos") {
+    (async () => {
+      const state = await loadState();
+      if (state[STORE_KEYS.desktopIntegration] === false) {
+        sendResponse({ ok: false, error: "Browser integration is turned off in Fetchline settings" });
+        return;
+      }
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      const tab = tabs[0];
+      if (!tab || !tab.id || !tab.url || !tab.url.startsWith("http")) {
+        sendResponse({ ok: false, error: "This page has no web address to scan." });
+        return;
+      }
+      if (isExcluded(hostOf(tab.url), state)) {
+        sendResponse({ ok: false, error: "This site is opted out — videos here are not scanned." });
+        return;
+      }
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        files: ["video-detect.js", "content.js"],
+      });
+      sendResponse({ ok: true });
+    })().catch((err) => sendResponse({ ok: false, error: String(err) }));
+    return true;
+  }
+  return false;
+});

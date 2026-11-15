@@ -1,0 +1,9 @@
+PHASE 1: host protocol — drive fetchline-host with real frames
+  ping ok: pong
+  get_settings ok: browser_integration=true, pending_count=0
+  download_link ok: pending_link_id=a2dd7c60-2daa-40d5-85bf-90307532d338, pending_count=1
+  pending_links row confirmed: url matches, source=browser, status=pending
+PHASE 1 PASSED
+PHASE 2 SKIPPED (--skip-browser)
+PHASE 3 SKIPPED (--skip-drain)
+CAPTURE TEST PASSED (phases run: host)

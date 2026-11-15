@@ -1,0 +1,18 @@
+# Build outputs and dependencies
+node_modules/
+dist/
+**/target/
+*.log
+.env
+*.part
+*.msi
+*.exe
+
+# Generated build metadata
+app/tsconfig.tsbuildinfo
+
+# OS files
+.DS_Store
+
+# Muse GitHub snapshot sync records (agent-owned, never committed)
+*.muse-github-snapshot-sync.json*

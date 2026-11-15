@@ -1,0 +1,70 @@
+/* Design tokens — IDM rebuild (Tauri desktop)
+   Generated from replica/design/tokens.json. Light theme is the default;
+   dark theme applies with [data-theme="dark"] on <html>.
+   Never use raw hex in components — use these custom properties. */
+
+:root {
+  --color-bg: #ffffff;
+  --color-surface: #f6f7f9;
+  --color-surface-2: #eceef1;
+  --color-surface-raised: #ffffff;
+  --color-border: #e2e5ea;
+  --color-border-input: #8a94a3;
+  --color-text: #171a21;
+  --color-text-muted: #5a6472;
+  --color-text-faint: #7d8794;
+  --color-accent: #6d28d9;
+  --color-accent-hover: #5b21b6;
+  --color-accent-soft: #ede9fe;
+  --color-on-accent: #ffffff;
+  --color-danger: #b42318;
+  --color-danger-soft: #fef3f2;
+  --color-success: #16794c;
+  --color-success-soft: #ecfdf3;
+  --color-warning: #b45309;
+  --color-warning-soft: #fffaeb;
+  --color-info: #175cd3;
+  --color-info-soft: #eff8ff;
+
+  --font-sans: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
+  --space-5: 20px; --space-6: 24px; --space-8: 32px; --space-12: 48px; --space-16: 64px;
+
+  --radius-sm: 6px; --radius-md: 8px; --radius-lg: 12px; --radius-xl: 16px; --radius-pill: 999px;
+
+  --shadow-card: 0 1px 2px rgba(16, 24, 40, .06), 0 1px 3px rgba(16, 24, 40, .10);
+  --shadow-pop: 0 12px 32px rgba(16, 24, 40, .16);
+
+  --motion-fast: 120ms; --motion-base: 200ms; --motion-ease: cubic-bezier(.2, .8, .2, 1);
+}
+
+[data-theme="dark"] {
+  --color-bg: #0e1116;
+  --color-surface: #171b22;
+  --color-surface-2: #1f242e;
+  --color-surface-raised: #222834;
+  --color-border: #2a303c;
+  --color-border-input: #6b7280;
+  --color-text: #f2f4f7;
+  --color-text-muted: #a3abb8;
+  --color-text-faint: #7d8794;
+  --color-accent: #a78bfa;
+  --color-accent-hover: #c4b5fd;
+  --color-accent-soft: #2e2440;
+  --color-on-accent: #17112b;
+  --color-danger: #f97066;
+  --color-danger-soft: #3a1d1d;
+  --color-success: #32d583;
+  --color-success-soft: #12261c;
+  --color-warning: #fdb022;
+  --color-warning-soft: #33270e;
+  --color-info: #84adff;
+  --color-info-soft: #16233d;
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, .30);
+  --shadow-pop: 0 12px 32px rgba(0, 0, 0, .50);
+}
+
+html, body { background: var(--color-bg); color: var(--color-text); font-family: var(--font-sans); }

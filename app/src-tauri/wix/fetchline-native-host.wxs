@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Fetchline native-messaging host registration (S13 packaging fix).
+  WiX fragment for the MSI installer, referenced from
+  tauri.conf.json (bundle.windows.wix.fragmentPaths +
+  componentGroupRefs: ["FetchlineNativeHost"]).
+
+  The MSI ships fetchline-host.exe (externalBin) and the two host
+  manifests (resources) into INSTALLDIR, but the browser only finds
+  the host through registry keys, so the installer must write them.
+  Each key's default value is the installed manifest path, resolved
+  at install time via [INSTALLDIR] — so a custom install folder
+  still works (unlike the manifests' own "path" field, which ships
+  with the default C:\Program Files\Fetchline\fetchline-host.exe;
+  see the README checklist if the user picks a custom folder).
+
+  Chrome and Edge share the Chromium manifest (allowed_origins);
+  Firefox takes the separate file with allowed_extensions (BUG-022).
+  The keys are HKCU, so they land in the installing user's hive —
+  the same convention Tauri itself uses for its InstallDir key in
+  main.wxs. A different Windows user on the same machine would need
+  their own install (or the key added manually).
+
+  Removal is automatic: Windows Installer removes the registry
+  values when these components are uninstalled (each RegistryValue
+  is its component's KeyPath). Win64="yes": the app is x64-only and
+  the keys must go in the 64-bit registry view, where 64-bit Chrome
+  / Edge / Firefox look for them.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="FetchlineNativeHostChrome" Guid="*" Win64="yes">
+        <RegistryValue Root="HKCU"
+                       Key="Software\Google\Chrome\NativeMessagingHosts\com.fetchline.host"
+                       Type="string"
+                       Value="[INSTALLDIR]com.fetchline.host.json"
+                       KeyPath="yes" />
+      </Component>
+      <Component Id="FetchlineNativeHostEdge" Guid="*" Win64="yes">
+        <RegistryValue Root="HKCU"
+                       Key="Software\Microsoft\Edge\NativeMessagingHosts\com.fetchline.host"
+                       Type="string"
+                       Value="[INSTALLDIR]com.fetchline.host.json"
+                       KeyPath="yes" />
+      </Component>
+      <Component Id="FetchlineNativeHostFirefox" Guid="*" Win64="yes">
+        <RegistryValue Root="HKCU"
+                       Key="Software\Mozilla\NativeMessagingHosts\com.fetchline.host"
+                       Type="string"
+                       Value="[INSTALLDIR]com.fetchline.host.firefox.json"
+                       KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+    <ComponentGroup Id="FetchlineNativeHost">
+      <ComponentRef Id="FetchlineNativeHostChrome" />
+      <ComponentRef Id="FetchlineNativeHostEdge" />
+      <ComponentRef Id="FetchlineNativeHostFirefox" />
+    </ComponentGroup>
+  </Fragment>
+</Wix>

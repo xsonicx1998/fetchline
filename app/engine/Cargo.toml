@@ -1,0 +1,28 @@
+[package]
+name = "fetchline-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Download engine for the Fetchline desktop download manager (clean-room rebuild of download-manager behaviour)"
+license = "MIT"
+
+[lib]
+name = "fetchline_engine"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "socks"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+futures-util = "0.3"
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+# Only used by the settings-migration test, which builds a pre-migration
+# database file by hand.
+rusqlite = { version = "0.32", features = ["bundled"] }
+# Only used by real_download_tests.rs (SHA-256 of the pinned file).
+# Test-only: it does not ship in the app.
+sha2 = "0.10"

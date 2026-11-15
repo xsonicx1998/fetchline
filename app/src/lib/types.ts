@@ -1,0 +1,423 @@
+// Types mirror the Rust structs in engine/src (serde field names are
+// snake_case on both sides of the Tauri bridge).
+
+export type DownloadStatus =
+  | 'queued'
+  | 'downloading'
+  | 'paused'
+  | 'complete'
+  | 'error'
+  | 'deleted'
+
+export interface DownloadRow {
+  id: string
+  url: string
+  final_url: string | null
+  filename: string
+  save_path: string
+  category_id: string
+  queue_id: string | null
+  size_bytes: number | null
+  downloaded_bytes: number
+  status: DownloadStatus
+  speed_bps: number
+  eta_seconds: number | null
+  error_message: string | null
+  created_at: string
+  completed_at: string | null
+  /** Per-download speed cap in KB/s (S12); null = no cap. */
+  speed_limit_kbps: number | null
+  /** Paused because the download quota was reached (S12). */
+  quota_paused: boolean
+  /** Antivirus scan result (S14): the outcome of the scanner
+   *  hook run on completion, or null when never scanned. */
+  scan_status: string | null
+  /** The scanner's own report, or the reason the scan failed /
+   *  was skipped. */
+  scan_detail: string | null
+  /** When the scan finished (UTC ISO-8601), or null while
+   *  scanning / never scanned. */
+  scan_scanned_at: string | null
+}
+
+export interface SegmentProgress {
+  segment_index: number
+  start_byte: number
+  end_byte: number | null
+  downloaded_bytes: number
+  status: string
+}
+
+/** One segment's retry wait, as the S03 dialog shows it: `attempt`
+ *  counts the failures so far (1 = the first failure),
+ *  `max_attempts` is the total attempts the settings allow, and
+ *  `retry_in_secs` counts down from the engine's backoff deadline —
+ *  it is recomputed on every progress event, so the dialog's
+ *  countdown is driven by the engine, not by a UI timer. */
+export interface RetryInfo {
+  attempt: number
+  max_attempts: number
+  retry_in_secs: number
+  error: string
+}
+
+export interface ProgressEvent {
+  id: string
+  filename: string
+  downloaded_bytes: number
+  size_bytes: number | null
+  speed_bps: number
+  eta_seconds: number | null
+  status: string
+  segments: SegmentProgress[]
+  /** Set while a segment waits out its retry backoff; null otherwise. */
+  retry: RetryInfo | null
+  /** Antivirus scan result (S14), once known: set on the
+   *  completion event and on the later event the detached scan
+   *  emits; null while the download is still running. */
+  scan: ScanResult | null
+}
+
+/** One antivirus scan's result (S14), as stored on the download
+ *  row and shown in the completion dialog. `status` is one of
+ *  `clean` | `infected` | `scan_failed` | `not_configured` |
+ *  `timed_out` | `scanning`. */
+export interface ScanResult {
+  status: string
+  detail: string | null
+  scanned_at: string | null
+}
+
+export interface CategoryRow {
+  id: string
+  name: string
+  default_folder: string
+  file_extensions: string[]
+  is_builtin: boolean
+}
+
+export interface ProbeInfo {
+  size: number | null
+  accept_ranges: boolean
+  etag: string | null
+  last_modified: string | null
+  filename: string | null
+  final_url: string
+}
+
+/** Mirrors engine QueueRow. `type` is always "queue" for now; the
+ *  scheduler fields are UTC ISO strings or null when unset. */
+export interface QueueRow {
+  id: string
+  name: string
+  type: string
+  is_main: boolean
+  schedule_type: string
+  start_at: string | null
+  stop_at: string | null
+  start_on_startup: boolean
+  on_complete_action: string
+  on_complete_program: string | null
+  /** Periodic synchronisation (S05/F04): minutes between sync runs,
+   *  null unless the queue repeats. Last sync time + per-outcome
+   *  counts (0 when never synced). */
+  sync_interval_minutes: number | null
+  last_sync_at: string | null
+  last_sync_changed: number
+  last_sync_unchanged: number
+  last_sync_removed: number
+  last_sync_failed: number
+  last_sync_skipped: number
+  running: boolean
+  file_count: number
+}
+
+export type QueueScheduleType = 'none' | 'one_time' | 'periodic'
+export type QueueCompleteAction = 'none' | 'open_file' | 'run_program' | 'shutdown' | 'hibernate'
+
+export interface QueueUpdate {
+  schedule_type: QueueScheduleType
+  start_at: string | null
+  stop_at: string | null
+  start_on_startup: boolean
+  on_complete_action: QueueCompleteAction
+  on_complete_program: string | null
+  /** Minutes between sync runs; only for `periodic`, null otherwise. */
+  sync_interval_minutes: number | null
+}
+
+/** One file's outcome in a sync run (engine/src/manager.rs).
+ *  `status` is unchanged | changed | removed | failed | skipped. */
+export interface SyncFileResult {
+  download_id: string
+  filename: string
+  status: string
+  message: string | null
+}
+
+/** The outcome of one sync run over a periodic queue. */
+export interface SyncResult {
+  queue_id: string
+  changed: number
+  unchanged: number
+  removed: number
+  failed: number
+  skipped: number
+  files: SyncFileResult[]
+}
+
+/** The result of one update check (engine/src/update.rs).
+ *  `update_available` only means the dialog should ask the
+ *  user — the check never installs anything, and
+ *  `updater_configured` is false until the Tauri updater plugin
+ *  and a signed release pipeline exist. */
+export interface UpdateCheckResult {
+  current_version: string
+  latest_version: string
+  update_available: boolean
+  changelog: string[]
+  download_url: string | null
+  checked_at: string
+  source_url: string
+  updater_configured: boolean
+}
+
+/** A completion action waiting for the UI (engine/src/queue.rs).
+ *  Only shutdown / hibernate wait for a countdown; the others run
+ *  as soon as the UI confirms them. */
+export interface PendingAction {
+  queue_id: string
+  queue_name: string
+  action: string
+  program: string | null
+  file_path: string | null
+  created_at_unix: number
+}
+
+export type LinkKind = 'video' | 'audio' | 'image' | 'document' | 'archive' | 'program' | 'other'
+
+/** One link from a page, as returned by `fetch_page_links`
+ *  (engine/src/links.rs). `error` means the probe failed — the link
+ *  is listed but cannot be selected. */
+export interface PageLink {
+  url: string
+  filename: string
+  kind: LinkKind
+  size: number | null
+  error: string | null
+  already_exists: boolean
+}
+
+/** One line of a batch that was skipped, with its 1-based line number. */export interface InvalidLine {
+  line: number
+  url: string
+  error: string
+}
+
+/** Result of adding a batch (S10) or a Download All selection (S07). */
+export interface BatchResult {
+  created: string[]
+  invalid: InvalidLine[]
+}
+
+/** One video or audio track found on a page, as returned by
+ *  `detect_page_videos` (engine/src/video.rs). `error` means the
+ *  probe failed — the item is listed but cannot be downloaded.
+ *  `live` marks a stream (an .m3u8 playlist): it is offered as-is,
+ *  a playlist file, never merged into one video. */
+export interface DetectedVideo {
+  url: string
+  filename: string
+  format: string
+  quality: string
+  size: number | null
+  error: string | null
+  live: boolean
+  downloadable: boolean
+  /** Honest note for playlist/manifest items (saved as-is, never
+   *  merged); null for plain files. */
+  note: string | null
+}
+
+/** One file the site grabber (S06) matched. `status` is `matched`,
+ *  `downloaded` or `failed` (with `error` saying why). */
+export interface MatchedFile {
+  url: string
+  filename: string
+  kind: string
+  size: number | null
+  status: string
+  error: string | null
+  download_id: string | null
+}
+
+export type GrabberStatus = 'idle' | 'exploring' | 'downloading' | 'done' | 'failed' | 'stopped'
+
+/** One site-grabber project (engine/src/grabber.rs). `filters`
+ *  holds the file-type list, explore depth and page limit;
+ *  `schedule_start_at` is the optional one-time start time the
+ *  existing scheduler uses. `queue_id` is the queue grabbed files
+ *  go to (the main queue when the project names none);
+ *  `on_complete_action` / `on_complete_program` reuse the existing
+ *  queue completion actions, armed only when the run actually
+ *  downloaded at least one file. */
+export interface GrabberProjectRow {
+  id: string
+  name: string
+  start_url: string
+  filters: {
+    types: string[]
+    depth: number
+    max_pages: number
+  }
+  mode: 'explore' | 'download'
+  schedule_start_at: string | null
+  queue_id: string
+  on_complete_action: QueueCompleteAction
+  on_complete_program: string | null
+  status: GrabberStatus
+  pages_explored: number
+  files_matched: number
+  files_downloaded: number
+  files_failed: number
+  error_message: string | null
+  matched_files: MatchedFile[]
+  created_at: string
+}
+
+/** App settings (S09), singleton row. `speed_limit_kbps` is null for
+ *  unlimited; `default_action` is what a new download does by
+ *  default; `duplicate_action` is what happens when the file already
+ *  exists. `start_on_startup` is a stored flag only — registering
+ *  the app in Windows autostart is out of scope for now. */
+/** One saved site login, as the UI sees it. There is no password
+ *  field on purpose — only `has_password`, so the dialog can show
+ *  "password saved" without ever receiving the secret. */
+export interface SiteLoginRow {
+  id: string
+  host: string
+  username: string
+  auth_type: string
+  has_password: boolean
+}
+
+/** What the UI sends when saving a site login. `password: null`
+ *  keeps the stored password; a value sets it. */
+export interface SiteLoginInput {
+  id: string | null
+  host: string
+  username: string
+  password: string | null
+  auth_type: string
+}
+
+/** One event's sound setting. `file` is a WAV path or null. */
+export interface SoundSetting {
+  event: string
+  enabled: boolean
+  file: string | null
+}
+
+export interface SoundSettingInput {
+  event: string
+  enabled: boolean
+  file: string | null
+}
+
+export interface Settings {
+  default_download_folder: string
+  max_connections: number
+  speed_limit_kbps: number | null
+  language: string
+  theme: 'light' | 'dark'
+  browser_integration: boolean
+  /** Dial-Up tab (S09 finish): legacy settings. The connection
+   *  name may be null (none set); auto-dial and redial are
+   *  honoured only where a dial-up connection exists (Windows
+   *  RAS); hang-up after completion maps onto the on-completion
+   *  action path. Redial attempts are 0–10, never download
+   *  retries. */
+  dialup_connection_name: string | null
+  dialup_auto_dial: boolean
+  dialup_hangup_after_completion: boolean
+  dialup_redial_attempts: number
+  /** Start a link the browser caught downloading as soon as the
+   *  desktop app drains it (default true); false leaves it queued
+   *  for the user to start by hand. Milestone 2 / S13 finish. */
+  browser_start_drained: boolean
+  antivirus_command: string | null
+  /** Antivirus hook (S14): the on/off switch for the scan
+   *  (default on — an empty command still means no scan) and
+   *  the scan timeout in seconds (5–600, default 60). */
+  antivirus_enabled: boolean
+  antivirus_timeout_secs: number
+  file_types_auto: string[]
+  excluded_sites: string[]
+  check_updates_weekly: boolean
+  /** Update check: Fetchline's own release server (configurable;
+   *  the default is a placeholder to replace with the real
+   *  release server — see engine/src/update.rs). */
+  update_url: string
+  /** When the last update check ran (UTC ISO-8601), or null when
+   *  no check has run yet. The weekly timer reads this. */
+  last_update_check_at: string | null
+  start_on_startup: boolean
+  default_action: 'start_now' | 'save_for_later'
+  duplicate_action: 'rename' | 'overwrite'
+  confirm_delete: boolean
+  connection_timeout_secs: number
+  max_retries: number
+  /** Download quota (S12): the on/off switch, the limit in MB
+   *  every `quota_hours` hours (null = no quota configured). The
+   *  live window (usage + window end) is not stored here — it
+   *  comes from `getQuotaStatus`. */
+  quota_enabled: boolean
+  quota_mb: number | null
+  quota_hours: number | null
+}
+
+/** The download quota's live state (S12), as the status bar and
+ *  the Settings Connection tab show it. */
+export interface QuotaStatus {
+  enabled: boolean
+  limit_mb: number | null
+  window_hours: number | null
+  used_bytes: number
+  window_start_unix: number | null
+  window_end_unix: number | null
+  reached: boolean
+  quota_paused_downloads: number
+}
+
+/** One proxy row, as the UI sees it. There is no password field on
+ *  purpose — only `has_password`, so the dialog can show "password
+ *  saved" without ever receiving the secret. */
+export interface ProxyConfigRow {
+  id: string
+  name: string
+  proxy_type: string
+  host: string
+  port: number
+  username: string | null
+  use_for: string[]
+  bypass: string[]
+  enabled: boolean
+  has_password: boolean
+  /** basic | ntlm | kerberos | negotiate-auto */
+  auth: string
+}
+
+/** What the UI sends when saving a proxy. `password: null` keeps the
+ *  stored password; `''` clears it; a value sets it. `auth: null`
+ *  keeps the stored auth setting; a value sets it. */
+export interface ProxyConfigInput {
+  proxy_type: string
+  host: string
+  port: number
+  username: string | null
+  password: string | null
+  use_for: string[]
+  bypass: string[]
+  enabled: boolean
+  auth: string | null
+}

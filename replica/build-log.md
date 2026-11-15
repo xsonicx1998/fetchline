@@ -1,0 +1,2536 @@
+# Build log — Fetchline vertical slice
+
+Date: 2026-11-14. Scope: vertical slice only (S01, S02, S03 + F01/F02/F03
+core loop). Screens are listed per the recon map; anything not listed
+here is not built.
+
+## S01 — Main window: partial (2026-11-14)
+- Done: header + theme toggle (light/dark), toolbar (Add / Pause / Resume /
+  Cancel / Remove), categories sidebar with counts, download table with
+  live progress/speed/ETA, status bar, empty state, error banner.
+- Missing: sortable/resizable columns, drag-and-drop between categories,
+  custom category creation, Options/Scheduler buttons (those screens do
+  not exist yet), tray icon, context menu.
+- Harder than expected: keeping the table in sync — live progress events
+  plus a 1 s list refresh are both needed, because an event can be missed
+  when the dialog is open.
+
+## S02 — Add a new download dialog: done (2026-11-14)
+- Done: URL validation, file-name default from probe / Content-Disposition,
+  save-folder field, category dropdown (auto-pick from file type),
+  "Start download" and "Save for later", Escape/backdrop close, focus on
+  the URL field, inline error for bad URLs and probe failures.
+- Missing: native folder-picker button (needs the Tauri dialog plugin;
+  the field is a plain text input for now), duplicate-file prompt
+  (the engine silently appends " (2)" instead).
+- Harder than expected: nothing — the probe-first design made the dialog
+  straightforward.
+
+## S03 — Download progress dialog: partial (2026-11-14)
+- Done: live speed/ETA/downloaded-of-total, per-segment bars, status badge,
+  Pause / Resume / Cancel, error message display.
+- Missing: speed graph (the recon's 60 s chart — numbers are shown instead),
+  "Open folder" on completion, retry countdown display.
+- Harder than expected: segment bars — a dynamic split creates segments
+  after the dialog opened, so the bar list must be driven by live events,
+  not by the snapshot taken when the dialog opened.
+
+## Engine (not a screen, but the slice depends on it)
+- Done: HEAD probe + ranged-GET fallback, 4-way segmented download,
+  dynamic split of the largest segment, `.part` file with pre-allocation
+  and atomic rename, 2 s SQLite checkpoints, pause/resume from persisted
+  progress, ETag/size re-validation on resume (restart from zero on
+  change), per-segment exponential backoff then `error` status.
+- Verified: `cargo test` in `app/engine` — 6 passed, 0 failed (7.2 s)
+  against a local mock HTTP server, byte-exact results. `cargo check`
+  warning-free. See `app/README.md`. (Milestone 2 grew this to 17
+  integration tests + 4 unit tests, all passing — see S05 above.)
+- Harder than expected: the dynamic split. The schema's no-overlap trigger
+  forces a strict order (shorten the old segment in the DB first, then
+  insert the new one), and the running task must re-read its end bound on
+  every chunk or it writes past the split point.
+- **Real bug found and fixed during testing:** the run loop deadlocked.
+  `try_split`, `checkpoint` and `emit` locked a segment's `std::Mutex`
+  and then called `segment_len()`, which locked the same mutex again
+  (std Mutex is not re-entrant). The first full-download test hung for
+  7 minutes before this was found with temporary tracing. Fixed by
+  passing the already-locked state (`segment_len_of(&st)`); all 6 tests
+  pass since. A second bug was in the test mock, which matched the
+  `Range:` header case-sensitively while hyper sends it lowercase —
+  fixed, and the engine now also fails loudly if a server answers a
+  partial range request with 200 instead of 206.
+- Note: files under 1 MiB download as a single segment by design
+  (`MIN_SIZE_TO_SEGMENT`); the 512 KiB test file therefore exercises
+  the single-segment path, and multi-segment behaviour is exercised by
+  the same code with 4 initial segments on larger files.
+
+## S04 — Categories: done (2026-11-14)
+- Done: builtin categories wired to real data with counts; create a
+  custom category (name, folder, file extensions, comma-separated);
+  auto-assign from file extension (custom categories take part in the
+  lookup); move a download to another category by dragging its table
+  row onto a sidebar category, or from the "Move to category…" menu in
+  the toolbar; delete a custom category, blocked while downloads
+  reference it (the engine refuses with "still has N download(s) —
+  move them to another category first" and the UI shows that error;
+  builtin categories cannot be deleted at all).
+- Schema change (justified): `downloads` gained `queue_position
+  INTEGER NOT NULL DEFAULT 0` + index `idx_downloads_queue_position
+  (queue_id, queue_position)`. `created_at` has 1-second resolution
+  and cannot represent a reorder, so queue order needs an explicit
+  column. `Store::migrate` adds it to pre-existing databases.
+  Schema re-validated after the change (python sqlite load: 9 tables,
+  main queue + 5 categories seeded).
+- Missing: nothing in S04/F10 scope.
+
+## S05 — Queues and scheduler: done (2026-11-14)
+- Done (queues): main queue (seed `queue-main`) + custom queues;
+  "Save for later" in S02 now actually files the download in the
+  main queue; list files in a queue with up/down reorder; Start Now
+  drains in order and each finished file leaves the queue; stop
+  pauses the current file (resumable) and ends the run after it
+  settles; double-click a sidebar queue to open the scheduler.
+- Done (scheduler): per-queue one-time schedule (start/stop time,
+  start on startup) driven by a 30 s tick in the Tauri shell plus
+  `start_startup_queues()` at launch; a one-time queue runs once per
+  session and is never restarted by later ticks; a stop time ends the
+  run after the current file pauses. On-completion action: none /
+  open file / run program / shutdown / hibernate. Shutdown and
+  hibernate show a 60 s countdown dialog with Run now / Cancel and
+  never run silently; open file / run program execute as soon as the
+  queue finishes. The engine refuses shutdown/hibernate off Windows
+  ("only available on Windows") instead of running anything.
+- **Deferred (recorded, not built): periodic synchronisation.**
+  The scheduler form shows the repeat option disabled as "coming in
+  a later version", and `update_queue` rejects `schedule_type =
+  "periodic"` with "Periodic synchronisation is not built yet". This
+  is the L build; do not treat the disabled radio as a bug.
+- Commands added to `src-tauri/src/lib.rs` (architecture.md names
+  where they exist): `create_queue`, `update_queue`, `start_queue`,
+  `add_to_queue`, `list_queues`, `get_queue`, `get_queue_files`,
+  `reorder_queue`, `stop_queue`, `create_category`,
+  `move_to_category`, `delete_category`, `execute_queue_action`,
+  `dismiss_queue_action`, `get_pending_action`,
+  `remove_from_queue`. `add_download` gained a `queue` parameter.
+  Architecture.md names the category list `get_categories`, which
+  already existed — no duplicate `list_categories` was added.
+  The shell also forwards `queue-action-pending` events and runs the
+  30 s scheduler tick.
+- Verified: `cargo test` in `app/engine` — **17 passed, 0 failed**
+  (6 existing + 11 new: queue drain order, queue stop + restart,
+  scheduler start/stop/one-time-no-restart, reorder, category
+  auto-assign, category delete blocked then allowed, builtin delete
+  rejected, periodic rejected, run-program action + dismiss,
+  shutdown errors off Windows) plus 4 timeutil unit tests.
+  `npm run build` passes (tsc + vite). `cargo check` warning-free.
+- Harder than expected / real bugs found and fixed during testing:
+  1. **Queue restart stalled after a stop.** The runner's wait loop
+     broke on the stop flag before the in-flight download had
+     finished pausing, so a restart collided with the
+     still-registered run ("already running") and the queue died
+     with its files stuck. Fixed: on stop the runner pauses the
+     file *and waits* for a terminal status before ending the run.
+  2. **Double resume.** `resume_download` returns as soon as the
+     run task is spawned, but the status flips to "downloading"
+     asynchronously; the wait loop polled the stale "paused" status,
+     ended the run, and the outer loop resumed the file a second
+     time — whose probe then failed on a stale pooled connection
+     from the aborted pre-pause segments ("error sending request").
+     Fixed: the wait loop ignores the pre-start status until it has
+     seen "downloading". Found with temporary tracing (since
+     removed); the test mock was also extracted to
+     `engine/tests/common/mock.rs` so both test files share it.
+  3. The pause/resume timing test is sensitive to parallel load:
+     it failed once in the full 17-test suite (pause landing before
+     any checkpoint) and passed in isolation. No code change; the
+     test's 600 ms pause window is tight when 17 mock servers share
+     1.5 CPUs.
+  4. **Flaky probe failure in the test mock.** A test that adds
+     several downloads to one mock server failed intermittently
+     with "Connection reset by peer" on the probe. Cause: the mock
+     serves one request per connection and then closes the socket
+     without saying so, so reqwest pooled the dead connection and
+     reused it. Fixed in the mock (not the engine): every response
+     now sends `Connection: close`. Three consecutive full runs
+     after the fix: 17/17 + 4/4 each time.
+- Partial / untested on Windows: the Tauri shell still cannot be
+  compiled on this Linux VM (missing `gdk-3.0`; apt fix not retried,
+  per the milestone brief) — the 15 new commands are written
+  following the existing pattern but have not been compiled; the
+  drag-and-drop and the 60 s countdown dialog are UI-only until the
+  first Windows build. Pending completion actions live only in
+  engine memory: if the app is closed before the countdown is
+  answered, the action is lost (the UI re-checks pending actions on
+  launch, but only within the same process lifetime). Shutdown /
+  hibernate run real OS commands (`shutdown /s /t 0`, `shutdown /h`)
+  and have never been executed on Windows here.
+
+## S07 — Download All: done (2026-11-14)
+- Done: fetch a page (GET, 8 MiB cap, non-success status is an error),
+  extract links from `<a href>`, `<link href>`, `<img src>`, `<video src>`,
+  `<audio src>`, `<source src>`; relative links resolved against the page
+  URL, fragments dropped, `javascript:`/`mailto:`/`tel:`/`data:` skipped,
+  de-duplicated in first-seen order, the page's own URL excluded. Each
+  link is probed in parallel for size; probe failures are listed with
+  their error and excluded from the selection; links already in the
+  download list are flagged and start unchecked (the user can still pick
+  them). Checklist grouped by file type (Video / Audio / Image /
+  Document / Archive / Program / Other) with a type filter, select all /
+  select none / invert, and a live count of selected links plus their
+  total size (with "+ unknown" when a size is missing). "Start now" or
+  "Add to queue" (main queue by default, or a chosen queue); every link
+  is added through the single-add path, so category auto-assign and the
+  duplicate-path guard (BUG-002 fix) apply.
+- Engine: new `engine/src/links.rs` (extraction + classification, pure
+  functions with unit tests) and manager methods `fetch_page_links`,
+  `add_batch_downloads`, `download_all_links`; `Store::url_exists`.
+  Tauri commands (architecture.md names): `fetch_page_links`,
+  `add_batch`, `download_all_links`, wired into `src/lib/api.ts`.
+  No schema change.
+- Verified: `cargo test` — **61 integration + 6 unit, 0 failed**
+  (51 existing + 10 new: extraction of all tag types + relative
+  resolution, kind classification, probe sizes/kinds/dead-link error,
+  already-downloaded flag, bad page 404, batch line validation with
+  line numbers, batch dedup, duplicate-path guard reuse across
+  batches, batch add-to-queue + category auto-assign, download-all
+  adds only the selected links, unknown queue/category rejected up
+  front with nothing added). `npm run build` passes (tsc + vite).
+  `cargo check --tests` warning-free.
+- Missing: nothing in S07/F07 scope. The page fetch uses the engine's
+  reqwest client with no extra headers — a site that blocks non-browser
+  clients will answer with its error, which the dialog shows.
+- Harder than expected: Rust raw strings. The extraction unit test
+  used `r#"..."#` for its HTML, but `"#frag` inside the HTML ends a
+  raw string early and the compiler reports it as "unknown prefix"
+  errors — two rounds of that before the test was rewritten as a plain
+  escaped string.
+
+## S10 — Batch download: done (2026-11-14)
+- Done: "Batch" toolbar button opens a dialog with one link per line
+  and a live link count. Submit calls `add_batch`, which validates
+  each line in order: blank lines ignored; bad URLs and probe failures
+  reported with their 1-based line number and skipped; a link repeated
+  inside the batch is flagged as a duplicate of its first line. One bad
+  line never fails the batch. "Start now" starts every created download;
+  "Add to queue" files them in the chosen queue in batch order. The
+  dialog stays open with the result ("Added N, M lines could not be
+  added" + the per-line errors) when anything was skipped, and closes
+  when everything was added. No filename pattern option — the brief
+  said to keep it simple, and the file name comes from the probe /
+  URL as in a single add.
+- Missing: nothing in S10/F08 scope. Large lists are added one probe
+  at a time (sequential, like single adds); a 100-link batch takes as
+  long as 100 probes — acceptable for a desktop paste, noted here.
+- Harder than expected: nothing — reusing `add_download` for every
+  line meant the batch inherited the probe, category and duplicate
+  guards for free, and the only new logic was line validation and
+  the per-line error report.
+
+## S09 — Options dialog (core tabs): partial (2026-11-14)
+- Done (General): default download folder, start-on-startup flag (stored;
+  see the caveat below), browser-integration flag, weekly update check,
+  theme (applies live and persists — the header toggle now writes the
+  setting), language (English only for now).
+- Done (File Types): every category's extension list is editable; the
+  change feeds straight into the existing auto-assign lookup.
+- Done (Connection): connections per download (1–16, default 8 — now
+  actually changes the engine's segment count), connection timeout
+  (1–300 s, applied as the reqwest connect timeout on client rebuild),
+  retries per part (0–10), speed limit (KB/s, 0 = unlimited).
+- Done (Save To): every category's folder is editable; the folder
+  resolution in `add_download` is now: explicit folder → category
+  folder → settings default folder → OS Downloads folder.
+- Done (Downloads): default action (start now / save for later — the
+  Add dialog's primary button follows it), duplicate handling (keep
+  both / replace), ask-before-remove (a confirm dialog in the main
+  window), antivirus command (stored; the scan hook itself is a
+  later should-have, not this milestone).
+- Done (Proxy/Socks tab): enable/disable, HTTP / SOCKS5 / FTP type,
+  host, port, username/password, use-for (all / HTTP only / HTTPS
+  only), bypass list, Test button that probes a URL through the
+  draft proxy and reports the status. The engine really routes
+  through the configured proxy: reqwest `Proxy` on the rebuilt
+  client, Basic auth, `NoProxy` bypass. SOCKS5 needed reqwest's
+  `socks` feature (added to `engine/Cargo.toml`).
+- Settings live in the existing `settings` table; six new columns
+  were added to `schema.sql` plus `Store::migrate` ALTERs for older
+  databases (verified by a migration test that opens a pre-milestone
+  database file). Proxy rows gained `enabled` + `bypass` columns the
+  same way. No other schema change.
+- Password storage: the password is protected with Windows DPAPI
+  (`CryptProtectData`, user scope, direct FFI to crypt32, Windows
+  only) and only the "has password" flag ever crosses the Tauri
+  bridge. On this Linux VM there is no DPAPI, so the value is stored
+  base64-obfuscated (`b64:` prefix) — that is NOT encryption, and the
+  DPAPI path has never run on Windows here. `secret.rs` documents
+  this; the stored value carries a `dpapi:` / `b64:` prefix so a
+  Windows build can tell them apart.
+- Commands added to `src-tauri/src/lib.rs` (architecture.md names
+  where they exist): `get_settings`, `update_settings`,
+  `set_speed_limit`, `get_speed_limit`, `get_proxy_config`,
+  `save_proxy_config`, `test_proxy`, plus `update_category` (new
+  name — no architecture.md name exists for it). The shell applies
+  the stored settings once at launch and after every save.
+- Verified: `cargo test` — **81 integration + 12 unit, 0 failed**
+  (61 existing + 20 new: settings round-trip + validation + migration,
+  segment count from settings, category folder/extension edits,
+  default folder, duplicate overwrite, proxy validation, password
+  round-trip + hidden-from-UI, HTTP proxy + auth, disabled proxy,
+  bypass, SOCKS5 + auth + wrong password, test-proxy, FTP stored
+  but not applied, speed cap / unlimited / mid-download change).
+  `cargo check --tests` warning-free. `npm run build` passes.
+- Missing / deferred: Site logins tab (separate feature row, not
+  built), Dial-Up and Sounds tabs (deferred — legacy/polish, per
+  architecture.md), multilingual UI (language is stored, UI stays
+  English). Start-on-startup is a stored flag only: registering the
+  app in Windows autostart was not implemented.
+- Harder than expected / real bug found and fixed during testing:
+  **the speed limiter could stall a download forever.** The token
+  bucket holds at most one second of tokens, so a chunk larger than
+  the rate (a 64 KiB chunk at a 16 KiB/s cap) could never be afforded
+  and `acquire` waited in a loop that never ended — the capped test
+  download sat at 57,197 bytes for over a minute. Fixed in
+  `limiter.rs`: a large acquire is spent in rate-sized pieces.
+  A limiter unit test pins this (`acquire_larger_than_rate_completes`).
+
+## S12 — Speed limiter: partial (2026-11-14)
+- Done: global KB/s cap (0 = unlimited) enforced by a shared token
+  bucket (`engine/src/limiter.rs`) across all active downloads —
+  every segment task waits for tokens before writing each chunk.
+  The cap is live-changeable (a running download picks the new rate
+  up on its next chunk) and the current cap shows in the status bar
+  as a button that opens Settings. `set_speed_limit` /
+  `get_speed_limit` follow the architecture.md command names.
+- Verified by test, not just by reading: a 256 KiB download at
+  32 KiB/s measurably takes ~8 s (asserted ≥ 5 s, < 25 s); unlimited
+  finishes in under 5 s; lifting the cap mid-download finishes the
+  rest in seconds instead of ~30 s.
+- Missing / not built: the MB-per-hours quota (recorded as not built
+  — `set_download_limit` was not added), and no per-download cap
+  (the downloads table has no per-download limit column; the global
+  cap is the whole feature as built).
+
+## Bug-fix pass — BUG-008–011 (2026-11-14, after replica-test round 2)
+
+Failing-test-first; the two round-2 DOC tests were converted into
+real regression tests, not deleted. Full suite after the fixes: 106
+integration + 12 unit, 0 failed, 2 consecutive runs. `npm run build`
+passes. BUG-005/006/007 untouched.
+
+- BUG-008 (absurd speed limit): rejected, not clamped.
+  `Store::update_settings` rejects any cap above
+  `MAX_SPEED_LIMIT_KBPS = 10_000_000` KB/s (10 GB/s — beyond any real
+  link, and the 10,000,000 KB/s sane-huge value still works) with a
+  clear "too large" error; `apply_settings` uses `saturating_mul` as
+  defence in depth, and `SettingsDialog` enforces the same bound.
+  Chosen over clamping so a typo (e.g. an extra digit) is visible
+  instead of silently becoming a different cap.
+- BUG-009 (proxy Test said "OK" for 407): `test_proxy` now errors on
+  a 407 — "Proxy authentication failed (407) — check the proxy
+  username and password" — and on any other non-2xx status. The
+  dialog's existing "Failed — …" path shows it as a failure.
+- BUG-010 (Test reported success without using the proxy):
+  `test_proxy` now fails before sending when the proxy is disabled,
+  the test URL is not http(s), the proxy is FTP (no FTP transport),
+  or the proxy's `use_for` scope does not cover the test URL's
+  scheme. A test can no longer report success for a proxy it never
+  used.
+- BUG-011 (dead settings wired in): `file_types_auto` is now the
+  allow-list for category auto-assign — empty means every extension
+  is auto-assigned (the old behaviour); a non-empty list restricts
+  auto-assign to the listed extensions and anything else falls back
+  to Documents. `excluded_sites` is a host list (exact host or any
+  subdomain): `add_download` refuses before any probe,
+  `fetch_page_links` refuses an excluded page and flags excluded
+  links with an error instead of probing them, and batch lines to
+  excluded sites are reported with their line number and skipped.
+  Both lists are normalised on save (extensions lowercased, no dots,
+  de-duplicated; hosts lowercased, no scheme/path). The Settings
+  dialog edits both: "Excluded sites" in the General tab,
+  "Auto-assign file types" in the File Types tab. Limitation: there
+  is still no browser extension, so exclusion only applies to
+  downloads Fetchline itself starts — it cannot stop a browser
+  download directly.
+
+## Bug-fix pass — BUG-005–007 fixed (2026-11-14)
+
+Failing-test-first; no open bugs remain in `replica/bugs.md`.
+- BUG-005 (malformed schedule time): `Store::update_queue` now
+  validates start/stop with the existing `parse_iso_to_unix` (UTC
+  ISO-8601, fractional seconds accepted) and rejects a malformed
+  time with a clear error — nothing is stored. The parser also
+  rejects impossible dates (30 February, 31 April, 29 February in
+  a non-leap year), which previously rolled silently into the next
+  month. Legacy rows written before the fix are reported by
+  `scheduler_tick_at` instead of silently skipped: the tick still
+  processes every other queue first, then returns an error naming
+  the bad queues ("Some queues have an invalid schedule and were
+  skipped: … Re-save their schedules."). Re-saving such a queue
+  from the dialog validates and clears the bad times. Blank strings
+  clear the field, as the `update_queue` doc already promised.
+- BUG-006 (stop before start): same validation rejects a stop time
+  that is not after the start time — including stop equal to start
+  and stop with no start — with exactly the UI's message: "The stop
+  time must be after the start time." Engine and UI now agree.
+- BUG-007 (sidebar delete-category button mouse-only): both
+  hover-only buttons in `CategorySidebar` (delete-category and the
+  queue schedule button, same pattern) no longer use `hidden …
+  group-hover:block`. They use `opacity-0` with
+  `group-hover:opacity-100 group-focus-within:opacity-100
+  focus-visible:opacity-100`: `opacity-0` keeps the button in the
+  keyboard tab order, and it appears on hover, on focus within its
+  row, and on keyboard focus. Verified by source check plus the
+  built CSS containing both emitted rules; a real keyboard
+  walk-through still needs the desktop binary.
+- Full sweep after the fixes: **109 integration + 13 unit, 0
+  failed, 2 consecutive full runs** (was 106 + 12; the two DOC
+  tests were converted, not duplicated). `cargo check --tests`
+  warning-free. `npm run build` passes; Vite preview serves the
+  app (index 200, `Fetchline` title, JS asset 200). Regression
+  areas all covered by the passing suite: add/pause/resume,
+  categories, queues/scheduler/actions, Download All + batch,
+  settings, proxy, limiter. `/tmp` cleaned of test leftovers
+  before and after the runs.
+
+## S13 — Browser integration (extension): partial (2026-11-14)
+- Done: Manifest V3 extension in `app/extension/` — `manifest.json`
+  (permissions `activeTab`, `contextMenus`, `downloads`, `storage`,
+  `nativeMessaging` only; no host permissions, no `cookies`, no
+  content script), `background.js` service worker (context-menu
+  "Download with Fetchline" on links and image/video/audio elements;
+  download watcher that cancels a browser download and hands the
+  URL over when catching is on, the type is in the catch list and
+  the site is not opted out), popup (connection status, catch
+  toggle default ON, per-site opt-out, send-current-tab, desktop
+  check), fresh violet download-arrow icons (16/32/48/128 PNG +
+  SVG), `README.md` with load + host-install + verification steps.
+- Done (desktop side): standalone native host `app/host/`
+  (`fetchline-host`, own crate depending only on the engine by
+  path — a `[[bin]]` in `src-tauri` was not used because that
+  crate cannot build on this VM at all). It speaks the
+  native-messaging protocol (4-byte LE length + JSON; framing
+  helpers live in exactly one place, `engine/src/native_host.rs`,
+  shared with the tests). It opens the SAME SQLite file as the
+  desktop app (`--db-path` / `FETCHLINE_DB_PATH` override; else
+  the first existing Tauri app-data candidate) and enqueues into a
+  new `pending_links` table (migration in `Store::migrate` + table
+  in `replica/schema.sql`, so in-memory test DBs get it too).
+  `Manager::drain_pending_links` picks pending rows up through
+  the REAL `add_download` path (excluded-sites refusal,
+  `file_types_auto` auto-assign, duplicate-path guard all apply)
+  and marks each row accepted (with the download id) or rejected
+  (with the reason). The Tauri shell drains on startup and on the
+  same 30 s tick as the scheduler, and exposes a
+  `drain_pending_links` command. No stub anywhere: the host binary
+  was smoke-tested end to end (ping, get_settings, two enqueues,
+  video_found refusal, download_all enqueue — rows visible in the
+  DB afterwards).
+- Done (truth + opt-out): the host reports
+  `settings.browser_integration` and `excluded_sites`; the popup
+  shows them, and when the desktop flag is off the catch toggle is
+  disabled and nothing is caught — desktop setting wins. Per-site
+  opt-out exists in both places (desktop list in Settings,
+  extension-local list in the popup); either one skipping a site
+  is enough. Exclusion is enforced three times: extension,
+  host boundary (never enqueued), drain (re-checked, and
+  `add_download` checks again before any probe).
+- Implemented messages: `download_link` and `download_all`
+  (with a documented deviation — the extension sends `links: []`
+  and the host expands the page via `fetch_page_links`, because
+  there is no content script to list the page's links), plus
+  `ping` / `get_settings` (not in architecture.md). `video_found`
+  is refused with a clear error — F05 / S08 is not built.
+- Verified: `cargo test` in `app/engine` — **109 integration + 13
+  unit + 19 new extension tests, 0 failed** (framing round-trip /
+  oversized / truncated / clean EOF, host enqueue + excluded +
+  integration-off boundaries, drain via real add_download,
+  drain-time exclusion, drain-time integration-off, duplicate URL
+  getting a different save path, dead-link rejection with the rest
+  still draining, page expansion, manifest validation).
+  `cargo check --tests` warning-free. `npm run build` passes;
+  `npm run test:extension` (Python manifest validator) passes;
+  `node --check` passes on `background.js` / `popup.js`.
+- Phase 2 verification (2026-11-14, same day): the full suite was
+  re-run twice (109 + 13 + 21 extension, 0 failed) and the real
+  host binary was driven with native-messaging frames against a
+  local HTTP server only (27 smoke checks: ping, get_settings,
+  enqueue paths, exclusion, integration-off, malformed /
+  oversized / truncated frames, locked DB, pre-S13 migration,
+  drain of the host-produced SQLite file — 7 accepted with
+  distinct save paths, 1 dead link rejected with 404, double
+  drain a no-op). It found two bugs, both fixed failing-test-first
+  in the verification round (see `replica/bugs.md` BUG-012/013):
+  (a) `download_all` with no links bypassed the
+  browser-integration off switch — `enqueue_page_links` never
+  checked the flag, so links were queued while catching was off
+  and drained once it was turned back on; fixed in
+  `manager.rs`, and a `download_all` that enqueues nothing now
+  returns an error instead of `ok: true` (`native_host.rs`);
+  (b) a malformed JSON frame killed the host with no reply —
+  the host loop now answers a framed error and continues for a
+  bad-JSON payload, and still exits promptly on a framing
+  failure (`app/host/src/main.rs`). Regression tests added:
+  `enqueue_page_links_refuses_when_browser_integration_is_off`,
+  `host_download_all_all_skipped_is_an_error` (extension tests
+  now 21). No other verification finding: pre-S13 migration
+  adds `pending_links` without losing data, a locked DB fails
+  cleanly after the ~5 s busy timeout (exit 1), and a missing
+  DB path is created with its parent directories.
+- Missing / partial: the video panel (F05) is not built; drained
+  links sit **queued, not started** (starting them is the desktop
+  app's job — an unattended host must not start downloads the user
+  has not seen); no cookies are ever sent, so links that need a
+  login may fail at the probe; the extension cannot launch the
+  desktop app (the popup only checks the connection). The Tauri
+  shell changes (drain call + command) follow the existing pattern
+  but are **uncompiled** — `src-tauri` still cannot build on this
+  Linux VM (missing `gdk-3.0`), same as every earlier milestone.
+  **Correction (2026-11-15, Milestone 2):** the video panel is
+  built (S08, see below) and drained links now START by default
+  (`browser_start_drained`, on) — see the "S13 finish" entry.
+  The queued-only behaviour survives as that setting turned off.
+- Harder than expected: (1) the brief said the Tauri DB path is
+  `app_data_dir()/fetchline.db`, but `src-tauri/src/lib.rs`
+  actually uses `app_data_dir()/fetchline/app.db` — the host
+  therefore tries the Tauri app-data candidates in order and takes
+  the first existing file, with `--db-path` as an explicit
+  override; the exact Windows app-data folder still needs
+  confirming on the first Windows build. (2) The popup's
+  "send this page" needs the active tab's URL, which
+  `chrome.tabs.query` will not return without a permission — the
+  minimal fix was `activeTab` (granted only on the popup click),
+  not the broad `tabs` permission. (3) The shared test mock
+  produces dead-code warnings in the new test file (it also serves
+  proxy tests this file does not use) — silenced with
+  `#![allow(dead_code)]` on the test file, not by editing the mock.
+- Design decision (recorded): the host only enqueues; it never
+  downloads. The queue is the contract between the browser and
+  the desktop app, and the drain is the only path into the
+  download list — there is no second add path to drift from the
+  first. `pending_links` rows are never deleted by the drain, so
+  the history of what the browser sent stays visible.
+
+## S13 — Browser integration: finish (Milestone 2, 2026-11-15)
+- Done (drain starts downloads): `drain_pending_links` now STARTS
+  each accepted download through the normal `start_download`
+  (speed limiter, proxy, segments all apply) instead of leaving it
+  queued. New setting `settings.browser_start_drained` (default
+  ON — start immediately); turning it off keeps the old
+  queued-only behaviour. New column in `replica/schema.sql` +
+  `Store::migrate` ALTER for older databases (default 1, verified
+  by a kept migration test on a hand-built pre-M2 settings table).
+  If the start itself fails, the download stays queued and the
+  failure is recorded in `DrainSummary.start_failed` (new field),
+  not as a rejection. The drain still goes through the REAL
+  `add_download` path (excluded sites, `file_types_auto`,
+  BUG-002 duplicate guard all apply). Settings UI: a "Start
+  browser-caught downloads at once" checkbox in Options > General
+  (disabled while catching is off); the stale "(not built yet)"
+  hint next to the integration toggle is fixed. The Tauri
+  `drain_pending_links` command needs no change (same signature,
+  `DrainSummary` gains the new field) but is still uncompiled.
+  This also covers drained videos (S08, same drain path).
+- Done (Download All context entry — already existed, now
+  verified): the "Download all links on this page with Fetchline"
+  page-context menu item was already in `background.js` from S13
+  (it sends `download_all {page_url, links: []}` and the host
+  expands the page via the S07 `fetch_page_links` — no second
+  fetcher was written). No new permission was needed
+  (`contextMenus` already covers it; the host does the fetching).
+  Verified end to end through the REAL `fetchline-host` binary
+  against a local HTTP page only: new smoke test
+  `app/host/download-all-smoke.py`, 14/14 (3 good links enqueued
+  as `download_all` rows, duplicate de-duplicated, dead link
+  skipped at expansion, excluded page refused, integration-off
+  refused — the BUG-012 path — malformed JSON answered with a
+  framed error, host stays alive). One wrong test expectation,
+  not a product bug: explicit `download_all` links are enqueued
+  without probing, so a dead link in an explicit list is queued
+  and rejected at drain time, not at enqueue time.
+- Done (popup status): the popup shows the pending count ("N
+  links waiting in Fetchline") and the last hand-off ("Last sent
+  …" / "Last send failed …"). The host reports `pending_count`
+  (new `HostReply` field) in every `get_settings` / queued reply,
+  including the host binary's hand-built `download_all` reply;
+  the background worker records each hand-off outcome in
+  `chrome.storage.local` (outcome + time only, never a URL) and
+  the popup's "Send this page" path records its own too. New
+  Node tests with a fake `chrome` API (no browser needed):
+  `extension/tests/popup.test.js` (6 tests) and
+  `extension/tests/background.test.js` (4 tests), wired as
+  `npm run test:extension-popup` /
+  `test:extension-background`. `popup.html` gains the two status
+  lines; the formatters are pure functions on `globalThis`.
+- Done (Windows checklist): `app/extension/README.md` now has a
+  "Windows verification checklist" — registry key, manifest
+  `path` / `allowed_origins` with the real extension ID,
+  app-data path confirmation (`%APPDATA%\com.fetchline.app\
+  fetchline\app.db` first, then `%APPDATA%\fetchline\app.db`),
+  first live handoff, Download All, both off switches, and
+  removing dev state. It is a checklist only: NOTHING in it has
+  run, and the row stays `partial` for exactly that reason.
+- Verified: full engine suite **222/222, 0 failed, 2 consecutive
+  runs** (21 unit + 111 integration + 25 extension + 15 grabber +
+  14 verifier + 15 sync + 21 video; was 218 — +4 new extension
+  tests, the drain test rewritten to assert completion
+  byte-exact). `cargo check --tests` warning-free. `npm run
+  build` passes; `npm run test:extension` passes; `node --check`
+  passes on all four extension scripts; extension JS tests 21/21
+  (11 video-detect + 6 popup + 4 background). Host smoke:
+  download-all 14/14, video 11/11 re-run green. No new bugs
+  found (see `replica/bugs.md` Round 8).
+- Missing / partial (unchanged, honest): the Windows handshake
+  is unproven (no .exe yet — checklist above is what proves it);
+  no extension code has executed in a real browser on this VM
+  (popup, menu, watcher verified by code review + `node --check`
+  + the fake-`chrome` Node tests only); no cookies, so
+  login-only links may fail at the probe; the Tauri shell changes
+  (one doc comment on `drain_pending_links`, no new command)
+  follow the existing pattern but are uncompiled (`gdk-3.0`,
+  same as every earlier milestone). The row stays `partial`.
+- Harder than expected: (1) the popup/background tests needed a
+  `vm` context with a fake `chrome` API, and two test bugs ate
+  the time, not product bugs — the fake `sendNativeMessage`
+  took 2 arguments where the real API takes 3 (host, message,
+  callback), and `assert/strict`'s `deepEqual` is strict, so a
+  message built inside the `vm` realm (different Object
+  prototype) fails it even with identical structure — both fixed
+  by comparing JSON strings. (2) The S13 test
+  `drain_picks_up_enqueued_link_via_add_download` asserted
+  status `queued`, and the S08 test asserted the same for video —
+  both had to be rewritten for the new start-by-default
+  behaviour (the video test is renamed
+  `video_found_end_to_end_drains_into_a_real_download`).
+
+## S13 — Browser integration: finish (2026-11-15, PARTIAL 1 of 4)
+
+- Done (extension): cookie forwarding for login-only links.
+  `manifest.json` gained the `cookies` permission (justified
+  in the manifest, the validator and the README) and
+  `browser_specific_settings.gecko.id:
+  "fetchline@fetchline.app"`. `background.js` gained
+  `cookiesFor(url)` — it reads cookies ONLY for the exact URL
+  being handed over (`chrome.cookies.getAll({url})`) and
+  attaches name/value pairs to `download_link` (message.url)
+  and `video_found` (variants[0].url); `download_all` carries
+  no cookies (the host fetches the page itself). The watcher
+  fix (BUG-024): `extensionOfFilename()` strips directories
+  and takes the suffix, so a download that already has a
+  filename is no longer silently skipped.
+- Done (host + engine): `native_host.rs` gained `CookiePair`
+  and `cookies_to_header()` (validate + join; name: no
+  whitespace/control/`;`,`,`,`=`; value: no `;`,`,`,control;
+  ≤ 32 pairs, ≤ 8192 header bytes) plus
+  `cookies_to_json()`/`cookies_from_json()` (corrupt → empty,
+  never fails a drain). `DownloadLink`/`VideoFound` carry
+  `cookies: Vec<CookiePair>`; `enqueue_one` validates and
+  stores the JSON on the pending row; `mark_pending_link`
+  sets `cookies = NULL` when the drain decides the row.
+  `store.rs` gained the `cookies TEXT` column (migration
+  placed after the S08 rebuild block so a rebuild can't drop
+  it; `replica/schema.sql` updated to match). `manager.rs`
+  gained `DownloadManager.cookies: HashMap<download_id,
+  header>` (in memory only): `add_download_with_cookies`
+  probes via `probe_with_cookies` (cookies win over a stored
+  site login; FTP falls back to a plain probe), the drain
+  rebuilds the header from the row and calls it, `run_inner`
+  passes the header to every segment GET for that host only,
+  and the entry is removed on complete/error/cancel, kept on
+  pause, dropped on restart (a resumed download then fails
+  with a clear 401 — tested). `probe_with_cookies` is
+  deliberately the plain HTTP(S) path: it does NOT go through
+  proxy/NTLM machinery, so a cookie-gated link behind an NTLM
+  proxy reports the proxy's 407, and the raw NTLM segment
+  retry does not carry cookies — both documented in
+  `bugs.md`. A `download_all` page expansion carries no
+  cookies; a login-gated page's links must be right-clicked
+  individually.
+- Done (Windows handshake): verified by inspection against
+  Chrome's native-messaging docs and Firefox/MDN — registry
+  `HKCU|HKLM\SOFTWARE\Google\Chrome\NativeMessagingHosts\<name>`
+  (Edge substitutes `Microsoft\Edge`, Firefox `Mozilla`),
+  default value = manifest path; `allowed_origins` entries
+  exactly `chrome-extension://<32 lowercase a–p chars>/`,
+  trailing slash mandatory, no wildcards; extension-ID format
+  confirmed via Chrome's example id
+  `knldjmfmopnpolahpmmgbagdohdnhkik`; `db_candidates()` in
+  `app/host/src/main.rs` verified by inspection
+  (`%APPDATA%\com.fetchline.app\fetchline\app.db` first, then
+  `%APPDATA%\fetchline\app.db`). The README Windows checklist
+  (7 items) is annotated per item as verified-by-inspection
+  vs needs-Windows; nothing in it has run on Windows.
+- Done (tests): 7 new engine tests in
+  `tests/extension_tests.rs` behind a local
+  `CookieGatedServer` fixture (own TCP server in the test
+  file, not the shared mock): header validation, host stores
+  cookies on the row + reply never carries the value, host
+  refuses invalid cookies, gated drain completes byte-exact
+  and the row's cookies are wiped, gated drain without
+  cookies rejected with a clear 401, cookies never leak to a
+  simultaneous plain download (plain `cookie_seen() == 0`),
+  restart drops the cookies (clear 401 on resume). New
+  `extension/tests/watcher.test.js` (9 cases) and
+  `app/host/cookie-smoke.py` (C1–C7, 14 checks) against the
+  freshly rebuilt host binary. Pause/resume WITH cookies has
+  no automated test (timing-sensitive) — code-reviewed only.
+- Result: the row is flipped to **yes** (see features.csv).
+  Justification: every gap that can be closed on this VM is
+  closed — cookies are implemented and proven against a
+  fixture, the watcher is fixed and tested, the handshake
+  checklist is verified as far as inspection can take it, and
+  the full suite is green twice. What remains is
+  environment-only, the same class of limit the S03/S08 rows
+  already carry as yes: never run in a real browser on this
+  VM, Windows handshake needs Windows (registry key, real
+  extension id, app-data path, first live handoff), Tauri
+  `drain_pending_links` uncompiled, no Windows .exe, no real
+  website ever used. S11 licence untouched.
+- Harder than expected: (1) the watcher bug (BUG-024) — the
+  watcher looked correct in a code read and only the new
+  simulated-stream test exposed that `item.filename` is a
+  bare path, not a URL; (2) the Firefox manifest (BUG-023) —
+  the README's claim was wrong in a way that only checking
+  Firefox's own docs exposed; (3) four parallel workers on
+  one 1.5-CPU VM: the tree was uncompilable at points, a
+  full-suite run flaked under parallel load (6 failures that
+  vanished alone), a sibling took BUG-022 mid-flight (mine
+  are BUG-023/024), and a sibling's round notes a
+  mid-flight manifest-test failure caused by my `cookies`
+  permission landing while their run was in flight — the
+  shared `/tmp/fetchline-test-*` cleanup is also a live
+  hazard (one worker's `rm -rf` can delete another's live
+  test directory).
+
+## S08 — Video grabber / browser video panel: partial (2026-11-14)
+- Done (extension): `app/extension/video-detect.js` — shared pure
+  detector (live-DOM scan with real `videoWidth`/`videoHeight`,
+  `duration === Infinity` for live, `mediaKeys` for DRM; HTML scan
+  for the tests) plus `content.js` — a Fetchline-branded floating
+  "Download this video" button on hover over a video player
+  (violet #6d28d9, Inter, fresh download icon) opening a small
+  quality/format panel. Picking a quality sends `video_found
+  {page_url, variants: [chosen]}` — only the chosen variant, so
+  the desktop app queues exactly what the user picked. A
+  DRM-protected video or one with no downloadable stream shows an
+  honest "can't be downloaded" note and NO download button; a live
+  stream's `.m3u8` is offered as-is, labelled a playlist file.
+  Injection is user-gesture-only: the popup's "Find videos on this
+  page" button asks the background worker, which injects
+  `video-detect.js` + `content.js` into the ACTIVE tab via
+  `chrome.scripting` + `activeTab` (new `scripting` permission,
+  justified in the manifest, the validator and the README). There
+  is still no `content_scripts` entry, no host permission and no
+  `<all_urls>` — no page is ever scanned unprompted. Excluded sites
+  and a switched-off desktop flag refuse the scan before anything
+  is injected. The popup also shows the scan summary (found /
+  downloadable counts). Quality is never invented: real dimensions,
+  then a `720p`/`1080p`/`4K` label in the URL/file name, else the
+  literal "Unknown quality" — in both detectors.
+- Done (desktop side): `video_found` is implemented in
+  `engine/src/native_host.rs` (the S13 refusal is gone) with
+  validation in the new `engine/src/video.rs` — http(s) URLs only,
+  known media extensions (mp4/webm/flv/mp3/m3u8 + the other
+  containers the engine handles), de-duplicated, excluded-site and
+  integration-flag checks, DRM variants refused, variants outside
+  a non-empty `file_types_auto` list skipped, and a quality
+  backstop that replaces any invented claim ("Ultra HD 8K Pro")
+  with "Unknown quality". Each accepted variant is enqueued into
+  the SAME `pending_links` queue as S13 (source `"video"`, page URL
+  as referrer — no second queue) and drains through the REAL
+  `add_download` path (duplicate-path guard, category auto-assign,
+  excluded sites all apply). A `video_found` that queues nothing
+  is an error, not `ok: true` (the BUG-012 rule). `pending_links`
+  gained `'video'` in its source CHECK (`replica/schema.sql` plus
+  a `Store::migrate` rebuild that preserves rows from pre-S08
+  databases). The host binary (`app/host/`) needs no special
+  branch — it already routes every message through
+  `handle_host_message`.
+- Done (desktop panel): `VideoGrabberDialog.tsx` — paste a page
+  link, scan it (`detect_page_videos`, new engine method + Tauri
+  command, reusing `fetch_page_links` so excluded/dead links are
+  flagged the same way), pick a video: "Download" opens the S02
+  add dialog prefilled (new `initialUrl` prop on
+  `AddDownloadDialog`; S02 itself was not rebuilt), "Later" files
+  it in a queue. Dead links show their probe error and a "Not
+  downloadable" state instead of a button; live streams are
+  labelled as playlist files. Wired into the main window as a
+  "Video grabber" toolbar button.
+- HLS decision (recorded): an `.m3u8` playlist is offered as-is
+  with a note ("Playlist file — saved as-is; it is not merged into
+  one video file"). Downloading HLS/DASH segmented streams as a
+  single merged file is explicitly NOT built.
+- Verified: `cargo test` in `app/engine` — **109 integration + 13
+  unit + 21 extension + 21 new video tests, 0 failed** (17 unit
+  tests in `video.rs` + the 21-file `video_tests.rs` suite:
+  fixtures, quality, validation, host boundary, pre-S08
+  migration, page scan, end-to-end video_found -> pending_links
+  -> drain -> add_download -> byte-exact 100 KiB download).
+  `cargo check --tests` warning-free. `npm run build` passes;
+  `npm run test:extension` passes; `node --test
+  extension/tests/video-detect.test.js` — **11 passed, 0 failed**
+  (same fixtures as the Rust tests); `node --check` passes on all
+  four extension scripts. The real `fetchline-host` binary was
+  driven with native-messaging frames against a local HTTP server
+  serving a real .mp4 fixture — **11/11 smoke checks**
+  (`app/host/video-smoke.py`, kept in the repo): ping, video_found
+  enqueue, DRM / bad-scheme / empty-variants / excluded-site
+  refusals, S13 `download_link` regression, malformed JSON framed
+  error + host stays alive; the DB afterwards holds exactly one
+  `video` row and one `browser` row.
+- Bugs found and fixed failing-test-first (see `replica/bugs.md`
+  BUG-014/015/016): (a) `.m3u8` was not classified as Video, so a
+  live stream was invisible to the detector; (b) a claimed quality
+  of "Ultra HD 8K Pro" passed the backstop because it contains
+  "8K"; (c) `<source>` children inherited the parent element's
+  playback dimensions, inventing qualities for every source.
+- Missing / partial: the extension has never run in a real browser
+  on this VM (popup scan, floating button, panel are verified by
+  code review + `node --check` + the Node fixture tests only — no
+  headless Chromium works here); the Tauri shell changes
+  (`detect_page_videos` command) follow the existing pattern but
+  are **uncompiled** (`gdk-3.0`, same as every earlier milestone);
+  the desktop panel cannot detect DRM from static HTML — a
+  protected stream is only discovered when its probe fails, and
+  the panel shows that error; no cookies are ever sent, so
+  login-only videos fail at the probe; drained videos sit queued,
+  not started. No Windows `.exe` exists.
+  **Correction (2026-11-15, Milestone 2):** drained videos now
+  start by default too — the drain is shared with S13 (see the
+  "S13 finish" entry); queued-only is the `browser_start_drained`
+  setting turned off.
+- Harder than expected: (1) the `scripting` permission. S13
+  deliberately forbade it, and the manifest validator + cargo
+  manifest test enforced that — adding user-gesture-only injection
+  meant updating both tests deliberately, with the justification
+  written into each, rather than silently widening the permission
+  set. (2) The quality backstop: a substring check ("contains a
+  resolution") is not enough — a claimed label must BE a clean
+  label, or it is marketing copy. (3) `package.json` has
+  `"type": "module"`, so the Node detector test had to import the
+  detector as an ESM side effect (`globalThis.FetchlineVideoDetect`)
+  instead of `require`.
+
+## S08 — Video grabber: finish (Milestone 3, 2026-11-15)
+- HLS decision — DECIDED, option (b): playlists stay as-is.
+  Merging HLS segments into one MP4 was rejected, not deferred:
+  concatenating MPEG-TS segments yields a `.ts` file, not an MP4,
+  and a real TS→MP4 remux needs ffmpeg or an equivalent muxer,
+  which is not part of the Windows desktop app and cannot be
+  assumed on a user's machine — ffmpeg exists on this Linux VM
+  (`/usr/bin/ffmpeg`) but that proves nothing about Windows, and
+  bundling it is a packaging/licensing decision outside S08.
+  Segment URLs are also short-lived signed URLs, live streams
+  have no end to merge, and AES-128-encrypted streams cannot be
+  merged without their keys, which Fetchline must not fetch. The
+  same decision covers DASH: a `.mpd` manifest is saved as-is,
+  labelled a manifest, never merged. Recorded in
+  `engine/src/video.rs` (module docs), `features.csv`, and
+  `test-plan.md` F05-H5.
+- Done (playlist understanding, instead of a merge): the desktop
+  scan now reads playlists. A master playlist is expanded into
+  its real variants — resolution and bandwidth read from the
+  playlist itself (never invented), each variant probed for size,
+  capped at 8 entries (`MAX_HLS_VARIANTS`), the master itself not
+  offered — so the user picks a quality from real renditions. A
+  media playlist reports its segment count and duration and
+  whether it is live (no `#EXT-X-ENDLIST`), in the panel note.
+  An encrypted playlist (`#EXT-X-KEY` with a method other than
+  `NONE`) is listed as not downloadable with a clear error: the
+  playlist alone will not play and Fetchline does not fetch
+  decryption keys. A playlist that cannot be fetched or parsed is
+  kept as the single playlist item it was, with its generic
+  "saved as-is; it is not merged" note — the scan never fails
+  because one playlist is odd. New pure parsers
+  `parse_m3u8` (Rust, `video.rs`) and `parseM3u8` (JS,
+  `video-detect.js`) run over the SAME playlist fixtures
+  (`extension/tests/fixtures/*.m3u8`), so the two cannot drift.
+  `DetectedVideo` gained a `note` field (serde-defaulted, so
+  older JSON still reads) shown by `VideoGrabberDialog` and by
+  the extension panel; the extension panel's buttons now read
+  "Download playlist" / "Download manifest" for playlist items.
+  `.mpd` is now a known media extension in both detectors and
+  `classify_kind` (Video), and `video_found` accepts it with a
+  DASH note.
+- Done (detector fixtures): new HTML fixtures `hls-master.html`,
+  `dash-manifest.html`, `low-quality.html` (only low quality
+  available → honestly "Unknown quality") plus the playlist
+  fixtures `master.m3u8` / `vod.m3u8` / `live.m3u8` /
+  `encrypted.m3u8`; the existing fixtures (multiple `<source>`
+  qualities, audio-only, DRM/EME, live stream, no video,
+  duplicates) still pass on both sides.
+- Done (host end-to-end): the real `fetchline-host` binary was
+  driven against a local server serving a real .mp4, a real
+  .m3u8 and a real .mpd — video smoke now 13/13 (was 11/11).
+  Engine test `video_found_m3u8_drains_into_a_real_playlist_download`
+  proves the .m3u8 is saved as-is: the bytes on disk are exactly
+  the playlist text — no segments fetched, nothing merged.
+- Verified: full engine suite **235/235, 0 failed, 2 consecutive
+  runs** (24 unit + 111 integration + 25 extension + 15 grabber +
+  14 verifier + 15 sync + 31 video; was 222 — +3 unit in
+  `video.rs`, +10 video tests). `cargo check --tests`
+  warning-free. `npm run build` passes; `npm run test:extension`
+  passes; `node --test` on all three extension test files 27/27
+  (video-detect 17, was 11; popup 6; background 4);
+  `node --check` passes on all four extension scripts. Host
+  smoke: video 13/13, download-all 14/14 re-run green. One bug
+  found and fixed failing-test-first: BUG-021 (both new parsers
+  missed `#EXT-X-KEY` encryption because the first attribute's
+  key reads `#EXT-X-KEY:METHOD`, not `METHOD` — see
+  `replica/bugs.md`).
+- Missing / partial (unchanged, honest): the extension has never
+  run in a real browser on this VM (popup scan, floating button,
+  panel are verified by code review + `node --check` + the Node
+  fixture tests only — no headless Chromium works here); the
+  Tauri shell changes (`detect_page_videos` command, now
+  returning the new `note` field) follow the existing pattern
+  but are **uncompiled** (`gdk-3.0`, same as every earlier
+  milestone); the desktop panel cannot detect DRM from static
+  HTML — a protected stream is only discovered when its probe
+  fails, and the panel shows that error; no cookies are ever
+  sent, so login-only videos fail at the probe; no Windows `.exe`
+  exists. The extension-side parser is tested over the shared
+  fixtures, but the content script does not fetch playlists
+  itself (a cross-origin fetch from the page would usually be
+  blocked) — variant expansion in the browser is the desktop
+  panel's job; the extension lists the master as one item with
+  the honest note.
+- Harder than expected: (1) BUG-021 — the `#EXT-X-KEY` prefix
+  bug was in both parsers identically, because both were written
+  from the same (wrong) mental model of the attribute line; the
+  shared-fixture tests caught it in both at once, which is
+  exactly what the parity pattern is for. (2) The variant
+  expansion needs three network steps per variant (probe,
+  playlist fetch, and the page fetch that found the master) and
+  each can fail independently — the design that survived is:
+  probe failure lists the variant as not downloadable (never
+  hides it), playlist-fetch failure keeps the generic note and
+  `live: false` (never claims liveness it did not see).
+
+## S06 — Site grabber: partial (2026-11-14)
+- Done (engine): new `engine/src/grabber.rs` — pure crawl rules with
+  unit tests (robots parsing, page detection, same-host, validation)
+  — plus `DownloadManager` methods `create_grabber_project`,
+  `run_grabber` (background task, like `start_queue`),
+  `stop_grabber`, `get_grabber_project`, `list_grabber_projects`.
+  Crawl rules, all enforced in the engine: same-host only (off-site
+  links are never followed or matched); depth 0–5, default 2, deeper
+  values rejected with a clear error; file-type filter over the six
+  `file_types_auto` categories with at least one type required, safe
+  default images + documents only (Programs are never downloaded
+  unless the user ticks them); page cap 200 default / 1000 hard, the
+  run stops cleanly at the cap with status `done` and a note in the
+  UI; at least 500 ms between page fetches; robots.txt fetched once
+  per run and honoured for the Fetchline user-agent and `*` (a
+  blocked start page fails the run with "robots.txt does not allow…",
+  a blocked sub-page is skipped); per-file 2 attempts — attempt 1
+  adds + starts through the REAL `add_download` path (probe,
+  category auto-assign, duplicate-path guard, proxy, speed limiter
+  all apply, and the row is tagged with `grabber_project_id`),
+  attempt 2 resumes the same download, then the failure is recorded
+  per file and the run moves on; login-required start pages (401/403)
+  fail the run with a clear "needs a login" message (no cookies are
+  ever sent, so nothing is bypassed); excluded start sites are
+  refused before any network request. Explore-only mode crawls and
+  lists matched files without creating any downloads. The optional
+  one-time start time reuses the existing scheduler: it is stored in
+  `schedule_json` and the 30 s `scheduler_tick_at` starts idle
+  projects whose time arrived — no second scheduler was built.
+  Progress (status idle/exploring/downloading/done/failed/stopped,
+  pages explored, files matched/downloaded/failed, error, matched
+  files JSON) is persisted after every page and every file, so the
+  UI polls `get_grabber_project`.
+- Done (store/schema): `grabber_projects` gained a `stopped` status,
+  `pages_explored` / `files_matched` / `files_downloaded` /
+  `files_failed` / `error_message` / `matched_json` columns
+  (`replica/schema.sql` + a `Store::migrate` rebuild that preserves
+  rows from pre-S06 databases — verified by a throwaway migration
+  test, since deleted). No other schema change; `downloads` already
+  had `grabber_project_id`.
+- Done (UI): `SiteGrabberDialog.tsx` — 3-step wizard (name + start
+  URL; type checkboxes + depth + page limit; download vs explore-only
+  + optional schedule) then a progress view (four count cards, live
+  matched-file list with per-file status/error, Stop button, finished
+  summary, page-limit note, failed/stopped states), keyboard
+  reachable with labels, Escape/backdrop close. A "Site grabber"
+  toolbar button (the Tasks > Run site grabber entry) opens it.
+  Tauri commands `create_grabber_project`, `run_grabber`,
+  `stop_grabber`, `get_grabber_project`, `list_grabber_projects`
+  added to `src-tauri/src/lib.rs` following the existing pattern.
+- Verified: `cargo test --test grabber_tests` — **15 passed, 0
+  failed** (creation validation, excluded site, explore-only lists
+  without downloading, same-host only, depth, type filter, page cap,
+  robots block, login-required, dead start page, download mode with
+  tagging, 2-attempt give-up, stop, scheduled start via the tick,
+  double-run rejected + re-run allowed) against a local fixture site
+  in `engine/tests/common/mock.rs` (`GrabberSite` — no real website
+  was ever crawled), plus 4 unit tests in `grabber.rs`.
+  `cargo check --tests` warning-free for the engine lib (the shared
+  test mock still emits the known dead-code warnings in test
+  binaries that do not use every server, same as S13/S08).
+  `npm run build` passes (tsc + vite).
+- Fix round (2026-11-15, BUG-017/018/019): robots Allow now beats
+  Disallow across groups; exclusion re-checked at run time and in
+  the scheduler tick (run fails before any fetch); `run_grabber`
+  writes `exploring` synchronously before spawning the task.
+  Verifier suite `grabber_verify_tests` 14/14 on three consecutive
+  runs; full engine suite 21 unit + 109 integration + 21 extension
+  + 15 grabber + 14 verifier + 21 video = 201, 0 failed;
+  `npm run build` passes; extension tests pass. Zero open bugs.
+- Missing / partial: the Tauri shell changes follow the existing
+  pattern but are **uncompiled** (`gdk-3.0`, same as every earlier
+  milestone); the wizard is verified via `npm run build` only, and
+  the crawl has never run against a real website — only the local
+  fixture. No Windows `.exe` exists.
+  **Correction (2026-11-15, Milestone 4):** the per-project queue
+  choice and the on-completion action ARE built now — see the
+  "S06 — Site grabber: finish (Milestone 4)" entry below. A
+  scheduled project that is manually Run still starts
+  immediately, ignoring its schedule (an explicit override, not
+  a silent schedule).
+- Harder than expected: (1) the robots.txt parser — the first draft
+  kept two parse passes and a dead closure; it was rewritten as one
+  pass that keeps each group's user-agents with its rules, because
+  an Allow in a Fetchline group must beat a Disallow in the `*`
+  group. **Correction (verification 2026-11-14, BUG-017): that last
+  claim is not true as built — the parser returns on the first
+  applying group it meets, so when the `*` group comes first its
+  Disallow wins and the Fetchline Allow is never consulted; the
+  Allow only wins when the Fetchline group is written first.
+  Same-group Allow-beats-Disallow does work.** **Fixed 2026-11-15:
+  `robots_disallows` now collects every applying group's rules
+  and lets any matching Allow beat any matching Disallow, so the
+  claim is true as built; the two kept verifier tests pass 3/3
+  runs.** (2) The 2-attempt rule vs the engine's own segment retries:
+  a transient GET failure is already retried inside the download
+  (up to 5 segment attempts), so the grabber-level second attempt
+  only matters for add/probe failures and terminal download errors —
+  the dead-file test pins the probe-failure case, which is the one
+  the recon rule is really about. (3) One test expectation was
+  wrong, not the code: `dead.pdf` is a document at depth 1, so the
+  download-mode fixture matches 4 files, not 3.
+
+## S06 — Site grabber: finish (Milestone 4, 2026-11-15)
+- Done (per-project queue choice): `grabber_projects` gained
+  `queue_id` (default `'queue-main'`, the seeded main queue),
+  plus `on_complete_action` / `on_complete_program`
+  (`replica/schema.sql` + `Store::migrate` ALTERs for older
+  databases — verified by a kept migration test that opens a
+  hand-built pre-Milestone-4 database file; the S06 rebuild block
+  also carries the new columns). `GrabberProjectRow` carries the
+  three fields (serde-defaulted, so older JSON still reads).
+  `create_grabber_project_full` (new; the 7-arg
+  `create_grabber_project` stays as a wrapper defaulting to the
+  main queue + no action, so the 15 shipped grabber tests and the
+  14 verifier tests needed no changes) validates the queue exists
+  at save time with a clear error ("Queue not found: … — pick an
+  existing queue") and validates the action through the one shared
+  helper (`queue::validate_completion_action`, now also used by
+  `Store::update_queue`, same messages as before). The run
+  re-checks the queue at its start, before any fetch: a queue
+  deleted after the project was created fails the run with "no
+  longer exists", 0 pages explored. Matched files are filed into
+  the chosen queue through the existing `add_download` queue
+  parameter — no second add path. Wizard: step 3 gains a queue
+  dropdown (the queues list from `App`, main queue by default,
+  same pattern as Download All / Batch); the progress view shows
+  which queue the files go to.
+- Done (on-completion action): the project stores one of the
+  EXISTING queue completion actions (none / open_file /
+  run_program / shutdown / hibernate, plus the program for
+  run_program), picked in wizard step 3 next to the queue (same
+  labels as the Scheduler dialog, plus the 60 s countdown note
+  for shutdown/hibernate). It is armed through the EXISTING
+  machinery only: one shared `register_completion_action` helper
+  in `manager.rs` creates the `PendingAction` (the queue drain
+  was refactored onto the same helper, behaviour unchanged), keyed
+  by the target queue id, sent on the existing
+  `queue-action-pending` event — so the existing 60 s countdown
+  dialog (`QueueActionDialog`), `execute_queue_action`,
+  `dismiss_queue_action`, `get_pending_action` and the app's
+  startup poll all work on a grabber-armed action unchanged.
+  There is no second countdown and no second cancel path. The
+  action is armed ONLY when the run finishes cleanly (`done`) AND
+  downloaded ≥ 1 file — the BUG-003 lesson applied to grabber
+  projects: not armed when 0 files downloaded (matched-but-all-
+  failed, or nothing matched), not armed in explore-only mode,
+  not armed when the run failed, not armed when stopped after
+  downloading (mirrors the queue drain). `open_file` carries the
+  last file actually downloaded. The wizard notes the rule next
+  to the picker ("Only runs when the grabber actually downloaded
+  at least one file").
+- Verified: `cargo test` in `app/engine` — **248 passed, 0
+  failed, 2 consecutive full runs** (24 unit + 111 integration +
+  25 extension + 28 grabber + 14 verifier + 15 sync + 31 video;
+  was 235 — +13 new grabber tests: 5 queue choice, 8 completion
+  action, including the migration test and the cancel-path test).
+  `cargo check --tests` warning-free. `npm run build` passes
+  (tsc + vite). No new bugs found — no BUG-022 entry: the new
+  tests passed on the first full run, so no failing-test-first
+  fix was needed. The `GrabberSite` fixture gained one page
+  (`/only-dead.html`, whose only file 404s) so a run can finish
+  with matched-but-zero-downloaded; no existing fixture page
+  changed. A shutdown/hibernate was NEVER executed in a test —
+  the cancel path is tested by dismissing the pending action and
+  asserting a later execute fails; the run-program path is tested
+  with a marker script, as in the queue test.
+- Missing / partial (unchanged, honest): the Tauri shell changes
+  (`create_grabber_project` gains `queue_id` /
+  `on_complete_action` / `on_complete_program`) follow the
+  existing pattern but are **uncompiled** (`gdk-3.0`, same as
+  every earlier milestone); the wizard is verified via `npm run
+  build` + source inspection only, and the queue dropdown /
+  action picker have never been clicked in the running desktop
+  app. No Windows `.exe` exists. The crawl has never run against
+  a real website — only the local fixture, by rule (real-website
+  crawling is forbidden as a test). A manually Run scheduled
+  project still starts at once — that is the explicit override
+  (the wizard never runs a scheduled project immediately; it
+  saves it for the tick), not a silent schedule. A grabber-armed
+  action and a queue-drain action for the SAME queue share one
+  `PendingAction` slot (keyed by queue id): if both fire, the
+  second overwrites the first — documented, not tested (needs
+  two runs racing).
+- Harder than expected: (1) the arming key. Keying the pending
+  action by the project id would have needed a second Tauri
+  command, a second UI poll and a second countdown — exactly
+  what the brief forbids. Keying it by the target queue id
+  reuses everything, but it means the countdown dialog says
+  Queue "X" finished (the queue the files went into) rather
+  than naming the grabber project; that wording is honest
+  enough to keep, and the progress view names the queue and the
+  action. (2) The stopped-after-downloading test is timing
+  sensitive by nature (stop must land mid-download-phase); it
+  passed on the first run and twice in the full suite, with a
+  50 ms poll and ~3 s of download phase behind it, but it is
+  the test most likely to flake under load — if it ever does,
+  lengthen the phase rather than weakening the assertion.
+
+## S03 — Download progress dialog: finish (Milestone 5, 2026-11-15)
+- Done (speed graph): a 60 s speed chart in the dialog, fed by the
+  live progress events. The sampling lives in the new pure module
+  `src/lib/speedGraph.ts` — `recordSpeedSample` (one sample per
+  500 ms at most, samples older than 60 s pruned, list bounded by
+  the window at 121 entries, negative speed stored as 0) and
+  `speedGraphPoints` / `speedGraphPolyline` (newest sample at the
+  right edge, height scaled to the fastest sample seen, empty and
+  single-sample cases handled) — unit-tested with `node --test`
+  (`npm run test:speed-graph`, 8 tests). The dialog renders the
+  points as an SVG polyline with an accent-soft fill, tokens only
+  (no raw hex, no new dependency), with a "builds as the download
+  runs" empty state and an `aria-label` carrying the current speed.
+  Samples reset when the dialog opens for another download. No
+  sample is ever synthesised between events: a stalled download
+  graphs flat at zero.
+- Done (retry countdown, engine-driven): the EXISTING per-segment
+  retry is now visible. A failed segment publishes its wait on the
+  run's retry slot (`RetrySlot` in `manager.rs`: attempt, max
+  attempts, error, backoff deadline); every progress event carries
+  it as `ProgressEvent.retry`, with `retry_in_secs` recomputed
+  from the deadline on each emit — so the dialog's countdown is
+  the engine's own countdown, not a UI timer that could drift.
+  The backoff itself is unchanged (`1 << attempt` seconds, capped
+  at 16 s); the only change to the wait is that the sleep is now
+  100 ms slices up to the deadline, so a pause or a "Retry now" is
+  noticed within 100 ms instead of only when the whole backoff
+  expires.
+  The dialog shows "Connection lost — retrying in Ns (attempt a+1
+  of m)" with the engine's error, plus "Retry now" and "Cancel
+  download". New manager methods: `get_retry_state` (pollable
+  read of the same slot) and `retry_now` (sets the slot's flag;
+  errors when the download is not running or no segment is
+  waiting). `cancel_download` already worked mid-wait; the pause
+  paths clear a stale wait before their snapshot, so a paused
+  download never shows a countdown. `RetryInfo` is exported from
+  `engine/src/lib.rs`; the TS `ProgressEvent` gained the same
+  `retry` field.
+- Done ("Open folder" on completion): the button appears only in
+  the complete state. New engine methods `folder_for_download`
+  (validation only: the download must exist, and the folder —
+  the parent of `save_path` — must still be a directory, else a
+  clear "The folder no longer exists: …" error) and `open_folder`
+  (validation, then the SAME platform opener the queue completion
+  action uses — `cmd /C start` on Windows, `open` on macOS,
+  `xdg-open` on Linux; `open_path` in `queue.rs` is now
+  `pub(crate)` instead of a second opener being written). The
+  dialog shows a failure inline (`role="alert"`) instead of
+  closing or silently doing nothing. Tauri commands `retry_now`
+  and `open_folder` added to `src-tauri/src/lib.rs` (registered in
+  `generate_handler!`) and wired into `src/lib/api.ts`
+  (`retryNow`, `openFolder`); the dialog calls them directly, so
+  `App.tsx` needed no change.
+- Verified: `cargo test` in `app/engine` — **255 passed, 0
+  failed, 2 consecutive full runs** (24 unit + 111 integration +
+  25 extension + 28 grabber + 14 verifier + 7 new progress +
+  15 sync + 31 video; was 248 — +7 progress tests, each run 3
+  times during development: 7/7 every time). The new fixture
+  `MockServer::set_drop_get` drops a GET connection mid-body (no
+  response, or cut off at the next chunk), so the retry tests use
+  a real dropped connection, not only a 500: the 500 case
+  recovers and completes byte-exact, the drop case recovers the
+  same way after bytes were already downloaded, "Retry now"
+  lands the second wait inside 1.5 s (without it: 2 s), cancel
+  during a wait deletes at once with no wait surviving, a healthy
+  download never carries a retry, and the open-folder validation
+  pins the missing-folder and unknown-id errors. `cargo check
+  --tests` warning-free. `npm run build` passes (tsc + vite);
+  the built bundle was checked to contain the new strings ("Open
+  folder", "Retry now", "retrying in", "Speed over the last
+  minute") and the emitted `warning-soft` rule. `npm run
+  test:speed-graph` 8/8; extension JS tests 27/27 re-run green;
+  `npm run test:extension` passes; Vite preview serves the app
+  (index 200, `Fetchline` title). No new bugs found — no BUG-022
+  entry: the 7 new engine tests and 8 sampler tests passed on
+  their first full runs against the new code.
+- Missing / partial (unchanged, honest): the Tauri shell changes
+  (`retry_now`, `open_folder`) follow the existing pattern but
+  are **uncompiled** (`gdk-3.0`, same as every earlier
+  milestone); the shell-open spawn itself has never executed
+  (there is no desktop app or file manager on this Linux VM —
+  the success path is validated-only, the error paths are
+  tested); the dialog's graph, countdown and Open folder button
+  have never been clicked in the running desktop app. No Windows
+  `.exe` exists. The features.csv row is flipped to `yes` on the
+  same basis as the earlier finished rows (video grabber,
+  site grabber): everything except the uncompiled-Tauri part is
+  proven, and the limits are recorded in the row note.
+- Harder than expected: (1) the sampler's first draft carried a
+  240-sample cap that the window prune makes unreachable (60 s
+  at 500 ms is 121 samples at most) — the cap test caught it
+  (121, not 240) and the cap was removed instead of tested into
+  place. (2) The retry wait must be a deadline, not a remaining
+  count: storing "2 s left" at failure time would freeze the
+  countdown between events, while a deadline lets every 250 ms
+  emit recompute a ticking number. (3) TypeScript does not carry
+  prop narrowing into closures: the dialog's action handlers
+  needed the download id captured in a local const after the
+  early return, or `tsc` refuses them as possibly null.
+  **Correction (S03 entry, 2026-11-14):** the three gaps listed
+  there — speed graph, "Open folder" on completion, retry
+  countdown display — are now built; see this entry. The row
+  stays `yes` in features.csv.
+
+## S05 — Periodic synchronisation: partial (2026-11-15)
+- Done (engine): new sync in `engine/src/manager.rs`
+  (`run_sync_queue`, `sync_one_file`, `redownload_changed_file`,
+  `remote_changed`, `wait_for_download`) plus `SyncResult` /
+  `SyncFileResult` (exported from `engine/src/lib.rs`). A periodic
+  queue re-probes every file in it — HEAD probe through the
+  configured proxy, compared with the stored size / ETag /
+  Last-Modified — and re-downloads ONLY a file that differs, over
+  its existing save path, through the normal engine path (segments,
+  speed limiter, proxy client), byte-identical. Unchanged files are
+  skipped and counted (proven: 0 GETs, 1 HEAD, file mtime untouched).
+  A file the server answers 404 for is reported `removed` with its
+  message — the row and the local copy stay, nothing is silently
+  dropped. A failed probe or re-download is `failed` and retried at
+  the next sync, never in a loop (a failed re-download is retried
+  via resume, which re-probes and continues or restarts it). A file
+  with no size and no validator at all is reported `skipped` with
+  "cannot tell whether this file changed" instead of guessing. A
+  finished file whose local copy is gone is re-downloaded whatever
+  the probe says. Excluded sites are refused before any probe (0
+  requests observed). Files that have not finished downloading are
+  skipped with "start it first". The outcome is recorded on the
+  queue (`last_sync_at` + changed/unchanged/removed/failed/skipped
+  counts) so the UI can show "last sync" + "changed files".
+- Done (scheduler): the existing 30 s tick runs periodic queues —
+  no second scheduler was built. A queue is due when never synced,
+  or when its interval has elapsed since the last sync, and only
+  inside its start/stop window; a running sync is never started
+  twice (guarded by `sync_runs`), and a stop time asks a running
+  sync to stop after its current file. `start_startup_queues`
+  syncs a periodic queue flagged start-on-startup instead of
+  draining it.
+- Done (exclusivity): a queue is either one_time or periodic,
+  never both. `update_queue` validates both shapes at save time:
+  periodic needs an interval of 5–10,080 minutes (smaller is
+  rejected with "at least every 5 minutes", not clamped) and a
+  valid start/stop window; one_time / none must not carry an
+  interval (rejected, and switching back clears it). `start_queue`
+  refuses a periodic queue ("use Sync now instead") so a drain can
+  never drop the finished files a sync queue exists to watch, and
+  `run_sync_queue` refuses a one-time queue. `add_to_queue` now
+  accepts a finished download into a periodic queue (that is what
+  it syncs) while the BUG-003 guard still refuses finished
+  downloads into one-time queues.
+- Done (store/schema): `queues` gained `sync_interval_minutes`,
+  `last_sync_at`, `last_sync_changed/unchanged/removed/failed/
+  skipped` (`replica/schema.sql` + `Store::migrate` ALTERs for
+  older databases — verified by a kept migration test that opens a
+  hand-built pre-sync database file). `downloads` needed no new
+  column: the stored size/ETag/Last-Modified already are the last
+  known remote values; `update_known_remote` adopts a validator
+  the server only just started sending. New store methods:
+  `record_sync`, `update_known_remote`.
+- Done (UI): `SchedulerDialog.tsx` — the periodic radio is enabled
+  (interval number field, min 5, default 30; start/stop window;
+  "Only files that changed are re-downloaded" note), the schedule
+  tab shows the last sync with all five counts for a periodic queue
+  plus a "Sync now" button with a result summary and a list of
+  removed/failed files, and the saved-schedule line shows the
+  interval + window. Keyboard reachable (native inputs/buttons,
+  same dialog patterns as before). Tauri command `sync_queue_now`
+  added to `src-tauri/src/lib.rs` (plus the `sync_interval_minutes`
+  parameter on `update_queue`), wired into `src/lib/api.ts` /
+  `src/lib/types.ts` (`QueueRow` sync fields, `SyncResult`).
+- Verified: `cargo test` in `app/engine` — **218 passed, 0 failed,
+  2 consecutive full runs** (21 unit + 111 integration + 21
+  extension + 15 grabber + 14 verifier + 15 new sync tests + 21
+  video; was 201). `cargo check --tests` warning-free (0
+  warnings). `npm run build` passes (tsc + vite).
+- Bug found and fixed failing-test-first: BUG-020 (a sync retry of
+  a failed re-download reported the stale error at once and never
+  retried — `wait_for_download` treated any `error` status as
+  terminal; now an error is terminal only when the run is no longer
+  registered in the `running` map). See `replica/bugs.md`.
+- Missing / partial: the Tauri shell changes follow the existing
+  pattern but are **uncompiled** (`gdk-3.0`, same as every earlier
+  milestone); the dialog is verified via `npm run build` + source
+  inspection only, and the "Sync now" button has never been clicked
+  in the running desktop app. No Windows `.exe` exists. Sync has
+  never run against a real website — only the local fixture server,
+  which sends ETag + size but no Last-Modified, so the
+  Last-Modified comparison path is code-only. A sync waits up to
+  120 s per re-downloaded file, then reports it failed for the next
+  sync.
+- Harder than expected: (1) the stale-status trap. The queue runner
+  already guards it with "ignore the pre-start status until
+  downloading is seen", but the sync waiter polled status alone —
+  a retried file still reads `error` with the old message until its
+  new run flips the status, so the retry reported the old failure
+  without making any request (proven by the server's GET counter
+  not moving). The fix uses the `running` map, not a
+  seen-downloading flag, because a failure faster than the 200 ms
+  poll would otherwise be misread as stale. (2) The exclusivity
+  rule is three rules, not one: save-time validation, `start_queue`
+  refusing periodic queues, and `add_to_queue` letting finished
+  files into periodic queues only — the third one is easy to miss,
+  and without it a sync queue could never be filled with the
+  finished downloads it exists to watch.
+
+## S05 — Periodic synchronisation: finish (2026-11-15, PARTIAL 2 of 4)
+
+- Done (Last-Modified fixture — the gap named in the partial row):
+  the shared test mock (`app/engine/tests/common/mock.rs`) gained
+  `no_etag` and `send_last_modified` config flags plus a
+  `Last-Modified` version counter (`bump_last_modified`) and a
+  size-only bump (`bump_size`). Defaults are unchanged, so every
+  other suite that shares the mock behaves exactly as before. New
+  tests `sync_redownloads_on_last_modified_only_change` (changed
+  timestamp re-downloads; the new timestamp is stored) and
+  `sync_skips_when_last_modified_unchanged` (same timestamp skips
+  with 0 GETs, 1 HEAD, file mtime untouched) run against a local
+  server sending Last-Modified and NO ETag — the comparison path
+  is now fixture-proven, not code-only. The ETag-only variant was
+  already covered (F04-Y3, still passing); the size-only variants
+  are new: `sync_redownloads_on_size_only_change` (size +1 KiB,
+  no ETag, no Last-Modified) and
+  `sync_skips_when_size_only_unchanged`.
+- Done (interval boundaries):
+  `sync_interval_boundaries_accept_5_min_and_1_week_reject_below_and_above`
+  pins 5 min accepted, 4 min rejected, 10,080 min (exactly one
+  week) accepted, 10,081 rejected — and a rejected save stores
+  nothing (the saved interval stays 5). Note: the interval is
+  stored in whole minutes, so "4 minutes 59 seconds" has no
+  representation in the API; 4 minutes is the boundary probe for
+  "below 5 minutes", and the test comment says so.
+- Done (empty queue): `sync_of_an_empty_queue_finishes_cleanly` —
+  a periodic queue with no files syncs to all-zero counts, no
+  files, no crash, and the last-sync time is still recorded so the
+  dialog can show it ran.
+- Done (mid-download sync — decision: SKIP, do not touch it):
+  `sync_skips_a_file_that_is_mid_download_and_leaves_it_byte_identical`
+  starts a slow 2 MiB download (8 KiB chunks at 100 ms, ~6 s per
+  segment), syncs while it is `downloading`, and asserts the sync
+  reports `skipped: 1` ("not finished"), makes zero HEAD probes
+  against that file, leaves the status `downloading`, and the
+  download then completes byte-identical with no `.part` left
+  behind and the file still in its queue. The choice is
+  documented in the code (`sync_one_file` in `manager.rs` — the
+  non-complete arm now carries the reason) and in
+  `test-plan.md` F04-Y23. The alternative (queue the file for a
+  re-check after it finishes) was rejected: the next scheduled
+  sync already is that re-check, and there is no second mechanism
+  to keep in sync. A second guard already existed and is now
+  named in the test: `redownload_changed_file` re-reads the row
+  and refuses a file that started downloading while the sync was
+  already running.
+- Done (shrunk remote file): `sync_redownloads_a_file_that_shrank_byte_identical`
+  — the mock gained `shrink_to` (size override + ETag bump, as a
+  real server replacing its file would send). A 512 KiB file
+  shrinking to 256 KiB re-downloads over the same path; the local
+  file ends up exactly 256 KiB, byte-identical to the new remote
+  file, and stays in its queue.
+- Real-website sync stays forbidden as a test: no real site was
+  contacted, and none ever should be for sync — a periodic sync
+  test against a real site would hammer it on every run. All
+  checks used local fixture servers only. Recorded here, in the
+  features.csv row note, and in test-plan.md.
+- Verified: full engine suite **297/297, 0 failed** (28 unit +
+  111 integration + 25 extension + 16 final-verify + 28 grabber +
+  14 verifier + 14 options + 7 progress + 23 sync + 31 video;
+  was 271 — +8 new sync tests, +4 unit and +14 options tests from
+  the parallel Options-dialog worker's suite, which landed during
+  this run). `cargo check --tests` warning-free (0 warnings).
+  `npm run build` passes (tsc + vite).
+- Handoff note: the numbers above are the last green runs. After
+  they were taken, the tree stopped compiling because of the
+  parallel workers' in-flight edits — first `src/ntlm.rs`
+  (Proxy worker: E0308/E0382, then E0061), then a call in
+  `src/native_host.rs:445` to a `Store` method
+  (`enqueue_pending_link_with_cookies`) that does not exist yet
+  (browser-catch worker: E0599). None of those errors is in sync
+  code (mock.rs, sync_tests.rs, the one manager.rs comment), and
+  no sync file was touched by them. Re-run the full suite once
+  the other workers have landed before treating the tree as
+  green; the sync suite itself was 23/23 in both green full runs.
+- No new bug was found in this milestone: no BUG-022. See
+  `replica/bugs.md` Round 12 for the two concurrent-work
+  artefacts observed while verifying (neither is a sync bug).
+- Yes/partial decision: the row is flipped to `yes`. Justification:
+  every closable gap in the row's note is now proven by a kept
+  test — Last-Modified fixture, ETag-only, size-only, interval
+  boundaries, empty queue, mid-download behaviour, shrunk file.
+  What remains is environment-only, the same limits every other
+  `yes` row carries: the Tauri `sync_queue_now` command and the
+  `update_queue` interval parameter are uncompiled on this Linux
+  VM (`gdk-3.0`); the Scheduler dialog is verified via `npm run
+  build` + source inspection only, and F04-M4 (the dialog
+  click-through) stays BLOCKED on the desktop binary; no Windows
+  `.exe` exists; sync has never run against a real website, by
+  rule. None of those is S05 function.
+- Harder than expected: (1) verifying while three other workers
+  share the VM. The first full sync-suite run failed the BUG-020
+  regression test with its finished file suddenly missing from
+  disk — the test then passed 3/3 in isolation and on a full
+  re-run (23/23), which is consistent with a concurrent run's
+  `/tmp/fetchline-test-*` cleanup deleting a live test directory,
+  not with a product fault; no code was changed for it and no
+  BUG entry was opened. (2) The mock's `handle` builds its 206
+  headers in a separate branch from its HEAD/200 headers, so the
+  conditional ETag / Last-Modified had to be applied in both
+  places — easy to miss one and then wonder why a ranged GET
+  disagrees with the probe.
+
+## S09 — Options dialog: finish (Site logins, Dial-Up, Sounds) — 2026-11-15
+- Done (Site logins tab): per-site saved credentials (host +
+  username + password, Basic auth only) in `engine/src/options.rs`
+  + `Store::list/save/delete_site_login` (`site_logins` table
+  already existed in the schema). The password goes through the
+  existing `secret.rs` path — DPAPI on Windows, base64-obfuscated
+  on Linux, the same standing limitation as proxy passwords, and
+  the row the UI sees carries only `has_password`. Hosts are
+  cleaned like excluded sites (scheme/port/path stripped,
+  lowercased); only Basic is accepted (NTLM/Kerberos are refused
+  at save, not stored as a promise the engine cannot keep);
+  matching is exact-host, so a login for `example.com` is never
+  sent to `sub.example.com`. The engine sends the credential on
+  the probe (`probe_with_auth` in `probe.rs`, via
+  `DownloadManager::probe_url`) and on every segment request
+  (the credential is looked up once per run and carried by the
+  segment tasks — never put on the shared client, so one site's
+  password cannot leak to another site). A login-gated local
+  fixture server downloads byte-exact WITH the saved credential
+  and fails with 401 without it or with the wrong password.
+- Done (Dial-Up tab): connection name, auto-dial, hang up after
+  completion, redial attempts 0–10, stored on the `settings`
+  row (`replica/schema.sql` + `Store::migrate` ALTERs, verified
+  by a kept migration test on a hand-built pre-S09 database).
+  Only the part with a real engine behaviour is wired in: "hang
+  up after completion" maps onto the existing on-completion
+  action path — when a queue drains cleanly having downloaded
+  >= 1 file and has no other completion action, a `hangup`
+  pending action is armed (the queue's own action wins; a queue
+  that downloaded nothing arms nothing — the BUG-003 rule), and
+  `queue::execute_action` runs it on Windows as
+  `rasdial <name> /disconnect`, refusing off Windows like
+  shutdown/hibernate. Auto-dial and redial attempts are stored
+  and validated and are honoured only where a dial-up connection
+  exists (Windows RAS): no dial or redial is ever executed on
+  this VM, and none is faked. Redial attempts are dial-up
+  connection attempts, NOT download retries — they never touch
+  `settings.max_retries`.
+- Done (Sounds tab): per-event sounds for download complete,
+  download failed and queue finished — WAV file picker (plain
+  text path; there is no native file picker yet, the same
+  limitation as the S02 folder field), enable/disable per event,
+  Test button. New `sound_settings` table (one row per event) +
+  `Store::get/save_sound_setting`. The engine emits the event
+  (`DownloadManager::emit_sound`, recorded in the manager's
+  sound log with the resolved file) on completion, on failure
+  (read from the stored status, so a pause plays nothing) and
+  on a clean queue drain that downloaded something; on Windows
+  it also plays the file via PowerShell `SoundPlayer` in a
+  detached process. On this Linux VM playback never happens —
+  tests assert the event fires and the configured file resolves,
+  not that audio played — and `play_sound` / `test_sound_file`
+  honestly error "only available on Windows" after validating
+  the file (WAV, exists).
+- Done (UI): `SettingsDialog.tsx` now has all 9 tabs
+  (keyboard-reachable native inputs/buttons, same dialog
+  patterns as the 6 existing tabs); logins and sounds are staged
+  in the dialog draft and saved with the rest on Save settings,
+  with the same validation as the engine; login passwords are
+  masked with an explicit Show toggle per row. New types in
+  `src/lib/types.ts`, new bridge calls in `src/lib/api.ts`
+  (`list/save/delete_site_login`, `get/save_sound_settings`,
+  `test_sound_file`), 6 new Tauri commands in
+  `src-tauri/src/lib.rs` (same pattern as the existing ones).
+- Verified: full engine suite **297 tests** (28 unit incl. 4 new
+  in `options.rs` + 111 integration + 25 extension + 28 grabber
+  + 14 verifier + 7 progress + 23 sync + 31 video + 16
+  final-verify + 14 new `options_tests`; was 271 — +14 options
+  tests, +4 unit; the sync count grew because the parallel sync
+  worker's suite grew in the same window). The parallel sync
+  worker's full run passed **297/297, 0 failed** (their
+  test-plan entry records it, including these 14 options
+  tests). My own per-binary re-runs totalled 296/297: the 1
+  failure is NOT this milestone's —
+  `extension_manifest_is_mv3_and_minimal` fails because the
+  extension manifest gained a `cookies` permission — the
+  parallel browser-catch worker's in-flight edit, in their
+  area; not touched here, no BUG entry opened for it (the sync
+  worker's bugs.md Round 12 records the same failure).
+  `cargo check --tests` warning-free. `npm run build` passes
+  (tsc + vite). The 6 existing Settings tabs are untouched in
+  behaviour; their tests all pass in the full suite above.
+- Missing / partial (honest, environment-only, not S09
+  function): the 6 new Tauri commands follow the existing
+  pattern but are **uncompiled** (`gdk-3.0`, same as every
+  earlier milestone); the dialog has never been clicked in the
+  running desktop app; no Windows `.exe` exists. DPAPI password
+  storage has never run on Windows; on this VM site-login
+  passwords are base64-obfuscated only, exactly like proxy
+  passwords. Windows RAS execution (auto-dial, redial, hang-up)
+  is unproven — there is no dial-up connection on this VM.
+  Sound playback was never heard on this VM (no audio device;
+  the Windows `SoundPlayer` branch has never run). **Final
+  state at handoff:** the engine does NOT currently compile —
+  the parallel proxy worker's in-flight `ntlm.rs` has 2
+  borrow errors (`E0382`, borrow of moved `headers`) plus a
+  warning, in code this milestone never touched. The last
+  green state for this milestone is the 297/297 full run above
+  (sync worker) and the per-binary 296/297 (manifest failure
+  only); the parent must re-run the suite once the proxy
+  worker lands. This milestone's own files are intact
+  (`options.rs`, `queue.rs`, and the S09 additions in
+  `store.rs` / `manager.rs` / `probe.rs` / UI / Tauri shell
+  all still present, verified by search at handoff). At the time
+  this milestone was verified, the periodic-sync re-probe and
+  the page-scan probes (`fetch_page_links` /
+  `detect_page_videos`) used the plain probe, so a gated link
+  listed there showed its 401 error while the download itself
+  (add/download path) sent the credential. That gap has since
+  been narrowed by parallel workers in the same window: the
+  sync re-probe now calls the same credential-aware
+  `probe_url`, and the probe module gained proxy-aware
+  variants. The rework was not re-verified by this worker (the
+  engine does not currently compile — see the final note
+  below), so it is recorded here rather than claimed.
+- Harder than expected: (1) verifying while three other workers
+  share the VM and the same `/tmp`: the BUG-020 regression test
+  in the sync suite failed twice with its finished file
+  suddenly missing from disk, then passed in isolation and on
+  a full re-run (23/23) — the same interference the sync
+  worker's own build-log entry already records (a concurrent
+  run's `/tmp/fetchline-test-*` cleanup deleting a live test
+  directory). No code was changed for it and no BUG entry was
+  opened. (2) Threading auth through the engine without
+  putting it on the shared client: the probe needed a
+  per-request variant and every segment task its own copy of
+  the credential, including segments created by a dynamic
+  split — the split path was the easy one to miss. (3) The
+  pause case in the sound wiring: `run_inner` returns Ok for
+  a pause as well as a completion, so the sound must be chosen
+  from the stored status, not the outcome, or every pause
+  would play the completion sound.
+
+## S09 — Proxy: finish (PARTIAL 4 of 4, 2026-11-15)
+
+- Done: FTP transport + NTLMv2 proxy auth. Row 18 flipped to
+  `yes` (see features.csv for the explicit Kerberos decision).
+- What was built:
+  - `app/engine/src/ftp.rs` (new): minimal FTP client — control
+    connection, multi-line replies, login (incl. the FTP-proxy
+    sequence: proxy USER/PASS, then `USER <ftp-user>@<ftp-host>`),
+    TYPE I, SIZE, PASV, REST, RETR. `ftp_probe` (SIZE) and
+    `ftp_retr` (`FtpBodyReader`, per-segment connections, 30 s
+    control timeouts). Plain FTP only, passive mode only.
+  - `app/engine/src/ntlm.rs` (new): NTLMv2 from public specs,
+    pure std, no new crates — MD4 (RFC 1320), MD5 (RFC 1321),
+    HMAC-MD5 (RFC 2104), UTF-16LE, NT hash, NTLMv2 hash,
+    Type 1 builder, Type 2 parser (incl. target-info timestamp
+    AV pair), Type 3 builder with fresh client challenge +
+    FILETIME timestamp. Raw-TCP `ntlm_request` / `ntlm_head`:
+    the Type 1 request doubles as the real request; on a 407
+    with a Type 2, Type 3 + the same request go on the same
+    socket (reqwest cannot do NTLM — it is connection-bound).
+    `probe_connect_auth`: one unauthenticated CONNECT to learn
+    what a proxy demands, used only to explain a failed https
+    CONNECT with a clear error.
+  - Wiring (`app/engine/src/`): `probe.rs` — `probe_with_proxy`
+    dispatches ftp:// to the FTP probe and adds the 407 NTLM
+    fallback for HTTP(S) probes; `manager.rs` — `probe_url`,
+    `test_proxy`, `run_segment`/`download_segment_once` (new
+    `download_segment_ftp` / `download_segment_ntlm`, reusing the
+    limiter / pause / retry machinery), `fetch_page_links` and
+    HLS variant probes now use the proxy-aware probe, sync
+    re-probe uses `probe_url`; `proxy.rs` — `host_bypasses_proxy`
+    helper; `store.rs` — `enqueue_pending_link` accepts `ftp`.
+    UI: SettingsDialog FTP hint now says FTP proxies are used
+    for ftp:// downloads; `src-tauri` `test_proxy` doc updated.
+- Behaviour: ftp:// probes and downloads through the configured
+  FTP proxy OR directly when none is set; FTP proxy auth and
+  the bypass list apply. NTLM is auto-negotiated from a 407
+  with `Proxy-Authenticate: NTLM` (no new setting — the proxy
+  schema has no auth-type field); `DOMAIN\user`, `user@domain`
+  and bare user all accepted; workstation sent as `FETCHLINE`.
+  A Kerberos-only proxy (`Negotiate` without NTLM) is refused
+  with a clear error, never faked. https:// through an NTLM
+  proxy is refused with a clear error (TLS tunnel after the
+  handshake is not built). FTP through an HTTP proxy is OUT OF
+  SCOPE: an ftp:// download goes direct and the HTTP proxy is
+  never contacted.
+- Tests: `app/engine/tests/proxy_tests.rs` (new, 15 tests) —
+  local FTP fixture server + local NTLM stub proxy, all local,
+  no public FTP server. FTP: probe + direct download,
+  proxy routing + auth order, bypass list, multi-segment
+  byte-exact, pause/resume byte-exact, no-SIZE open-ended,
+  login accept/refuse, wrong proxy credentials rejected, FTP
+  direct when only an HTTP proxy is set, `test_proxy` ftp URL
+  through an FTP proxy + the http/ftp refusal cases. NTLM:
+  http download through the stub, wrong password rejected,
+  Test button right/wrong password, Kerberos-only refused
+  clearly, https test URL refused clearly. Independent check:
+  libcurl `--proxy-ntlm` against the same stub — correct
+  password: HTTP 200, 512 KiB byte-exact; wrong password:
+  HTTP 407. (First curl runs looked like 200 for the wrong
+  password because the VM's `no_proxy` includes 127.0.0.1 and
+  curl bypassed the proxy entirely; `--noproxy ''` forces it
+  through — the earlier 200 was a no_proxy artifact, not a
+  stub bug.) NTLMv2 test vectors pinned against an independent
+  Python/OpenSSL computation (`/tmp/ntlm_vector.py`, since
+  removed with the /tmp scratch).
+- Verification: full engine suite **326/326 pass, 0 failed**
+  (35 unit + 111 integration + 32 extension + 16 final-verify
+  + 28 grabber + 14 verifier + 14 options + 7 progress +
+  15 proxy + 23 sync + 31 video); `npm run build` passes.
+  BUG-009/010 regression tests pass in the full suite. One bug
+  found and fixed in this round: BUG-022 (test-fixture-only —
+  the NTLM stub closed the connection on a Basic auth header
+  instead of re-challenging; see bugs.md). No engine bug was
+  found. Two tests were converted (not deleted) for the
+  deliberate behaviour change: `add_download_rejects_non_http_scheme`
+  now probes `gopher://` (ftp:// is supported), and the comment
+  on `ftp_proxy_is_stored_but_not_applied` now states the FTP
+  proxy only routes FTP traffic.
+- Harder than expected: (1) NTLM is connection-bound, so the
+  whole proxy-auth path had to bypass reqwest with raw TCP —
+  including re-sending the request on the same socket after
+  Type 3, draining the 407 body first, and handling
+  Content-Length / chunked / read-to-close bodies by hand.
+  (2) A proxy 407 to a CONNECT tunnel never reaches reqwest as
+  a response — it surfaces as a transport error — so https
+  failures needed the `probe_connect_auth` preflight just to
+  produce a clear error message. (3) The FTP segment model:
+  each segment needs its own control + data connections, and
+  the 226 check must be skipped when a segment stops early at
+  a split end (the server is still sending). (4) Verifying
+  while three other workers share the tree and /tmp: the
+  baseline full run showed 6 engine_tests failures from other
+  workers' in-flight edits; /tmp was NOT cleaned while their
+  cargo tests were running (only 44 MB / 512 MB used, no
+  pressure), so the before/after `rm -rf /tmp/fetchline-test-*`
+  was skipped deliberately and is recorded here rather than
+  claimed.
+- Missing / limits: Kerberos (SPNEGO/GSSAPI) — not supported,
+  needs system libraries not present here; see the decision in
+  features.csv row 18. FTP through an HTTP proxy — out of
+  scope, goes direct. https:// via NTLM proxy — clear error,
+  not built. NTLM signing/sealing — not implemented (auth
+  only). No FTPS, passive mode only. The FTP fixture proves
+  the proxy login sequence (`user@host`), not a full relay
+  proxy. Tauri commands uncompiled on this Linux VM (gdk-3.0);
+  no Windows .exe; extension never run in a real browser.
+  Test-only dummy credentials were used throughout (`alice` /
+  `hunter2` etc.); no password is stored or logged in plain
+  text.
+
+## Not built (next milestones, in architecture order)
+- S11 licence, MB-per-hours quota, per-download speed cap,
+  Windows autostart registration.
+- Correction (2026-11-15): this list previously named "S06 site
+  grabber" and "periodic synchronisation (deferred to L)" as not
+  built. Both are built now — S06 (partial, 2026-11-14) and S05
+  periodic sync (partial, 2026-11-15, see above) — so they are
+  removed from this list. `parity.md` still scores the pre-sync
+  state (58.3/100) until the next replica-diff pass re-scores it.
+- Desktop binary: no Windows .exe was produced on this Linux VM.
+  `cargo check` in `src-tauri` fails here on the missing `gdk-3.0`
+  system library, which apt cannot install on this image (pinned
+  `libzstd1` `+hatch1` variant conflicts with `libzstd-dev`).
+  First build must happen on Windows — see `app/README.md`.
+
+## Final verification (all four partials) — 2026-11-15
+
+Independent verifier pass (did not build any of the four
+partials). Full engine suite re-run twice after the fix below:
+**330/330, 0 failed** (35 unit + 111 integration + 32
+extension + 4 final-verify2 + 16 final-verify + 28 grabber +
+14 verifier + 14 options + 7 progress + 15 proxy + 23 sync +
+31 video; was 326 — +4 new final-verify2 tests). `npm run
+build` passes; extension JS 44/44 (36 extension tests + 8
+speed-graph); `node --check` passes on all four extension
+scripts; `cargo check --tests` 0 warnings (3 test-only warnings
+in `proxy_tests.rs` found and fixed in this pass — unused
+`Read` import, unnecessary `mut`, an `authed` flag the harness
+never reads; the flag stays with an allow + comment because a
+real proxy keeps connections alive). Host smoke against a
+freshly rebuilt `fetchline-host` binary: video 13/13,
+download-all 14/14, cookie 14/14. BUG-001–024 re-checked, all
+regression tests pass by name (37 named checks); BUG-007
+re-checked by source; BUG-013/016 via host smoke / JS tests.
+
+- Bug found and fixed failing-test-first: **BUG-025** — the
+  page-scan probes (`fetch_page_links`, `detect_page_videos`,
+  HLS variant probes, `fetch_playlist_text`) never sent a saved
+  site login, so a login-gated link showed 401 in Download All
+  / the video panel even with a saved credential (the manual
+  add path already sent it; the sync re-probe already used the
+  credential-aware `probe_url`, verified by reading
+  `manager.rs`). Fixed by threading `site_auth_for_url`
+  (exact-host only) through all four call sites in
+  `manager.rs`; 4 kept tests in
+  `app/engine/tests/final_verify2_tests.rs` (4/4 pass). The
+  site grabber crawl still does not send site logins —
+  login-required pages are reported, as documented; separate
+  scope decision, not part of the fix.
+- Cross-worker damage check: all four workers' code present and
+  intact — `CookiePair` / `probe_with_cookies` / cookies map in
+  `manager.rs`, `ftp_probe` / `ftp_retr` in `ftp.rs`, NTLM Type
+  1/2/3 in `ntlm.rs`, site-login store fns in `store.rs` /
+  `options.rs`, Last-Modified handling in the sync path, all 9
+  Settings tabs in `SettingsDialog.tsx` (incl. Site logins,
+  Dial-Up, Sounds). No worker's files were clobbered by another.
+- Manifest check: the `cookies` permission is genuinely used
+  (`background.js` `cookiesFor(url)` reads cookies only for the
+  exact handed-over URL); the manifest test
+  `extension_manifest_is_mv3_and_minimal` passes with it listed
+  as allowed, as does the Python validator. One stale comment
+  fixed (it cited BUG-022 for the Firefox gecko id; the gecko
+  id was BUG-023).
+- Licence (S11) verified untouched: no licence/registration
+  code exists in the app or the Tauri shell; the row stays `no`.
+
+## Fresh replica-diff — 2026-11-15
+
+`parity.py` re-run on the verified `features.csv`. Score
+**76.4 / 100, must-haves 16 of 17** (was 66.7 / 13 of 17 at
+the Round-12 baseline; 78.5 / 17 of 17 with the proxy worker's
+`yes` still in place). The delta from the proxy worker's
+number is the verifier revert: the proxy row was flipped back
+`yes` → `partial` because Kerberos proxy auth is unbuilt
+functionality, not unproven functionality, and recon F09 names
+Kerberos as an in-scope proxy-auth edge — the row's own scope
+does not allow a `yes`. `parity.md` rewritten from scratch
+(see there for the per-screen structural comparison, the
+F01–F10 behaviour diff updated for the four finishes, and the
+new top five: Kerberos proxy auth, S11 licence, antivirus
+hook, update check, download-limits quota + per-download cap).
+Verdict: **NOT SHIPPABLE** — the one partial must-have is
+proxy / Kerberos; zero open bugs. No Windows `.exe`; Tauri
+shell still uncompiled on Linux (`gdk-3.0`); extension never
+run in a real browser; no real website ever crawled/synced.
+
+## Kerberos proxy auth (SPNEGO / Negotiate) — 2026-11-15
+
+The last partial must-have is now built. The verifier's
+revert reason (Kerberos unbuilt, recon F09 names it in
+scope) no longer applies: `features.csv` row 18 flips
+`partial` → `yes`. No `parity.py` re-run in this pass (the
+coordinator does the final parity run).
+
+**GSSAPI availability (checked first, as instructed).**
+`libgssapi_krb5.so.2` and `libkrb5.so.3` are installed (MIT
+Kerberos 1.20.1-6ubuntu2.10), but there are no headers, no
+pkg-config entry, no `krb5-config`, no `kinit`/`klist`, no
+`/etc/krb5.conf`, and no credential cache. No apt attempt
+was made (the pinned `libzstd1` +hatch1 conflict is not to
+be touched) — and none was needed.
+
+**Dependency choice (justification).** No new crate. The
+engine calls the already-installed MIT Kerberos runtime
+directly through FFI (`#[link(name =
+":libgssapi_krb5.so.2")]` — the versioned file links with
+no `-dev` package). The `libgssapi`/`gssapi` crates were
+rejected: they need pkg-config + headers, which are not
+installed. The same direct-FFI pattern is used against
+`secur32` on Windows (mirroring `secret.rs` DPAPI FFI), so
+the Windows path is SSPI: `AcquireCredentialsHandleA`
+(`"Negotiate"`) + `InitializeSecurityContextA`. Nothing is
+faked and no Kerberos crypto is hand-rolled: the token
+exchange is the system stack's, and the engine only encodes
+/decodes the SPNEGO framing (DER) around it. The FFI was
+proven with scratch probes before the implementation: a
+`gss_import_name("HTTP/127.0.0.1")` succeeds and a
+`gss_init_sec_context` with SPNEGO fails fast (major
+`0x70000`, "No credentials were supplied… SPNEGO cannot
+find mechanisms to negotiate") — no hang, no network.
+
+**Auth selection + fallback order (single source of
+truth: `proxy_auth_order` in `proxy.rs`, unit-tested).**
+`proxy_configs.auth` is `basic | ntlm | kerberos |
+negotiate-auto`, default `negotiate-auto` (new column +
+migration; old databases without the column migrate to the
+default). `negotiate-auto` tries **Kerberos → NTLM →
+Basic**, restricted to what the proxy offered and what the
+setting allows; `basic`/`ntlm`/`kerberos` try exactly one
+scheme and fail with a clear error naming the selected
+scheme when the proxy does not offer it. A 407 offering
+only `Negotiate` never falls through to Basic. Basic
+credentials are sent preemptively only when `auth` is
+`basic` (or always for SOCKS5, where username/password is
+the only auth); otherwise the engine waits for the 407 and
+picks the strongest offered scheme, like a browser.
+Kerberos uses the system ticket cache / Windows sign-in,
+never the saved proxy password; the saved credentials are
+used only for NTLM/Basic fallbacks. Kerberos is plain
+`http://` only (https through a Kerberos proxy is refused
+with a clear error — no TLS tunnel after the handshake,
+same limit as NTLM) and is rejected for SOCKS/FTP proxy
+types at validation.
+
+**SPNEGO mechanics.** GSSAPI output is already a complete
+`NegTokenInit`, so the engine does not wrap it; the engine
+parses the server's `NegTokenResp` to extract
+`responseToken` for the next step. Multi-round loop, max 5
+rounds, 30 s timeout; GSSAPI `step()` runs via
+`tokio::task::spawn_blocking` (it can block on KDC/DNS).
+SPN is `HTTP/<proxy host>`. The exchange runs on the probe
+path, the download-segment path, the Test button, and the
+cookie probe (Basic only for cookies — the raw Kerberos
+handshake cannot carry them, so a cookie-gated link behind
+a Negotiate-only proxy fails with a clear Kerberos error).
+Test seam: `SpnegoInitiator` trait; production callers
+always construct the real GSSAPI/SSPI initiator via
+`new_kerberos_initiator`; tests pass a scripted initiator
+through `kerberos_request_with_initiator`.
+
+**What the tests prove, and what they do not.** The stub
+proxy (`tests/kerberos_tests.rs`) validates SPNEGO framing
+with its OWN hand-written DER code — it does not share the
+engine's encoder/decoder — and the engine's encoder is
+pinned independently by unit tests against hand-computed
+vectors. The end-to-end success path uses a scripted token
+source: it proves framing, the multi-round exchange, and
+forwarding — NOT a real domain login. No KDC was ever
+contacted. The failure path (no credentials on this VM)
+goes through the REAL GSSAPI initiator and the REAL
+manager/probe paths: it proves the engine attempts
+Kerberos, fails with a clear error naming Kerberos, and
+falls back (or refuses) in the documented order.
+
+**Files.** New `app/engine/src/kerberos.rs` (~42 KB:
+SPNEGO DER, GSSAPI FFI, SSPI, unit tests) and
+`app/engine/tests/kerberos_tests.rs` (14 tests: scripted
+handshake success, ranged GET + HEAD, initial-407-token
+plumbing, failing-initiator error, real-GSSAPI Negotiate-only
+failure via the manager, Kerberos→Basic and Kerberos→NTLM
+fallbacks via the manager, explicit-setting no-downgrade
+cases, https refusal, auth round-trip/validation/migration,
+cookie-gated download behind Basic and behind
+Negotiate-only proxies). Edited: `proxy.rs` (auth
+selection, fallback order, validation), `ntlm.rs` (shared
+body-reader helpers made `pub(crate)`), `lib.rs`
+(exports), `store.rs` (migration + `auth` handling),
+`replica/schema.sql` (CHECK), `probe.rs` (407 fallback
+walker + cookie-probe threading), `manager.rs` (segment
+407 walker + `download_segment_kerberos` + Test button
+walker), `tests/engine_tests.rs` + `tests/proxy_tests.rs`
+(`auth: None` in the helper; one kept test now uses a
+demanding proxy because `negotiate-auto` no longer sends
+Basic preemptively — same assertions, via the 407 path —
+plus a new test pinning preemptive Basic for `auth:
+basic`). UI: `ProxyConfigRow.auth` /
+`ProxyConfigInput.auth` in `types.ts`, an Authentication
+select + hint in the Proxy tab of `SettingsDialog.tsx`
+(options filtered to Basic for SOCKS/FTP, type change
+forces Basic), `test_proxy` doc comment in
+`src-tauri/src/lib.rs`. No new crates, no new Tauri
+commands.
+
+**Verification.** Full engine suite **354/354 pass, 0
+failed** (44 unit + 112 integration + 32 extension + 4
+final-verify2 + 16 final-verify + 28 grabber + 14 verifier
++ 14 options + 14 kerberos + 7 progress + 15 proxy + 23
+sync + 31 video; was 330 — +9 unit, +1 integration, +14
+kerberos). `npm run build` passes. `cargo check --tests`
+0 warnings. `/tmp/fetchline-test-*` cleaned before and
+after. BUG-009/010 regression tests pass. **No new bugs
+found in this pass (no BUG-026).** One kept-test assertion
+bug was found and fixed during the pass (a wrong
+`Content-Range` substring in the new ranged-GET test) —
+test-only, not engine behaviour, not logged as a bug.
+
+**Missing / limits.** No real KDC contacted (stub only);
+SSPI path written, never compiled (Tauri shell still does
+not build on Linux — `gdk-3.0` — so still no Windows
+`.exe` and new Tauri commands uncompiled); Kerberos
+success through the manager's probe+segment paths is
+unproven without a KDC (only via the scripted-initiator
+seam + the fallback tests); https through a Kerberos proxy
+is refused; SOCKS5 GSSAPI is not built; no real website
+ever used. Licence (S11), antivirus hook (S14), update
+check and download quota untouched, as instructed.
+
+## Update check ("Quick update check", S09 / should-have): done (2026-11-15)
+
+- Done (engine): new `app/engine/src/update.rs` (~19 KB, 6 unit
+  tests). `check_for_updates()` fetches a JSON version manifest
+  (`{version, changelog|changes|notes, download_url?}`) from
+  Fetchline's own update server and reports whether a newer
+  version exists. Real semver-ish compare, not string compare:
+  `1.10.0 > 1.9.9`, `1.2.3 > 1.2.2`, `1.2 == 1.2.0`, a leading
+  `v` tolerated, a pre-release is older than its release
+  (`1.0.0-beta < 1.0.0`, `beta.2 < beta.10`), build metadata
+  ignored. A malformed manifest (invalid JSON, missing/empty/
+  unparseable version, non-http(s) download address, > 1 MiB
+  body) is a clear error naming the problem, never a crash and
+  never a phantom update. A non-2xx answer names its status;
+  a network failure names the failure ("Could not reach the
+  update server …") — never a silent "up to date".
+- Done (endpoint): the URL is a setting, `settings.update_url`
+  (new columns `update_url` + `last_update_check_at` on the
+  `settings` table — `replica/schema.sql` + `Store::migrate`
+  ALTERs for older databases, verified by a kept migration test
+  on a hand-built pre-update database). It defaults to the
+  documented placeholder
+  `https://updates.fetchline.app/releases/latest.json`, which
+  does not exist yet and must be replaced with the real release
+  server before shipping. It is Fetchline's own address — never
+  IDM's servers, never any third-party feed. Empty / non-http(s)
+  addresses are rejected on save with a clear error, nothing
+  stored. `update_settings` applies live (a manual check after a
+  save uses the new URL with no restart). The fetch uses the
+  engine's HTTP client, so the configured proxy and timeout
+  apply.
+- Done (weekly): the check rides on the EXISTING 30 s scheduler
+  tick (`scheduler_tick_at` spawns it; no second scheduler). A
+  check is due when `check_updates_weekly` is on (default) and
+  the last recorded check is at least a week old, or never
+  happened. The fetch runs in a detached task behind an
+  in-flight flag, so a slow server cannot stall queue
+  scheduling and a later tick never starts a second check. The
+  last-check time is recorded after every completed attempt —
+  success or failure — so a failed check retries next week, not
+  on every tick. When a weekly check finds an update it is sent
+  on a new `update_events` broadcast channel; up-to-date and
+  failed weekly checks send nothing. Manual Help > Check for
+  updates always runs, even when the weekly setting is off.
+- Done (ask before updating): the check NEVER installs anything
+  and never starts a download — the result carries the version,
+  the changelog and the installer address, and the user decides.
+  Verified by test: after a newer-version check the download
+  list is still empty and exactly one request (the manifest GET)
+  was made.
+- Done (UI): Help menu in the header (Check for updates +
+  Settings), `UpdateDialog.tsx` (current/latest version,
+  changelog list, installer address in a readonly field with a
+  Copy button, "Remind me later" when an update is available,
+  "Close" when up to date, clear error state with "will retry
+  next week"), Settings > General gains the update-server
+  address field with the last-checked time, and the weekly
+  `update-available` event opens the dialog. `api.ts` gains
+  `checkForUpdates()` / `onUpdateAvailable()`; `types.ts`
+  gains `UpdateCheckResult` and the two new Settings fields.
+  The Tauri shell gains the `check_for_updates` command and
+  forwards `update-available` events, following the existing
+  queue-action pattern.
+- Install wiring — what is wired vs what is not: the Tauri
+  updater plugin is NOT configured in this build
+  (`tauri.conf.json` has no `plugins.updater` section and
+  `src-tauri/Cargo.toml` does not depend on
+  `tauri-plugin-updater`), and there is no signed release
+  pipeline, so there is no in-app install. The result carries
+  `updater_configured: false` and the dialog says so plainly
+  and offers the installer address to copy instead of an
+  Install button that would pretend to work. Wiring the real
+  install means: add the updater plugin, publish signed
+  releases, and point `update_url` at the server that serves
+  them — the check itself needs no change. This is recorded
+  in `update.rs`, the dialog, `features.csv` and `test-plan.md`.
+- Verified: full engine suite **369/369 pass, 0 failed, 2
+  consecutive runs** (50 unit + 112 integration + 32 extension
+  + 4 final-verify2 + 16 final-verify + 28 grabber + 14
+  verifier + 14 options + 14 kerberos + 9 update + 7 progress
+  + 15 proxy + 23 sync + 31 video; was 354 — +6 unit, +9
+  update). `npm run build` passes (tsc + vite). `cargo check
+  --tests` 0 warnings. `/tmp/fetchline-test-*` cleaned before
+  and after. No new bugs found (no BUG-026). One test-only fix
+  during the pass: a manifest with no `version` field failed
+  with a generic JSON error instead of the explicit "no
+  version" error — `version` now has `#[serde(default)]` so
+  the explicit error fires; test-only behaviour, not a product
+  bug, so no BUG entry.
+- Missing / limits (environment-only, not check function):
+  the new Tauri command is uncompiled (gdk-3.0, same as every
+  milestone); the dialog and Help menu have never been clicked
+  in the running desktop app; no Windows `.exe`; no real
+  update server was ever contacted (local fixture server only).
+  Kerberos proxy code untouched; download quota, licence (S11)
+  and antivirus hook (S14) untouched, as instructed.
+
+## S12 — Download quota + per-download cap: done (2026-11-15)
+
+- Done (quota): X MB every Y hours, stored in settings
+  (`quota_enabled`, `quota_mb`, `quota_hours`; 1–1,000,000 MB,
+  1–720 h — rejected, not clamped, the BUG-008 rule; enabling
+  with no size/window is rejected). The live window lives in a
+  new `quota_state` table (`window_start_unix`, `bytes_used`,
+  singleton id = 1) — NOT in settings, so saving settings never
+  resets the window, and a restart does not reset it either
+  (proven by a test that drops the whole manager and reopens the
+  same database file).
+- Window semantics (chosen, documented in `engine/src/quota.rs`,
+  `features.csv` and the test plan): the window is **anchored at
+  first use** — it starts when the first byte is counted after
+  the quota is enabled, after a rollover, or after a manual
+  reset — not at a fixed epoch boundary, so the user gets the
+  full Y hours whenever they start downloading. **What counts:
+  actual downloaded bytes only** — every byte a segment writes
+  to a `.part` file, recorded per chunk as it is written, from
+  every path that downloads (manual, queue, drain, grabber, sync
+  re-download — all go through the same run loop). Probe/HEAD
+  bytes never count; a byte re-downloaded after a resume counts
+  again, because it was downloaded again.
+- When reached: the running download is paused through the
+  existing pause path (segments stop at the next chunk boundary)
+  and marked `quota_paused` (new `downloads` column), the queue
+  stops with the rest still queued, and no new download starts —
+  `start_download` refuses with a clear error naming the resume
+  time. Only quota-paused downloads are auto-resumed: a download
+  the user paused by hand is never resumed by a rollover (pinned
+  by a test).
+- Rollover is automatic: the 30 s scheduler tick checks the
+  window (no second scheduler) and a start re-checks it first,
+  so a rollover is picked up within a tick or at once on the next
+  start. The manual action is **Reset quota & resume now**
+  (`reset_quota`): a fresh window at once plus resuming the
+  quota-paused downloads. There is no separate "resume now" that
+  keeps the old window — resuming into an exhausted window would
+  pause the download again on its next chunk.
+- Clock seam (tests): every quota method has an `_at(now)`
+  variant taking Unix seconds, mirroring `scheduler_tick_at` —
+  tests drive a 1-hour window with `now + 3601` instead of
+  waiting an hour.
+- Done (per-download cap): a KB/s cap on one download (new
+  `downloads.speed_limit_kbps`, NULL/0 = no cap, default),
+  enforced by a second token bucket per running download
+  alongside the existing global bucket — every chunk waits for
+  tokens from both, so the effective rate is the min of the two.
+  Live-changeable on a running download (the stored cap is
+  re-rated in place, like the global cap). Validation reuses the
+  global bound (10,000,000 KB/s, BUG-008 rule).
+- Done (sync interplay): sync re-downloads go through the normal
+  run path, so their bytes count toward the quota (proven: a
+  513 KiB re-download leaves exactly 513 KiB used — the HEAD
+  probe counted nothing). A sync re-download paused by the quota
+  is reported `failed` naming the quota, fast: `wait_for_download`
+  now treats `paused` as terminal for the waiter (before, it
+  only returned on complete/error, so a paused re-download would
+  have sat out the 120 s timeout). The grabber waiter already
+  treated paused as a failure, so it needed no change.
+- Done (UI): quota section in Options > Connection (enable,
+  MB, hours, live usage + window end + reached state + Reset
+  button), per-download cap field in the S02 add dialog (stored
+  before the download starts), cap + quota-paused note in the
+  S03 progress dialog, quota state in the status bar (usage, or
+  "Quota reached — resumes HH:MM"). Types + API wrappers in
+  `src/lib/types.ts` / `src/lib/api.ts`; 4 new Tauri commands
+  (`set_download_limit`, `get_quota_status`, `reset_quota`,
+  `set_download_speed_limit`, the architecture.md name for the
+  first) in `src-tauri/src/lib.rs`.
+- Schema: settings gains `quota_enabled` / `quota_mb` /
+  `quota_hours`; downloads gains `speed_limit_kbps` /
+  `quota_paused`; new `quota_state` table (all in
+  `replica/schema.sql` plus `Store::migrate` ALTERs/CREATE for
+  older databases, with a kept migration test on a hand-built
+  pre-S12 database).
+- Verified: full engine suite **388/388 pass, 0 failed**
+  (52 unit + 112 integration + 32 extension + 4 final-verify2
+  + 16 final-verify + 28 grabber + 14 verifier + 14 options
+  + 14 kerberos + 9 update + 7 progress + 15 proxy + 19 quota
+  + 23 sync + 31 video; was 369 — +2 unit in `quota.rs`, +19
+  quota). `npm run build` passes (tsc + vite).
+  `cargo check --tests` 0 warnings. `/tmp/fetchline-test-*`
+  cleaned before and after. No new bugs found (no BUG-026).
+  Three test-only fixes during the pass, not product bugs: the
+  migration test's hand-built database needed the
+  `grabber_project_id` column a real pre-S12 database has (the
+  schema's index on it fails without it); the pause/resume tests
+  use a 1.5 MiB file, because a 2 MiB file's ~1 MB remainder does
+  not fit in the fresh 1 MB window after a rollover and pauses
+  again (correct engine behaviour, wrong test sizing); the
+  user-pause test's rollover expectation was wrong — an expired
+  window with usage does roll (usage resets) even with nothing
+  to resume, the point is the user-paused download stays paused.
+- Harder than expected: the quota-pause race. With zero-delay
+  64 KiB chunks the four segments could each read their whole
+  range before any pause flag landed (TCP coalescing), so the
+  file completed instead of pausing. The pause tests use 8 KiB
+  chunks with a 5 ms server delay, so the pause lands on chunk
+  boundaries with at most one in-flight chunk per segment of
+  overshoot (pinned by the test: paused between 1 MB and
+  1.5 MB, never before the quota, never the whole file).
+- Missing / limits (environment-only, not function): the 4 new
+  Tauri commands are uncompiled (gdk-3.0, same as every
+  milestone); the quota UI has never been clicked in the running
+  desktop app; no Windows `.exe`. A quota enabled mid-download
+  applies to the next download, not the running one (like
+  `max_connections` — the running download's bytes were never
+  counted, so counting them from mid-run would under-count the
+  window); the window follows wall-clock Unix time, so a user
+  changing the system clock moves the window, as with the
+  scheduler. Kerberos proxy code and update-check code
+  untouched; licence (S11) and antivirus hook (S14) untouched,
+  as instructed.
+
+## S14 — Antivirus hook: done (2026-11-15)
+
+- Done (engine): new `engine/src/antivirus.rs`. After a download
+  completes and the `.part` is renamed to its final name, if
+  `settings.antivirus_command` is set and `antivirus_enabled` is
+  on, the scanner runs on a detached task — completion, the queue
+  drain and the UI never wait for it. The command template
+  substitutes `{file}` with the finished path (appended as the
+  last argument when the template has none); it is split by a
+  quote-aware tokenizer and executed directly, never through a
+  shell, so a filename cannot inject a second command. Results
+  are stored per download (`scan_status` / `scan_detail` /
+  `scan_scanned_at` on `downloads`, new columns in
+  `replica/schema.sql` + `Store::migrate`): `clean` (exit 0, no
+  threat in the output), `infected` (non-zero exit, or exit 0
+  with a threat named in the output — the detail is the scanner's
+  own first lines, never an invented threat name), `scan_failed`
+  (scanner could not start, bad template, file gone),
+  `not_configured` (no command, or scanning off — the download
+  still completes normally), `timed_out` (configurable 5–600 s,
+  default 60 s; the scanner is killed, the app never hangs),
+  `scanning` (transient, stored while the detached scan runs).
+  Completion progress events carry the result (`not_configured` /
+  `scanning` at once; the finished result is re-emitted as a
+  completion event when the scan lands), so the dialog updates
+  without polling. Nothing is ever auto-deleted or
+  auto-quarantined: a threat only disables Open (the engine's
+  `open_file` refuses too) and the dialog offers Delete (the
+  existing delete path) and Quarantine (new: moves the file into
+  a `Quarantine` folder next to it and re-points the row) as
+  explicit user choices.
+- Done (settings): `settings.antivirus_enabled` (default on) and
+  `settings.antivirus_timeout_secs` (5–600, default 60, rejected
+  not clamped — the BUG-008 rule) alongside the existing
+  `antivirus_command`; `Store::get/update_settings` round-trips
+  them, and a pre-S14 database migrates (kept migration test on
+  a hand-built old database). The Settings > Downloads tab gains
+  the virus-check section: enable checkbox, command field,
+  timeout field, Test button (runs the typed command against a
+  small throwaway file and reports clean / threat / failed /
+  timed out) and a note that Fetchline includes no scanner (the
+  user needs one installed, e.g. Windows Defender).
+- Done (dialog): the S03 progress dialog gains the S14
+  completion section — finished file path, the scan result in
+  words for every state, Open (disabled while a threat is found
+  or a scan is running), Open folder, Scan again, and Quarantine
+  / Delete file buttons only when a threat was found.
+- Done (Tauri): 5 new commands following the existing pattern —
+  `run_antivirus_scan`, `get_scan_result`,
+  `test_antivirus_scanner`, `quarantine_download`, `open_file` —
+  wired into `src/lib/api.ts` and the dialog/Settings.
+- Verified: `cargo test` in `app/engine` — **410 passed,
+  0 failed** (55 unit + 112 integration + 32 extension + 4
+  final-verify2 + 16 final-verify + 28 grabber + 14 verifier +
+  14 kerberos + 14 options + 7 progress + 15 proxy + 19 quota + 23 sync
+  + 9 update + 31 video + 17 new antivirus — 17 in
+  `tests/antivirus_tests.rs` plus 3 more unit tests in
+  `antivirus.rs` (counted in the 55 unit total); was 390, +20). `cargo check --tests`
+  warning-free (0 warnings). `npm run build` passes (tsc +
+  vite). One bug found by the full-suite run and fixed
+  failing-test-first: BUG-026 (`list_queue_files` missed the new
+  scan columns — every queue read failed with
+  `Db(InvalidColumnIndex(20))`; regression test kept).
+- Harder than expected: (1) the timeout kill. The first runner
+  used `tokio::process::Child::wait_with_output`, which consumes
+  the child — on timeout there is no child left to kill. The
+  rewrite runs the scanner on a blocking thread with two
+  pipe-drain threads and a `try_wait` poll; the drain threads
+  are deliberately NOT joined on the timeout path, because a
+  scanner child (e.g. a `sleep` the scanner spawned) can hold
+  the pipes open — joining them made the "timeout" take the
+  full 30 s. (2) The queue breakage above: `row_to_download`
+  has three SELECT callers, and the third (`list_queue_files`)
+  was missed until the full suite ran — the antivirus-only run
+  was green, which is why the full suite is the gate, not the
+  new file alone.
+- Missing / limits (environment-only, not function): the 5 new
+  Tauri commands are uncompiled (gdk-3.0, same as every
+  milestone); the Settings section and the completion dialog
+  have never been clicked in the running desktop app; no
+  Windows `.exe`. No real antivirus product was ever run — every
+  scan in the tests used a fake scanner script fixture (exit
+  codes and output simulated); no malware sample, not even an
+  EICAR test file, was fetched, created or used. Windows
+  Defender / real AV behaviour on Windows (exit codes, output
+  text, timing) remains unproven. Licence (S11) untouched, as
+  instructed.
+
+## BUG-027 — First Windows build failure (Unix-only `write_at`): fixed (2026-11-15)
+
+- The first GitHub Actions Windows build (run 43674541575) failed
+  at step 9 (`tauri build`): the frontend built fine, but
+  `fetchline-engine` failed with 5 errors — `use
+  std::os::unix::fs::FileExt` at manager.rs:25 plus four
+  `write_at` call sites. The engine-tests step (step 8) exited 1
+  too, almost certainly the same compile failure (cargo test
+  compiles the same lib).
+- Fix: cfg-gated `write_at_pos` helper in
+  `app/engine/src/manager.rs` (Unix `write_at`, Windows
+  `seek_write`, same semantics); top-level Unix-only import
+  removed; all 4 call sites converted; Linux behaviour unchanged.
+  Whole-workspace sweep found no other Unix-only compile blocker
+  (all other platform branches are cfg-gated; `host` checks
+  `%APPDATA%` first). Kerberos SSPI warning at kerberos.rs:696
+  fixed by restructuring (input buffer built only when a token
+  exists), no `#[allow]`.
+- Regression test kept:
+  `manager::tests::write_at_pos_writes_out_of_order_byte_exact`
+  (out-of-order + overlapping writes read back byte-exact).
+- Verified: full suite 411/411 pass (was 410/410, +1), `cargo
+  check --tests` 0 warnings, `npm run build` passes, parity
+  unchanged 85.4/100. Windows cross-check attempted but blocked
+  on this VM (MinGW gcc missing, apt cannot locate the package);
+  every `cfg(windows)` block was audited by hand instead, and
+  the CI run after upload is the real proof.
+- Delivered by pushing the changed files to GitHub directly
+  (the connector write access was fixed by the user's full
+  disconnect + reconnect) — the push re-triggers the workflow.
+  No workflow change was needed (the failure was product code,
+  not the workflow). Licence (S11) untouched.
+
+## BUG-028 — Second Windows build failure (CI run 43676557208) — 2026-11-15
+- Step 8 "Engine tests" went green on Windows (BUG-027 proven
+  fixed), but step 9 failed again at a later stage: a single Rust
+  error, `error[E0425]: cannot find type 'Result' in module
+  'std::path'` at `app/src-tauri/src/lib.rs:28` — `db_path`
+  declared `std::path::Result`, which does not exist.
+  `app_data_dir()` returns `Result<PathBuf, tauri::Error>`.
+  The typo survived because the Tauri lib never compiles on the
+  Linux VM (missing `gdk-3.0`); rustc only reported it once
+  BUG-027 was out of the way.
+- Fix: `db_path` now returns `Result<std::path::PathBuf,
+  tauri::Error>`; behaviour unchanged. Whole Tauri shell
+  (`lib.rs` 779 lines + `main.rs`) audited — no other wrong type,
+  missing import or bad path (the run-4 log showed this single
+  error). Also cleaned the two remaining Windows-only warnings:
+  kerberos.rs `in_buf` dead assignment (now built in one
+  `input_token.map(...)` assignment; verified with a `rustc -D
+  warnings` stub — old pattern reproduces the warning, new one
+  is clean) and the unused `FreeContextBuffer` FFI declaration
+  (removed — SSPI never allocates a buffer for us).
+- Verified: full suite 411/411 pass, `cargo check --tests` 0
+  warnings, `npm run build` passes, parity unchanged 85.4/100
+  (must-haves 17/17). Windows cross-check still blocked on this
+  VM (MinGW gcc missing; Tauri lib uncheckable here) — the CI run
+  after the push is the proof. Pushed the changed files only via
+  the connector; the push re-triggers the workflow. Licence (S11)
+  untouched.
+
+## BUG-029 — First real Windows launch fails silently: startup diagnostics added — 2026-11-15
+- The run-#5 MSI installs fine, but on the user's real PC the app
+  shows a blank white window for ~1-2 s and closes — no error
+  dialog, no WER / Application Error event (Event Viewer shows
+  only unrelated CAPI2 errors). `app.db` exists (156 KB, first
+  launch), so setup got past the database. No `process::exit`,
+  no frontend close, scheduler tick is a no-op on a fresh DB.
+  Root cause still UNKNOWN after several rounds of guessing, so
+  this round stops guessing and instruments the app (diagnostics
+  only, no behaviour change).
+- Fix: `app/src-tauri/src/lib.rs` now writes an append-only
+  `startup.log` next to the database
+  (`%APPDATA%\com.fetchline.app\fetchline\startup.log`) with
+  milestones (main entered, webview version or ERROR, setup
+  start, db_path ok, store opened, manager built, settings
+  applied, spawns done, setup ok, run returned ok, plus a
+  once-per-process "frontend reached backend: get_settings ok"
+  from the existing `get_settings` command). A panic hook at the
+  start of `run()` appends panic payload + location to the same
+  file (path from `APPDATA`, temp-dir fallback; hook cannot panic,
+  also prints to stderr). A run error is logged before the same
+  panic as before. All std-only, best-effort logging.
+- Verified: std-only helpers checked with a `rustc -D warnings`
+  stub (`/tmp/bug029/` — exact extracted functions compile clean
+  and behave as designed); Tauri-side signatures verified
+  against vendored tauri 2.12.5 (`webview_version` re-export,
+  `Builder::run -> Result<()>`, setup `Result<(), Box<dyn
+  Error>>`). Full suite 411/411 pass, `cargo check --tests` 0
+  warnings, `npm run build` passes, parity unchanged 85.4/100
+  (must-haves 17/17). Tauri lib still uncheckable on this VM —
+  the CI run after the push is the proof. Next step is the user
+  installing this build, launching once, and sending the
+  `startup.log`. Licence (S11) untouched.
+
+## BUG-030 — Diagnostics rewrite broke the Windows build (two E0308 type errors) — 2026-11-15
+- CI run #6 (43680534913, commit f51e6199) failed at step 9 with
+  two E0308 errors in `app/src-tauri/src/lib.rs`, both from the
+  BUG-029 diagnostics rewrite: (1) `DownloadManager::new(store,
+  8)` passed a plain `Store` where `Arc<Store>` is required;
+  (2) `return Err(e)` in the setup closure passed a `String`
+  where `Box<dyn Error>` is required (the old `?` converted it
+  automatically). No other compile error in the crate.
+- Fix: two lines only — `Ok(DownloadManager::new(Arc::new(store),
+  8))` and `return Err(e.into());` (same conversion the old `?`
+  used), log line kept. Whole diagnostics diff re-audited for
+  other Windows-only compile risks; none found.
+- Verified: full suite 411/411 pass, `cargo check --tests` 0
+  warnings, `npm run build` passes, parity unchanged 85.4/100
+  (must-haves 17/17). Tauri lib still uncheckable on this VM —
+  the CI run after the push is the proof. BUG-029 stays OPEN.
+  Licence (S11) untouched.
+
+## BUG-029 ROOT CAUSE FOUND + FIXED — `tokio::spawn` in setup panics with no reactor — 2026-11-15
+- The user's `startup.log` from the run-#7 instrumented build (launched 07:47:21 EET) ends: `settings applied`, then `PANIC at src\lib.rs:793:13: there is no reactor running, must be called from the context of a Tokio 1.x runtime`. The `.setup` closure runs synchronously on the main thread outside any Tokio runtime, but called `tokio::spawn` six times — the first call panics, the process exits cleanly (code 101, no WER entry) before the event loop starts. WebView2 is FINE (157.0.4341.46 logged). Latent since the first build; not a Windows-only quirk.
+- Fix: all six setup `tokio::spawn` calls in `app/src-tauri/src/lib.rs` (lines 793/802/813/824/834/839) are now `tauri::async_runtime::spawn` — Tauri's own runtime handle, the correct way to spawn from setup (signature verified against vendored tauri 2.12.5, `async_runtime.rs:300`). Spawned bodies byte-identical; `tokio::time::interval` inside the tick task unchanged. Audit: no other `tokio::spawn` outside a runtime context in `lib.rs` or `main.rs`. Startup.log diagnostics stay in place.
+- Verified: full suite 411/411 pass, `cargo check --tests` 0 warnings, `npm run build` passes, parity unchanged 85.4/100 (must-haves 17/17). Tauri lib still uncheckable on this VM — the CI run after the push is the proof, and the user's next `startup.log` (should end "setup ok" + "frontend reached backend") is the launch proof. BUG-029 FIXED, BUG-030 stays FIXED. Licence (S11) untouched.
+
+## Windows launch smoke test added to CI — 2026-11-15
+- New `smoke-test` job in `.github/workflows/build-windows.yml` (runs on
+  every push, `needs: build-windows`, `runs-on: windows-latest`,
+  `timeout-minutes: 10`). It exists because BUG-029 (blank window, close
+  after ~1 s) was only ever caught on the user's PC — a green build alone
+  does not prove the app launches. The user asked why this wasn't done
+  from the start; fair point.
+- Steps: (1) download the `fetchline-windows-installer` artifact;
+  (2) PowerShell: locate the MSI recursively under `installer/`, install
+  silently (`msiexec /i <msi> /quiet /norestart /log install.log`, step
+  fails on non-zero exit), launch `C:\Program Files\Fetchline\
+  fetchline.exe` with `Start-Process -PassThru`, wait 30 s, check the
+  process is still alive (`Get-Process` + `HasExited`, `MainWindowTitle`
+  recorded), print the FULL `%APPDATA%\com.fetchline.app\fetchline\
+  startup.log` to the job log and check it contains `setup ok`;
+  screenshot the desktop with `CopyFromScreen` (best-effort, try/catch,
+  never fails the step); always `Stop-Process` afterwards.
+  (3) upload `fetchline-smoke-test` artifact (`startup.log`,
+  `smoke-screenshot.png`, `install.log`, `if: always()`,
+  `if-no-files-found: warn`).
+- PASS criteria (exit 0): process alive after 30 s AND startup.log exists
+  AND contains `setup ok`. `frontend reached backend: get_settings ok`
+  is recorded but NOT a pass/fail signal — on a headless runner the
+  webview may not mount even when the app is fine. FAIL (exit 1) if the
+  process died, the log is missing, or `setup ok` is absent.
+- Verified on Linux: YAML parses (`yaml.safe_load`), jobs/steps/`needs`/
+  trigger re-read and correct; build job's 9 steps untouched; PowerShell
+  reviewed line by line (quoting, `$LASTEXITCODE`, `$env:APPDATA` path,
+  recursive MSI lookup). No PowerShell exists on this VM — the script is
+  reviewed-only; the CI run is the proof. No product code changed, no
+  engine tests touched. Licence (S11) untouched.
+
+## Smoke-test v1 run — FAILED at the install step, app never launched (2026-11-15)
+- Run 43684788098 (head 8d4d1f78, user's manual workflow upload): build job
+  SUCCESS, smoke-test job FAILED in 10 s. Step 3 "Install MSI and launch
+  Fetchline" died in 2 s at the msiexec line: `& msiexec.exe` returned with
+  `$LASTEXITCODE` BLANK (not 0, not an error code), so the script's
+  `if ($LASTEXITCODE -ne 0)` check threw "MSI install failed (exit code )".
+  install.log was empty/missing (its tail printed nothing). The app was
+  NEVER launched, the 30 s wait never happened, no startup.log was produced.
+  So v1 proved NOTHING about the app or the BUG-029 fix — the harness broke
+  before the test. Root cause (script bug, not app bug): msiexec is a
+  GUI-subsystem app and `&` does not reliably wait for it or set
+  `$LASTEXITCODE` in non-interactive pwsh.
+- Fix (v2, in `.github/workflows/build-windows.yml`, ready for manual
+  upload — the connector cannot push workflow files): install via
+  `Start-Process -FilePath 'msiexec.exe' -ArgumentList ... -Wait -PassThru`
+  and check `.ExitCode` (null or non-zero = fail, with the install.log tail
+  printed). Everything else in the step is unchanged (the startup.log path
+  was already correct: `$env:APPDATA\com.fetchline.app\fetchline\startup.log`).
+
+## Real download test + browser capture test (CI, Windows runner) — 2026-11-15
+
+The launch smoke test proved the app opens; these two close the next
+gaps: that it actually DOWNLOADS on Windows, and that a browser link
+reaches it on Windows. Both were built the same day the smoke test
+went green (run 43686477003).
+
+### TEST 1 — real download (`app/engine/tests/real_download_tests.rs`, 2 tests)
+- Downloads Fetchline's own LICENSE from a PINNED commit (7255dff9)
+  via raw.githubusercontent.com through the REAL DownloadManager
+  (probe + add_download + start + segments) and verifies the bytes:
+  1,079 bytes, SHA-256
+  `c2ef3696eecd8d51c0e615afe9437e5d620abcd9272b9d9f4bcbbd1e4a95f793`.
+  The pinned URL was verified byte-identical to the repo copy
+  2026-11-15. New dev-dependency `sha2 = "0.10"` (test-only, does
+  not ship in the app) + `Cargo.lock` update.
+- CI: dedicated step "Real download test (fails the run)" with NO
+  continue-on-error (step-8 `cargo test` unchanged, still
+  continue-on-error). The step sets `FETCHLINE_REAL_DOWNLOAD_TEST=1`.
+- Env gate (honest limit): without the env var both tests print
+  SKIPPED and pass. The Linux dev VM sits behind a TLS-intercepting
+  egress proxy (its `Hatch Sandbox Egress CA` is in the system
+  store, so curl trusts it), but the engine's rustls client uses
+  compiled-in webpki roots and rejects it
+  (`InvalidCertificate(UnknownIssuer)`) — verified 2026-11-15: both
+  tests fail ungated on this VM, skip cleanly gated. The Windows
+  runner has direct internet and no intercepting proxy, so they run
+  for real there. Never weaken TLS verification to make them pass
+  locally. If the repo is renamed, update the pinned URL in the
+  test (the hash stays the same — the LICENSE text does not change).
+
+### TEST 2 — browser capture (`scripts/capture-test.py`, CI job `extension-capture-test`)
+- New job (needs build-windows, windows-latest, 20 min timeout) in
+  three phases, driven by `scripts/capture-test.py`:
+  1. host: the real `fetchline-host.exe` (built on the runner from
+     `app/host`), driven with real Native Messaging frames (ping,
+     get_settings, download_link) against the app's real `app.db`;
+     the pending_links row is read back from SQLite (source
+     `browser`, status `pending`). Dry-run on this VM against the
+     local host binary: PASSED (ping pong, get_settings
+     browser_integration=true, download_link queued with
+     pending_link_id, row confirmed).
+  2. browser: the unpacked extension loads in headless Chrome, its
+     ID is discovered (CDP `/json/list`, Preferences fallback), the
+     host manifest + HKCU registry key are written exactly as a
+     user install would, `popup.html` is opened and its status text
+     polled over CDP (websocket-client) until it reports
+     "Connected to the Fetchline desktop app".
+  3. drain: the installed app drains the queue and downloads the
+     pinned LICENSE; the script verifies its SHA-256 in
+     `%USERPROFILE%\Downloads` (the correct landing spot: a
+     no-extension file falls back to category `cat-documents`,
+     whose default folder is empty, so the folder resolution falls
+     through to the OS Downloads folder).
+- PACKAGING GAP (finding, not a workaround to hide): the MSI ships
+  NO `fetchline-host.exe` and creates NO native-messaging registry
+  key — `tauri.conf.json` has no bundle config for either, and the
+  Tauri app does not depend on the host crate (the repo host
+  manifests point at `C:\Program Files\Fetchline\fetchline-host.exe`,
+  a path that does not exist after installing the MSI). The job
+  builds the host and registers it itself, runner-only. Until the
+  installer ships the host + key, a user install cannot capture
+  from a browser at all, however green this job is.
+- Limits: a human right-click ("Download with Fetchline") or the
+  download watcher cannot be driven in headless Chrome (no mouse,
+  no real popup window). Those use the same `sendNativeMessage` +
+  `handToFetchline` code Phase 2 exercises, and the menu/watcher
+  wiring is covered by the Node fake-`chrome` tests. Phase 2 (CDP
+  polling via websocket-client, extension-ID discovery) is the
+  riskiest part — reviewed-only on this VM (no Chrome here); the
+  CI run is the proof.
+- Verified on Linux: full engine suite 413/413, 0 failed (411 + 2
+  new, the new ones SKIPPED ungated); `cargo check --tests`
+  0 warnings; `npm run build` passes; workflow YAML parses and
+  re-reads correctly (jobs build-windows + smoke-test +
+  extension-capture-test; real-download step has no
+  continue-on-error, step-8 still does); `scripts/capture-test.py`
+  compiles (`py_compile`) and Phase 1 dry-runs green locally.
+  No product behaviour changed; no licence work; no IDM code,
+  assets or wording.
+
+## Installer packaging fix — browser capture for real users (S13) — 2026-11-15
+
+Closes the packaging gap found by the capture-test round above: the MSI
+shipped NO `fetchline-host.exe` and created NO native-messaging registry
+key, so a user install could not capture a single link from a browser
+(the CI capture job only worked because it built + registered the host
+itself, runner-only). Packaging only — no engine change, no licence work.
+
+- Stable extension id first. The repo host manifest carried the
+  placeholder `__FETCHLINE_EXTENSION_ID__` in `allowed_origins`, and
+  `manifest.json` had no `key`, so an unpacked load got a random id on
+  every machine and no shipped manifest could ever name it. Fix: RSA-2048
+  key pair generated in /tmp (private key NOT committed — only the public
+  key goes in `manifest.json`); Chrome derives the stable id from it:
+  `mioamdgogndabpcjbdekggcnlkkfpmbj`. `app/extension/manifest.json` now
+  carries the `key`; `com.fetchline.host.json` names the real id.
+  Firefox is unaffected (uses `browser_specific_settings.gecko.id` =
+  `fetchline@fetchline.app` in `allowed_extensions` already).
+- Validators now pin the identity chain: `validate_manifest.py`
+  requires `key` (base64-decodable, DER SEQUENCE, sane length);
+  `validate_host_manifest.py` treats the placeholder as a FAILURE and
+  cross-checks `allowed_origins[0]` against the id derived from
+  `manifest.json`'s key (SHA-256 -> a-p, implemented in the validator).
+  `npm run test:extension` passes.
+- Ship the host: `tauri.conf.json` gains
+  `bundle.externalBin: ["binaries/fetchline-host"]` (Tauri 2.12
+  semantics verified against the vendored tauri-utils config docs:
+  it looks for `binaries/fetchline-host{-target-triple}{.exe}`).
+  The workflow builds the host (`cargo build --release -p fetchline-host`
+  in app/host) and copies it to
+  `app/src-tauri/binaries/fetchline-host-x86_64-pc-windows-msvc.exe`
+  before `tauri build`; the cargo cache now covers `app/host` too.
+  `*.exe` in .gitignore already covers the staged binary — no
+  .gitignore change needed.
+- Ship the manifests: `bundle.resources` maps both
+  `com.fetchline.host.json` and `com.fetchline.host.firefox.json`
+  into the install dir (next to `fetchline.exe`, for both MSI and
+  NSIS — verified in the vendored tauri-bundler WiX/NSIS templates).
+  Their `path` ships as the default MSI path
+  (`C:\Program Files\Fetchline\fetchline-host.exe`).
+- Registry keys (all HKCU, default value = installed manifest path;
+  removed on uninstall):
+  `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.fetchline.host`,
+  `HKCU\Software\Microsoft\Edge\NativeMessagingHosts\com.fetchline.host`,
+  `HKCU\Software\Mozilla\NativeMessagingHosts\com.fetchline.host`
+  (Firefox points at the `.firefox.json` file).
+  - NSIS: `bundle.windows.nsis.installerHooks` ->
+    `app/src-tauri/nsis-hooks/fetchline-native-host.nsh`
+    (POSTINSTALL writes the three keys + runs
+    `register-native-host.ps1` to rewrite both manifests' `path` to
+    `$INSTDIR\fetchline-host.exe`, UTF-8 no BOM; PREUNINSTALL deletes
+    the three keys). NSIS is per-user by default, so the rewrite is
+    required for its default `%LOCALAPPDATA%` install dir.
+  - MSI: `bundle.windows.wix.fragmentPaths` +
+    `componentGroupRefs: ["FetchlineNativeHost"]` ->
+    `app/src-tauri/wix/fetchline-native-host.wxs` (three registry-only
+    components, `Win64="yes"`, `KeyPath="yes"`, values
+    `[INSTALLDIR]com.fetchline.host.json` / `.firefox.json`;
+    Windows Installer removes them on uninstall). The MSI manifest
+    path stays the shipped default — a user picking a custom MSI
+    folder would need to edit the manifest by hand (documented
+    caveat in the fragment + README; no fragment mechanism exists to
+    rewrite file contents).
+  - HKCU caveat (both installers): the keys land in the installing
+    user's hive, so a different Windows user on the same machine
+    needs their own install.
+- Capture test now tests the genuine installed path
+  (`scripts/capture-test.py` Phase 2): it reads the installed
+  registry key + manifest and verifies they point at the installed
+  host with the stable id, requires the discovered extension id to
+  equal the id derived from `manifest.json`'s key, then keeps the
+  popup check + drain + SHA-256. It writes NO manifest and NO key
+  any more. The CI `extension-capture-test` job drops its Rust setup,
+  cargo cache and "Build fetchline-host" steps and passes
+  `--host-exe 'C:\Program Files\Fetchline\fetchline-host.exe'` —
+  it now depends on the MSI from build-windows for the host + key.
+  Phase 1 still dry-runs green locally against the real host binary.
+- Workflow: `continue-on-error: true` removed from the "Engine
+  tests" step (follow-up to BUG-031, fixed in a separate push: the
+  suite did not compile on Windows and stayed hidden precisely
+  because that step swallowed the failure). The step now fails the
+  run visibly. Nothing else about that step changed. Header comments
+  updated to match (engine-tests note + real-download note).
+- Docs: `app/extension/README.md` Windows checklist rewritten
+  (installer now ships host + key; items 1-2 proven by CI, items 4-7
+  still needs-Windows — human right-click, Download All, off
+  switches); the native-host section now says the installer does it
+  all and keeps the manual steps as dev-only; the "No Windows .exe
+  yet" honest-limits bullet updated (installers exist, smoke test
+  green, capture proven on the runner — a human browser pass is
+  still unproven). S13 row note in `replica/features.csv` appended
+  (packaging gap closed).
+- Verified on Linux: full engine suite 413/413 (see final report for
+  the run), `npm run build` passes, `cargo check --tests` 0 warnings,
+  `npm run test:extension` passes, `py_compile` on capture-test.py,
+  `tauri.conf.json` valid JSON, .wxs well-formed XML, NSIS ExecWait
+  expansion simulated (balanced quotes, no unexpanded `$`).
+  The Tauri build itself cannot be verified on this Linux VM
+  (gdk-3.0) — CI is the proof: the next run must show the host
+  staged in the build log, both installers produced, and the
+  capture job green against the installed host + keys.

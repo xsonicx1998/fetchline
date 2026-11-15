@@ -1,0 +1,65 @@
+/* Fetchline extension popup. Colours and type come from the design
+   tokens (replica/design/tokens.json): light accent #6d28d9,
+   Inter, 14px base. No other values are introduced here. */
+
+* { box-sizing: border-box; }
+
+body {
+  width: 320px;
+  margin: 0;
+  padding: 16px;
+  font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+  line-height: 20px;
+  color: #171a21;
+  background: #ffffff;
+}
+
+header {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 600;
+}
+
+.status { margin: 0; font-size: 13px; color: #5a6472; }
+.status-ok { color: #16794c; }
+.status-bad { color: #b42318; }
+
+main { display: flex; flex-direction: column; gap: 12px; }
+
+.row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+}
+
+.row input { width: 18px; height: 18px; accent-color: #6d28d9; }
+.row input:disabled { cursor: not-allowed; }
+
+button {
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 8px;
+  font: inherit;
+  font-weight: 600;
+  color: #ffffff;
+  background: #6d28d9;
+  cursor: pointer;
+}
+button:hover { background: #5b21b6; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+button.secondary { color: #171a21; background: #eceef1; }
+button.secondary:hover { background: #e2e5ea; }
+
+.note { margin: 0; font-size: 13px; line-height: 18px; color: #5a6472; }
+.note:empty { display: none; }

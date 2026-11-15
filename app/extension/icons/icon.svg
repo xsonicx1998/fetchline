@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- Fetchline extension icon, drawn fresh for this project: a violet
+       rounded square (design token light accent) with a white download
+       arrow above a tray line. No third-party artwork. -->
+  <rect x="2" y="2" width="124" height="124" rx="24" fill="#6d28d9"/>
+  <rect x="58" y="24" width="12" height="48" fill="#ffffff"/>
+  <polygon points="36,62 92,62 64,92" fill="#ffffff"/>
+  <rect x="26" y="100" width="76" height="9" fill="#ffffff"/>
+</svg>

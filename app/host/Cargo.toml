@@ -1,0 +1,15 @@
+[package]
+name = "fetchline-host"
+version = "0.1.0"
+edition = "2021"
+description = "Fetchline native-messaging host: the browser extension talks to this process over stdin/stdout JSON, and it enqueues links in the desktop app's SQLite database"
+license = "MIT"
+
+[[bin]]
+name = "fetchline-host"
+path = "src/main.rs"
+
+[dependencies]
+fetchline-engine = { path = "../engine" }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }

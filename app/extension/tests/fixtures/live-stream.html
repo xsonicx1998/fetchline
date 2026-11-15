@@ -1,0 +1,8 @@
+<!DOCTYPE html>
+<html><body>
+  <!-- A live stream: an HLS playlist with no end. In a real page the
+       content script also sees duration === Infinity on the element;
+       the fixture marks it explicitly because static HTML has no
+       playback state. -->
+  <video src="stream.m3u8" data-live="true"></video>
+</body></html>

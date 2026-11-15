@@ -1,0 +1,40 @@
+{
+  "action": {
+    "default_icon": {
+      "128": "icons/icon128.png",
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png"
+    },
+    "default_popup": "popup.html",
+    "default_title": "Fetchline"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "description": "Send links and downloads from your browser to Fetchline, the desktop download manager, with one click.",
+  "icons": {
+    "128": "icons/icon128.png",
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png"
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAj8iFj9Z17huzrCAmVAbCKwYeF7oD9VgaxsxPirqdOfM6SoLITHEWJACZjpmMUwMvDdMycU+HnzG5tluOvM68zpTQjy7N3sL1Y0FISXpva5qr9O06N1DQ4QY/opLDKN12gDy6UuPvpNpkqL1YL0kl6W2c81HN8I/OPf5lL1sza7K7Ornsc7wqmN/8LWiXYU6Lz8xGc8R5lGGD78s3n2e1YMsXgXn2+K3Y8pcPI4d/Jx/zfqj6+iapQ24+SycmzBmOrSdtSWmJYgA+rv+temOiroVNMLl89k196HhpcoQb7Y4gsaulY/p2YFgrrI2zNtegdMON/to1cqbtVL9nkhwN9QIDAQAB",
+  "manifest_version": 3,
+  "name": "Fetchline",
+  "permissions": [
+    "activeTab",
+    "contextMenus",
+    "cookies",
+    "downloads",
+    "storage",
+    "nativeMessaging",
+    "scripting"
+  ],
+  "version": "0.1.0",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "fetchline@fetchline.app"
+    }
+  }
+}

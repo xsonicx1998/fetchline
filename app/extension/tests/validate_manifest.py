@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""Validate app/extension/manifest.json (S13 + S08 + S13 finish).
+
+Checks the Manifest V3 shape and that the permission set stays
+minimal: no host permissions, no tabs. `scripting` is allowed
+since S08, and only for one thing — injecting the video detector
+into the ACTIVE tab when the user clicks "Find videos on this page"
+in the popup (activeTab grants that one tab, on that one gesture).
+There is still no content_scripts entry: no page is ever scanned
+without the user asking. `cookies` is allowed since the S13
+finish, and only for one thing — reading the cookies for the exact
+URL being handed over, so a login-only link can download (see
+background.js `cookiesFor`); the extension never reads cookies
+for any other URL and never logs them. Firefox needs a stable
+add-on id (`browser_specific_settings.gecko.id`) so its host
+manifest can name it in `allowed_extensions`. Chrome needs a
+stable extension id too: `key` holds the extension's public key
+(base64 DER), and Chrome derives the same 32-character id from
+it on every machine, so the installer can ship a host manifest
+with that id already in `allowed_origins` (see
+validate_host_manifest.py). Without `key`, an unpacked load
+gets a random id on every machine and no shipped manifest can
+name it. Run with
+`npm run test:extension` from app/, or directly:
+    python3 app/extension/tests/validate_manifest.py
+Exit code 0 means the manifest is valid; anything else prints the
+problems and exits 1.
+"""
+import base64
+import json
+import sys
+from pathlib import Path
+
+ALLOWED_PERMISSIONS = {"activeTab", "contextMenus", "cookies", "downloads", "storage", "nativeMessaging", "scripting"}
+FORBIDDEN_PERMISSIONS = {"tabs", "webRequest", "history", "webNavigation"}
+
+REQUIRED_ICON_SIZES = {"16", "32", "48", "128"}
+
+
+def main() -> int:
+    root = Path(__file__).resolve().parents[1]
+    manifest_path = root / "manifest.json"
+    problems = []
+
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"FAIL: cannot read {manifest_path}: {e}")
+        return 1
+
+    if manifest.get("manifest_version") != 3:
+        problems.append("manifest_version must be 3")
+    if manifest.get("name") != "Fetchline":
+        problems.append("name must be Fetchline")
+    if len(manifest.get("description", "")) <= 10:
+        problems.append("description must be a real sentence, not a stub")
+    if manifest.get("background", {}).get("service_worker") != "background.js":
+        problems.append("background.service_worker must be background.js")
+    if manifest.get("action", {}).get("default_popup") != "popup.html":
+        problems.append("action.default_popup must be popup.html")
+
+    permissions = manifest.get("permissions", [])
+    for p in ALLOWED_PERMISSIONS:
+        if p not in permissions:
+            problems.append(f"missing permission: {p}")
+    for p in permissions:
+        if p in FORBIDDEN_PERMISSIONS:
+            problems.append(f"permission must not be requested: {p}")
+        if p not in ALLOWED_PERMISSIONS:
+            problems.append(f"unexpected permission (justify it or remove it): {p}")
+    if "host_permissions" in manifest:
+        problems.append("host_permissions must not be present (no <all_urls>)")
+    if "content_scripts" in manifest:
+        problems.append(
+            "content_scripts must not be present — the video detector is "
+            "injected only on a user gesture (scripting + activeTab), never on every page"
+        )
+
+    icons = manifest.get("icons", {})
+    for size in REQUIRED_ICON_SIZES:
+        rel = icons.get(size)
+        if not rel:
+            problems.append(f"missing manifest icon: {size}px")
+        elif not (root / rel).is_file():
+            problems.append(f"manifest icon file is missing: {rel}")
+    popup_icon = manifest.get("action", {}).get("default_icon", {})
+    if set(popup_icon) != REQUIRED_ICON_SIZES:
+        problems.append("action.default_icon must list 16/32/48/128")
+
+    # Firefox needs a stable add-on id (browser_specific_settings)
+    # so the Firefox host manifest can name it in allowed_extensions
+    # (see validate_host_manifest.py, BUG-022). A temporary add-on
+    # gets a random id on every load, and no host manifest can name
+    # that — without this key the Firefox handshake cannot work.
+    gecko_id = (
+        manifest.get("browser_specific_settings", {}).get("gecko", {}).get("id", "")
+    )
+    if not isinstance(gecko_id, str) or not gecko_id.strip():
+        problems.append(
+            "browser_specific_settings.gecko.id must be set (Firefox host manifest names it)"
+        )
+
+    # Chrome needs the same stability: `key` is the extension's
+    # public key (base64 DER SubjectPublicKeyInfo). Chrome derives
+    # the extension id from it, so the id is the same on every
+    # machine and the installer can ship a host manifest that
+    # already names it (S13 packaging fix). Without `key`, an
+    # unpacked load gets a random id and no shipped manifest can
+    # name it — the Chrome handshake would never work.
+    key = manifest.get("key", "")
+    if not isinstance(key, str) or not key.strip():
+        problems.append(
+            "key must be set (Chrome derives the stable extension id from it)"
+        )
+    else:
+        try:
+            der = base64.b64decode(key, validate=True)
+        except (ValueError, base64.binascii.Error):
+            problems.append("key must be valid base64")
+            der = b""
+        if der and (len(der) < 100 or der[:2] != b"\x30\x82"):
+            problems.append(
+                "key must be a DER SubjectPublicKeyInfo (SEQUENCE, RSA-2048 is 294 bytes)"
+            )
+
+    for name in ("background.js", "popup.html", "popup.js", "popup.css", "video-detect.js", "content.js"):
+        if not (root / name).is_file():
+            problems.append(f"missing extension file: {name}")
+
+    if problems:
+        print("FAIL: manifest problems:")
+        for p in problems:
+            print(f"  - {p}")
+        return 1
+    print("OK: manifest.json is MV3 with the minimal permission set")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

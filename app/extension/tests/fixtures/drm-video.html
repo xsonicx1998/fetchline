@@ -1,0 +1,8 @@
+<!DOCTYPE html>
+<html><body>
+  <!-- A DRM-protected video. Static HTML cannot prove DRM — in a real
+       page the content script reads the element's mediaKeys / the
+       encrypted-media event. The fixture marks it explicitly
+       (data-drm) so both detectors can be tested against it. -->
+  <video src="protected.mp4" data-drm="true"></video>
+</body></html>
