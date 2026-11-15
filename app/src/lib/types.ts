@@ -25,6 +25,13 @@ export interface DownloadRow {
   error_message: string | null
   created_at: string
   completed_at: string | null
+  /** Last attempt / last activity (UTC ISO-8601): the row's
+   *  `updated_at` — bumped on every status change and on the 2 s
+   *  checkpoint while downloading. Shown as "Last Try" (Round 44). */
+  updated_at: string
+  /** Site-grabber project that produced this download, if any
+   *  (Round 44: the categories tree filters by project). */
+  grabber_project_id: string | null
   /** Per-download speed cap in KB/s (S12); null = no cap. */
   speed_limit_kbps: number | null
   /** Whether the probe found the server range-capable (S03

@@ -59,6 +59,39 @@ async fn full_download_multi_segment_matches_bytes() {
         .all(|s| s.status == "done"));
 }
 
+/// Round 44 — the table's "Last Try" and "Grabber projects" filter
+/// read these two columns off the row: `updated_at` is set at insert
+/// and bumped on every status change, and `grabber_project_id` is
+/// carried once the download is tagged to a project.
+#[tokio::test]
+async fn list_downloads_carries_updated_at_and_grabber_project() {
+    let server = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: false, ..Default::default() });
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let mgr = DownloadManager::new(Arc::clone(&store), 4);
+    let (id, _) = mgr
+        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .await
+        .unwrap();
+    let row = mgr.get_download(&id).unwrap().unwrap();
+    assert!(!row.updated_at.is_empty(), "updated_at is set at insert");
+    assert_eq!(row.grabber_project_id, None);
+    // `grabber_project_id` is a foreign key, so the project row
+    // has to exist first.
+    let project = mgr
+        .create_grabber_project("p", "http://127.0.0.1/", &["image".to_string()], 2, 200, "download", None)
+        .unwrap();
+    store.set_download_grabber_project(&id, &project.id).unwrap();
+    let row = mgr.get_download(&id).unwrap().unwrap();
+    assert_eq!(row.grabber_project_id.as_deref(), Some(project.id.as_str()));
+    // The queue-files path uses the same row mapping (BUG-026
+    // lesson: the three SELECTs must stay in sync).
+    let listed = store.list_downloads().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert!(!listed[0].updated_at.is_empty());
+    assert_eq!(listed[0].grabber_project_id.as_deref(), Some(project.id.as_str()));
+}
+
 #[tokio::test]
 async fn pause_then_resume_completes_with_correct_bytes() {
     let server = MockServer::start(MockConfig {

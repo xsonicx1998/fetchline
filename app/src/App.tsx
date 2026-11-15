@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { CalendarClock, Clapperboard, FolderDown, Globe, Link2, ListPlus, Moon, Pause, Play, Settings as SettingsIcon, Square, Sun, Trash2, X } from 'lucide-react'
+import { X } from 'lucide-react'
 import {
   addToQueue,
-  cancelDownload,
   checkForUpdates,
   deleteCategory,
   deleteDownload,
@@ -13,53 +12,65 @@ import {
   getQuotaStatus,
   getSettings,
   listDownloads,
+  listGrabberProjects,
   listQueues,
   moveToCategory,
   onQueueAction,
   onUpdateAvailable,
+  openFolder,
   openProgressWindow,
   pauseDownload,
   resumeDownload,
+  runGrabber,
   startQueue,
   stopQueue,
+  syncQueueNow,
   updateSettings,
 } from './lib/api'
 import { formatSpeed } from './lib/format'
-import type { CategoryRow, DownloadRow, PendingAction, QueueRow, QuotaStatus, Settings, UpdateCheckResult } from './lib/types'
+import type { CategoryRow, DownloadRow, GrabberProjectRow, PendingAction, QueueRow, QuotaStatus, Settings, UpdateCheckResult } from './lib/types'
 import { AddCategoryDialog } from './components/AddCategoryDialog'
 import { AddDownloadDialog } from './components/AddDownloadDialog'
 import { AddQueueDialog } from './components/AddQueueDialog'
 import { BatchDialog } from './components/BatchDialog'
 import { Button } from './components/Button'
-import { CategorySidebar } from './components/CategorySidebar'
+import { CategorySidebar, type SidebarFilter } from './components/CategorySidebar'
 import { DownloadAllDialog } from './components/DownloadAllDialog'
 import { DownloadTable } from './components/DownloadTable'
+import { MenuBar } from './components/MenuBar'
 import { QueueActionDialog } from './components/QueueActionDialog'
 import { SchedulerDialog } from './components/SchedulerDialog'
 import { SettingsDialog } from './components/SettingsDialog'
 import { SiteGrabberDialog } from './components/SiteGrabberDialog'
+import { Toolbar } from './components/Toolbar'
 import { UpdateDialog } from './components/UpdateDialog'
 import { VideoGrabberDialog } from './components/VideoGrabberDialog'
-import logoUrl from './assets/logo.jpg'
 
-/** S01 — main window. Header, toolbar, categories + queues sidebar,
- *  download table, status bar. The list is refreshed once a second
- *  and that refresh is the live path for the table — the
- *  `download-progress` listener that used to patch rows between
- *  polls is gone (BUG-044: it never fired in the built app). Queue
- *  completion actions are subscribed on `queue-action-pending`:
- *  shutdown / hibernate wait for the countdown dialog, the others
- *  run at once — but that listener shares the same BUG-044 denial,
- *  so a waiting action is also surfaced by the mount-time
- *  `getPendingAction` sweep below. */
+/** S01 — main window, IDM's arrangement (Round 44): menu bar,
+ *  big-icon toolbar, categories tree on the left, file table.
+ *  The list is refreshed once a second and that refresh is the
+ *  live path for the table — the `download-progress` listener that
+ *  used to patch rows between polls is gone (BUG-044: it never
+ *  fired in the built app). Queue completion actions are
+ *  subscribed on `queue-action-pending`: shutdown / hibernate wait
+ *  for the countdown dialog, the others run at once — but that
+ *  listener shares the same BUG-044 denial, so a waiting action
+ *  is also surfaced by the mount-time `getPendingAction` sweep
+ *  below. */
 export default function App() {
   const [downloads, setDownloads] = useState<DownloadRow[]>([])
   const [categories, setCategories] = useState<CategoryRow[]>([])
   const [queues, setQueues] = useState<QueueRow[]>([])
+  const [grabberProjects, setGrabberProjects] = useState<GrabberProjectRow[]>([])
   const [queueFiles, setQueueFiles] = useState<DownloadRow[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null)
   const [selectedQueue, setSelectedQueue] = useState<string | null>(null)
+  /** Which list the table shows: every download (or one
+   *  category's), the unfinished / finished filter, or one
+   *  grabber project's downloads. */
+  const [selectedFilter, setSelectedFilter] = useState<SidebarFilter>('all')
+  const [selectedGrabberId, setSelectedGrabberId] = useState<string | null>(null)
   const [showAdd, setShowAdd] = useState(false)
   const [showDownloadAll, setShowDownloadAll] = useState(false)
   const [showBatch, setShowBatch] = useState(false)
@@ -81,7 +92,6 @@ export default function App() {
   const [confirmRemove, setConfirmRemove] = useState<DownloadRow | null>(null)
   /** Update check (S09): Help > Check for updates, and the weekly
    *  check's `update-available` event, both land here. */
-  const [showHelpMenu, setShowHelpMenu] = useState(false)
   const [updateResult, setUpdateResult] = useState<UpdateCheckResult | null>(null)
   const [updateCheckError, setUpdateCheckError] = useState<string | null>(null)
   const [checkingUpdate, setCheckingUpdate] = useState(false)
@@ -112,6 +122,15 @@ export default function App() {
     }
   }, [])
 
+  const refreshGrabberProjects = useCallback(async () => {
+    try {
+      setGrabberProjects(await listGrabberProjects())
+    } catch {
+      // The tree's grabber section stays empty outside the
+      // desktop app; the rest of the window keeps working.
+    }
+  }, [])
+
   const refreshCategories = useCallback(async () => {
     try {
       setCategories(await getCategories())
@@ -132,6 +151,7 @@ export default function App() {
   const refreshAll = useCallback(async () => {
     await refresh()
     await refreshQueues()
+    await refreshGrabberProjects()
     if (selectedQueue !== null) {
       try {
         setQueueFiles(await getQueueFiles(selectedQueue))
@@ -139,12 +159,13 @@ export default function App() {
         setError(e instanceof Error ? e.message : String(e))
       }
     }
-  }, [refresh, refreshQueues, selectedQueue])
+  }, [refresh, refreshQueues, refreshGrabberProjects, selectedQueue])
 
   useEffect(() => {
     void refresh()
     void refreshCategories()
     void refreshQueues()
+    void refreshGrabberProjects()
     void refreshSettings()
     const timer = window.setInterval(() => void refreshAll(), 1000)
     let unlistenAction: (() => void) | undefined
@@ -201,7 +222,7 @@ export default function App() {
       unlistenAction?.()
       unlistenUpdate?.()
     }
-  }, [refresh, refreshAll, refreshCategories, refreshQueues, refreshSettings])
+  }, [refresh, refreshAll, refreshCategories, refreshQueues, refreshGrabberProjects, refreshSettings])
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme)
@@ -211,7 +232,6 @@ export default function App() {
    *  when the weekly setting is off; a failure shows the error
    *  in the dialog instead of a silent nothing. */
   async function runManualUpdateCheck() {
-    setShowHelpMenu(false)
     setCheckingUpdate(true)
     setUpdateResult(null)
     setUpdateCheckError(null)
@@ -251,17 +271,26 @@ export default function App() {
   )
   const visible = useMemo(() => {
     if (selectedQueue !== null) return queueFiles
+    if (selectedFilter === 'unfinished') return downloads.filter((d) => d.status !== 'complete')
+    if (selectedFilter === 'finished') return downloads.filter((d) => d.status === 'complete')
+    if (selectedFilter === 'grabber') return downloads.filter((d) => d.grabber_project_id === selectedGrabberId)
     if (selectedCategory === null) return downloads
     return downloads.filter((d) => d.category_id === selectedCategory)
-  }, [downloads, selectedCategory, selectedQueue, queueFiles])
-  const selectedQueueRow = useMemo(
-    () => queues.find((q) => q.id === selectedQueue) ?? null,
+  }, [downloads, selectedCategory, selectedQueue, selectedFilter, selectedGrabberId, queueFiles])
+  /** The queue Start/Stop/Sync act on: the selected queue, else
+   *  the main queue. */
+  const activeQueueRow = useMemo(
+    () =>
+      queues.find((q) => q.id === selectedQueue) ??
+      queues.find((q) => q.is_main) ??
+      null,
     [queues, selectedQueue],
   )
   const totalSpeed = downloads
     .filter((d) => d.status === 'downloading')
     .reduce((sum, d) => sum + d.speed_bps, 0)
   const runningCount = downloads.filter((d) => d.status === 'downloading').length
+  const hasComplete = downloads.some((d) => d.status === 'complete')
 
   async function run(action: () => Promise<void>) {
     try {
@@ -270,6 +299,29 @@ export default function App() {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     }
+  }
+
+  /** Sidebar selection: one list at a time — picking a category,
+   *  a queue or a filter clears the other two. */
+  function selectCategory(id: string | null) {
+    setSelectedCategory(id)
+    setSelectedQueue(null)
+    setSelectedFilter('all')
+    setSelectedGrabberId(null)
+  }
+
+  function selectQueue(id: string | null) {
+    setSelectedQueue(id)
+    setSelectedCategory(null)
+    setSelectedFilter('all')
+    setSelectedGrabberId(null)
+  }
+
+  function selectFilter(filter: SidebarFilter, grabberId: string | null = null) {
+    setSelectedFilter(filter)
+    setSelectedGrabberId(grabberId)
+    setSelectedCategory(null)
+    setSelectedQueue(null)
   }
 
   function openScheduler(queueId?: string) {
@@ -287,6 +339,36 @@ export default function App() {
       } else {
         await addToQueue(downloadId, target.id)
       }
+      await refreshAll()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  /** Stop All (toolbar / Tasks menu): pause every download that
+   *  is running right now. There is no pause-all engine command —
+   *  pausing each one in turn is the same set of calls the Pause
+   *  button makes, and the 1 s poll shows them all paused. */
+  async function handleStopAll() {
+    try {
+      for (const d of downloads.filter((x) => x.status === 'downloading')) {
+        await pauseDownload(d.id)
+      }
+      await refreshAll()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  /** Delete Completed (toolbar / Tasks menu): remove every
+   *  finished download from the list. The files on disk are kept,
+   *  exactly like the single Remove. */
+  async function handleDeleteCompleted() {
+    try {
+      for (const d of downloads.filter((x) => x.status === 'complete')) {
+        await deleteDownload(d.id, false)
+      }
+      setSelectedId(null)
       await refreshAll()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -336,162 +418,68 @@ export default function App() {
     }
   }, [downloads, settings])
 
+  const statusText =
+    runningCount > 0 ? `${runningCount} downloading · ${formatSpeed(totalSpeed)}` : 'Idle'
+  const menuActions = {
+    add: () => setShowAdd(true),
+    batch: () => setShowBatch(true),
+    downloadAll: () => setShowDownloadAll(true),
+    resume: () => selected && void run(() => resumeDownload(selected.id)),
+    stop: () => selected && void run(() => pauseDownload(selected.id)),
+    stopAll: () => void handleStopAll(),
+    deleteSelected: () => selected && requestRemove(selected),
+    deleteCompleted: () => void handleDeleteCompleted(),
+    openFolder: () => selected && void run(() => openFolder(selected.id)),
+    remove: () => selected && requestRemove(selected),
+    settings: () => setShowSettings(true),
+    videoGrabber: () => setShowVideoGrabber(true),
+    siteGrabber: () => setShowSiteGrabber(true),
+    startQueue: () => activeQueueRow && void run(() => startQueue(activeQueueRow.id)),
+    stopQueue: () => activeQueueRow && void run(() => stopQueue(activeQueueRow.id)),
+    syncNow: () =>
+      activeQueueRow && void run(() => syncQueueNow(activeQueueRow.id).then(() => undefined)),
+    openProgress: () => selected && void openProgressWindowFor(selected.id, false),
+    moveToCategory: (categoryId: string) =>
+      selected && void run(() => moveToCategory(selected.id, categoryId)),
+    checkUpdates: () => void runManualUpdateCheck(),
+    toggleTheme,
+  }
+  const toolbarActions = {
+    add: menuActions.add,
+    resume: menuActions.resume,
+    stop: menuActions.stop,
+    stopAll: menuActions.stopAll,
+    deleteSelected: menuActions.deleteSelected,
+    deleteCompleted: menuActions.deleteCompleted,
+    settings: menuActions.settings,
+    scheduler: () => openScheduler(),
+    startQueue: menuActions.startQueue,
+    stopQueue: menuActions.stopQueue,
+    videoGrabber: menuActions.videoGrabber,
+    siteGrabber: menuActions.siteGrabber,
+    downloadAll: menuActions.downloadAll,
+    batch: menuActions.batch,
+  }
+
   return (
     <div className="flex h-full flex-col text-text">
-      <header className="flex h-12 shrink-0 items-center justify-between border-b border-border bg-surface px-4">
-        <div className="flex items-center gap-2">
-          <img src={logoUrl} alt="Sonic Manager logo" className="h-8 w-8 rounded-md object-cover" />
-          <h1 className="text-lg font-bold">Sonic Manager</h1>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="text-sm text-text-muted">
-            {runningCount > 0 ? `${runningCount} downloading · ${formatSpeed(totalSpeed)}` : 'Idle'}
-          </span>
-          <Button
-            variant="ghost"
-            size="sm"
-            aria-label={theme === 'light' ? 'Switch to dark theme' : 'Switch to light theme'}
-            onClick={toggleTheme}
-          >
-            {theme === 'light' ? <Moon className="h-4 w-4" aria-hidden="true" /> : <Sun className="h-4 w-4" aria-hidden="true" />}
-          </Button>
-          <div className="relative">
-            <Button
-              variant="ghost"
-              size="sm"
-              aria-label="Help menu"
-              aria-expanded={showHelpMenu}
-              onClick={() => setShowHelpMenu((v) => !v)}
-            >
-              Help
-            </Button>
-            {showHelpMenu && (
-              <div
-                role="menu"
-                aria-label="Help"
-                className="absolute right-0 z-20 mt-1 w-56 rounded-md border border-border bg-surface-raised p-1 shadow-pop"
-              >
-                <button
-                  role="menuitem"
-                  type="button"
-                  className="w-full rounded px-3 py-2 text-left text-sm hover:bg-surface"
-                  onClick={() => void runManualUpdateCheck()}
-                >
-                  Check for updates
-                </button>
-                <button
-                  role="menuitem"
-                  type="button"
-                  className="w-full rounded px-3 py-2 text-left text-sm hover:bg-surface"
-                  onClick={() => {
-                    setShowHelpMenu(false)
-                    setShowSettings(true)
-                  }}
-                >
-                  Settings
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
-      </header>
-
-      <div role="toolbar" aria-label="Download actions" className="flex h-11 shrink-0 items-center gap-2 border-b border-border bg-surface px-4">
-        <Button variant="primary" size="sm" onClick={() => setShowAdd(true)}>
-          <Link2 className="h-4 w-4" aria-hidden="true" /> Add a link
-        </Button>
-        <Button variant="secondary" size="sm" onClick={() => setShowDownloadAll(true)}>
-          <Globe className="h-4 w-4" aria-hidden="true" /> Download all
-        </Button>
-        <Button variant="secondary" size="sm" onClick={() => setShowBatch(true)}>
-          <ListPlus className="h-4 w-4" aria-hidden="true" /> Batch
-        </Button>
-        <Button variant="secondary" size="sm" onClick={() => setShowVideoGrabber(true)}>
-          <Clapperboard className="h-4 w-4" aria-hidden="true" /> Video grabber
-        </Button>
-        <Button variant="secondary" size="sm" onClick={() => setShowSiteGrabber(true)}>
-          <FolderDown className="h-4 w-4" aria-hidden="true" /> Site grabber
-        </Button>
-        <Button
-          variant="secondary"
-          size="sm"
-          disabled={!selected || selected.status !== 'downloading'}
-          onClick={() => selected && void run(() => pauseDownload(selected.id))}
-        >
-          <Pause className="h-4 w-4" aria-hidden="true" /> Pause
-        </Button>
-        <Button
-          variant="secondary"
-          size="sm"
-          disabled={!selected || (selected.status !== 'paused' && selected.status !== 'error')}
-          onClick={() => selected && void run(() => resumeDownload(selected.id))}
-        >
-          <Play className="h-4 w-4" aria-hidden="true" /> Resume
-        </Button>
-        <Button
-          variant="danger"
-          size="sm"
-          disabled={!selected || (selected.status !== 'downloading' && selected.status !== 'paused')}
-          onClick={() => selected && void run(() => cancelDownload(selected.id))}
-        >
-          <X className="h-4 w-4" aria-hidden="true" /> Cancel
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          disabled={!selected}
-          onClick={() => selected && requestRemove(selected)}
-        >
-          <Trash2 className="h-4 w-4" aria-hidden="true" /> Remove
-        </Button>
-        <label className="sr-only" htmlFor="move-to-category">
-          Move selected download to a category
-        </label>
-        <select
-          id="move-to-category"
-          value=""
-          disabled={!selected}
-          onChange={(e) => {
-            const categoryId = e.target.value
-            if (selected && categoryId) void run(() => moveToCategory(selected.id, categoryId))
-          }}
-          className="h-7 rounded-md border border-border-input bg-bg px-2 text-sm text-text-muted focus:border-accent disabled:opacity-45"
-        >
-          <option value="">Move to category…</option>
-          {categories.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name}
-            </option>
-          ))}
-        </select>
-        <span className="mx-1 h-6 w-px shrink-0 bg-border" aria-hidden="true" />
-        <Button variant="secondary" size="sm" onClick={() => openScheduler()}>
-          <CalendarClock className="h-4 w-4" aria-hidden="true" /> Queues &amp; scheduler
-        </Button>
-        <Button variant="secondary" size="sm" onClick={() => setShowSettings(true)}>
-          <SettingsIcon className="h-4 w-4" aria-hidden="true" /> Settings
-        </Button>
-        {selectedQueueRow ? (
-          selectedQueueRow.running ? (
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => void run(() => stopQueue(selectedQueueRow.id))}
-            >
-              <Square className="h-4 w-4" aria-hidden="true" /> Stop queue
-            </Button>
-          ) : (
-            <Button
-              variant="primary"
-              size="sm"
-              disabled={selectedQueueRow.file_count === 0}
-              onClick={() => void run(() => startQueue(selectedQueueRow.id))}
-            >
-              <Play className="h-4 w-4" aria-hidden="true" /> Start queue
-            </Button>
-          )
-        ) : null}
-      </div>
+      <MenuBar
+        actions={menuActions}
+        selected={selected}
+        categories={categories}
+        queue={activeQueueRow}
+        hasDownloading={runningCount > 0}
+        hasComplete={hasComplete}
+        theme={theme}
+        statusText={statusText}
+      />
+      <Toolbar
+        actions={toolbarActions}
+        selected={selected}
+        queue={activeQueueRow}
+        hasDownloading={runningCount > 0}
+        hasComplete={hasComplete}
+      />
 
       {error ? (
         <div role="alert" className="flex shrink-0 items-center justify-between gap-2 border-b border-border bg-danger-soft px-4 py-2 text-sm text-danger">
@@ -507,22 +495,28 @@ export default function App() {
           categories={categories}
           downloads={downloads}
           queues={queues}
+          grabberProjects={grabberProjects}
           selectedCategory={selectedCategory}
           selectedQueue={selectedQueue}
-          onSelectCategory={setSelectedCategory}
-          onSelectQueue={setSelectedQueue}
+          selectedFilter={selectedFilter}
+          selectedGrabberId={selectedGrabberId}
+          onSelectCategory={selectCategory}
+          onSelectQueue={selectQueue}
+          onSelectFilter={selectFilter}
           onAddCategory={() => setShowAddCategory(true)}
           onAddQueue={() => setShowAddQueue(true)}
           onDeleteCategory={(category) =>
             void run(() => deleteCategory(category.id).then(() => void refreshCategories()))
           }
           onOpenScheduler={(queueId) => openScheduler(queueId)}
+          onRunGrabber={(projectId) => void run(() => runGrabber(projectId))}
+          onNewGrabber={() => setShowSiteGrabber(true)}
           onDropDownload={(downloadId, target) => void handleDropDownload(downloadId, target)}
         />
         <main className="min-w-0 flex-1 overflow-auto">
           <DownloadTable
             downloads={visible}
-            categories={categories}
+            queues={queues}
             selectedId={selectedId}
             onSelect={setSelectedId}
             onOpenProgress={(id) => void openProgressWindowFor(id, false)}
@@ -611,8 +605,7 @@ export default function App() {
         onClose={() => setShowAddQueue(false)}
         onAdded={(id) => {
           void refreshQueues()
-          setSelectedQueue(id)
-          setSelectedCategory(null)
+          selectQueue(id)
         }}
       />
       <SchedulerDialog

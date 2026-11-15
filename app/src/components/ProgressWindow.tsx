@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
 import { ChevronDown, ChevronUp, FileWarning, FolderOpen, Pause, Play, RotateCw, ShieldCheck, ShieldX, X } from 'lucide-react'
-import { formatBytes, formatEta, formatSpeed, progressPercent, statusLabel } from '../lib/format'
+import { completeActionLabel, formatBytes, formatEta, formatSpeed, progressPercent, statusLabel } from '../lib/format'
 import {
   cancelDownload,
   deleteDownload,
   getProgressSnapshot,
+  getQueue,
   getSettings,
   listDownloads,
   openFile,
@@ -14,15 +15,76 @@ import {
   resumeDownload,
   retryNow,
   runAntivirusScan,
+  setDownloadSpeedLimit,
   setProgressWindowCompact,
+  updateQueue,
 } from '../lib/api'
 import { recordSpeedSample, speedGraphPoints, speedGraphPolyline } from '../lib/speedGraph'
 import type { SpeedSample } from '../lib/speedGraph'
-import type { DownloadRow, ProgressEvent, ScanResult } from '../lib/types'
+import type { DownloadRow, ProgressEvent, QueueCompleteAction, QueueRow, QueueScheduleType, ScanResult, Settings } from '../lib/types'
 import { Button } from './Button'
 import { ProgressBar } from './ProgressBar'
 import { ProgressRing } from './ProgressRing'
 import { StatusBadge } from './StatusBadge'
+
+type ProgressTab = 'status' | 'limiter' | 'completion'
+
+/** S14 — the scan result line, shared by the status tab's finished
+ *  block and the completion tab (which also carries the actions). */
+function ScanStatus({ scan }: { scan: ScanResult | null }) {
+  if (scan?.status === 'clean') {
+    return (
+      <p role="status" className="mt-2 flex items-start gap-2 text-sm">
+        <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-success" aria-hidden="true" />
+        <span>Antivirus scan: clean — no threat found.</span>
+      </p>
+    )
+  }
+  if (scan?.status === 'infected') {
+    return (
+      <div role="alert" className="mt-2 flex items-start gap-2 text-sm text-danger">
+        <ShieldX className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+        <span>
+          Antivirus scan: threat found
+          {scan.detail ? ` — ${scan.detail}` : '.'} The file was not opened. Delete it or
+          quarantine it from the Options on completion tab.
+        </span>
+      </div>
+    )
+  }
+  if (scan?.status === 'scan_failed') {
+    return (
+      <p role="status" className="mt-2 flex items-start gap-2 text-sm text-warning">
+        <FileWarning className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+        <span>Antivirus scan failed{scan.detail ? ` — ${scan.detail}` : '.'}</span>
+      </p>
+    )
+  }
+  if (scan?.status === 'timed_out') {
+    return (
+      <p role="status" className="mt-2 flex items-start gap-2 text-sm text-warning">
+        <FileWarning className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+        <span>Antivirus scan timed out{scan.detail ? ` — ${scan.detail}` : '.'}</span>
+      </p>
+    )
+  }
+  if (scan?.status === 'scanning') {
+    return (
+      <p role="status" className="mt-2 text-sm text-text-muted">
+        Scanning with your antivirus scanner…
+      </p>
+    )
+  }
+  if (scan?.status === 'not_configured') {
+    return (
+      <p className="mt-2 text-sm text-text-muted">
+        No antivirus scanner is configured — the file was not scanned. Set one up in
+        Settings &gt; Downloads.
+      </p>
+    )
+  }
+  return <p className="mt-2 text-sm text-text-muted">Scan result not available yet.</p>
+}
 
 /** S03 — the download progress WINDOW. A separate OS window per
  *  download (opened by the `open_progress_window` Tauri command),
@@ -57,14 +119,80 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
   const [retryBusy, setRetryBusy] = useState(false)
   const [folderBusy, setFolderBusy] = useState(false)
   const [scanBusy, setScanBusy] = useState<string | null>(null)
+  /** IDM's three tabs (Round 44): Download status, Speed Limiter,
+   *  Options on completion. */
+  const [tab, setTab] = useState<ProgressTab>('status')
+  /** Settings (for the global speed cap shown on the limiter tab)
+   *  and the download's queue (for the completion tab's editor). */
+  const [settings, setSettings] = useState<Settings | null>(null)
+  const [queue, setQueue] = useState<QueueRow | null>(null)
+  /** Speed Limiter tab: the cap input, seeded from the row when
+   *  the tab opens; empty = no per-download cap. */
+  const [capInput, setCapInput] = useState('')
+  const [capBusy, setCapBusy] = useState(false)
+  /** Options on completion tab: the queue's completion action
+   *  editor, seeded from the queue row when the tab opens. */
+  const [completionAction, setCompletionAction] = useState<QueueCompleteAction>('none')
+  const [completionProgram, setCompletionProgram] = useState('')
+  const [completionBusy, setCompletionBusy] = useState(false)
+  const [completionSaved, setCompletionSaved] = useState(false)
 
   // The window runs the same bundle as the main window, so it
   // applies the stored theme itself on mount.
   useEffect(() => {
     void getSettings()
-      .then((s) => document.documentElement.setAttribute('data-theme', s.theme))
+      .then((s) => {
+        setSettings(s)
+        document.documentElement.setAttribute('data-theme', s.theme)
+      })
       .catch(() => undefined)
   }, [])
+
+  // The queue this download belongs to (if any) — the completion
+  // tab edits its on-completion action. Depend on the queue id
+  // string, not the whole row: the 500 ms poll replaces the row
+  // object every tick, and refetching on every tick would reseed
+  // the completion editor while the user types in it.
+  const queueId = download?.queue_id ?? null
+  useEffect(() => {
+    if (!queueId) {
+      setQueue(null)
+      return
+    }
+    let stopped = false
+    void getQueue(queueId)
+      .then((row) => {
+        if (!stopped) setQueue(row)
+      })
+      .catch(() => undefined)
+    return () => {
+      stopped = true
+    }
+  }, [queueId])
+
+  // Seed the completion editor from the queue row when the tab
+  // opens or the row arrives (after the fetch, or after a save —
+  // the saved values are the ones just entered, so reseeding is
+  // harmless). The limiter input is seeded only on tab open (in
+  // openTab): the poll replaces the row every 500 ms, so seeding
+  // it from the row on every change would clobber typing.
+  useEffect(() => {
+    if (tab === 'completion' && queue) {
+      setCompletionAction(queue.on_complete_action as QueueCompleteAction)
+      setCompletionProgram(queue.on_complete_program ?? '')
+    }
+  }, [tab, queue])
+
+  // Seed the tab editors when their tab opens, from the freshest
+  // row — typing in them must not be clobbered by the 500 ms poll.
+  function openTab(next: ProgressTab) {
+    setTab(next)
+    setActionError(null)
+    setCompletionSaved(false)
+    if (next === 'limiter' && download) {
+      setCapInput(download.speed_limit_kbps ? String(download.speed_limit_kbps) : '')
+    }
+  }
 
   useEffect(() => {
     let stopped = false
@@ -234,6 +362,66 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
     }
   }
 
+  /** Speed Limiter tab — apply the per-download cap, live: the
+   *  engine's token bucket picks it up at once (S12). Empty or 0
+   *  removes the cap; the global cap still applies, so the
+   *  effective speed is the lower of the two. `value` overrides
+   *  the input (the Remove cap button passes '' — state updates
+   *  are async, so reading the input there would use the old
+   *  value). */
+  async function handleApplyCap(value?: string) {
+    if (!download) return
+    setCapBusy(true)
+    setActionError(null)
+    try {
+      const trimmed = (value ?? capInput).trim()
+      let kbps: number | null = null
+      if (trimmed !== '') {
+        const parsed = Number(trimmed)
+        if (!Number.isInteger(parsed) || parsed < 0 || parsed > 1_000_000) {
+          throw new Error('Enter a whole number of KB/s between 1 and 1,000,000, or leave it empty for no cap.')
+        }
+        kbps = parsed === 0 ? null : parsed
+      }
+      await setDownloadSpeedLimit(downloadId, kbps)
+      const row = await listDownloads().then((rows) => rows.find((d) => d.id === downloadId) ?? null)
+      if (row) setDownload(row)
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setCapBusy(false)
+    }
+  }
+
+  /** Options on completion tab — save the download's queue
+   *  completion action. The action fires when the queue finishes:
+   *  open the file, run a program, shut down or hibernate — the
+   *  last two ask first, with the existing 60 s cancellable
+   *  countdown in the main window. */
+  async function handleSaveCompletion() {
+    if (!queue) return
+    setCompletionBusy(true)
+    setActionError(null)
+    setCompletionSaved(false)
+    try {
+      const updated = await updateQueue(queue.id, {
+        schedule_type: queue.schedule_type as QueueScheduleType,
+        start_at: queue.start_at,
+        stop_at: queue.stop_at,
+        start_on_startup: queue.start_on_startup,
+        on_complete_action: completionAction,
+        on_complete_program: completionAction === 'run_program' ? completionProgram.trim() || null : null,
+        sync_interval_minutes: queue.sync_interval_minutes,
+      })
+      setQueue(updated)
+      setCompletionSaved(true)
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setCompletionBusy(false)
+    }
+  }
+
   if (!loaded) {
     return (
       <div className="flex h-full flex-col p-6 text-text">
@@ -325,14 +513,33 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
         <span className="font-mono text-sm text-text-muted">{download.url}</span>
       </div>
 
-      <ProgressBar
-        percent={percent}
-        size="tall"
-        status={download.status === 'complete' ? 'complete' : download.status === 'error' ? 'error' : download.status === 'paused' ? 'paused' : 'downloading'}
-        label={`Progress of ${download.filename}`}
-      />
-
-      <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+      {!compact ? (
+        <>
+          <div role="tablist" aria-label="Download details" className="mb-4 flex gap-1 border-b border-border">
+            {(
+              [
+                ['status', 'Download status'],
+                ['limiter', 'Speed Limiter'],
+                ['completion', 'Options on completion'],
+              ] as const
+            ).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                role="tab"
+                aria-selected={tab === value}
+                onClick={() => openTab(value)}
+                className={`-mb-px border-b-2 px-3 py-2 text-sm font-semibold ${
+                  tab === value ? 'border-accent text-accent' : 'border-transparent text-text-muted hover:text-text'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {tab === 'status' ? (
+            <>
+              <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
         <div>
           <dt className="text-text-muted">File size</dt>
           <dd>{formatBytes(size)}</dd>
@@ -371,9 +578,7 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
         </p>
       ) : null}
 
-      {!compact ? (
-        <>
-          {download.status === 'downloading' ? (
+              {download.status === 'downloading' ? (
             <div className="mt-4">
               <p className="mb-2 text-sm font-semibold">Speed over the last minute</p>
               {points.length >= 2 ? (
@@ -450,46 +655,154 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
               <p className="mt-1 break-all font-mono text-sm text-text-muted" title={download.save_path}>
                 {download.save_path}
               </p>
-              {scan?.status === 'clean' ? (
-                <p role="status" className="mt-2 flex items-start gap-2 text-sm">
-                  <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-success" aria-hidden="true" />
-                  <span>Antivirus scan: clean — no threat found.</span>
-                </p>
-              ) : scan?.status === 'infected' ? (
-                <div role="alert" className="mt-2 flex items-start gap-2 text-sm text-danger">
-                  <ShieldX className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-                  <span>
-                    Antivirus scan: threat found
-                    {scan.detail ? ` — ${scan.detail}` : '.'} The file was not opened. Delete it or
-                    quarantine it below.
-                  </span>
-                </div>
-              ) : scan?.status === 'scan_failed' ? (
-                <p role="status" className="mt-2 flex items-start gap-2 text-sm text-warning">
-                  <FileWarning className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-                  <span>Antivirus scan failed{scan.detail ? ` — ${scan.detail}` : '.'}</span>
-                </p>
-              ) : scan?.status === 'timed_out' ? (
-                <p role="status" className="mt-2 flex items-start gap-2 text-sm text-warning">
-                  <FileWarning className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-                  <span>Antivirus scan timed out{scan.detail ? ` — ${scan.detail}` : '.'}</span>
-                </p>
-              ) : scan?.status === 'scanning' ? (
-                <p role="status" className="mt-2 text-sm text-text-muted">
-                  Scanning with your antivirus scanner…
-                </p>
-              ) : scan?.status === 'not_configured' ? (
-                <p className="mt-2 text-sm text-text-muted">
-                  No antivirus scanner is configured — the file was not scanned. Set one up in
-                  Settings &gt; Downloads.
-                </p>
+              <ScanStatus scan={scan} />
+            </div>
+          ) : null}
+            </>
+          ) : null}
+          {tab === 'limiter' ? (
+            <div className="mt-2 text-sm">
+              <p className="text-text-muted">
+                {download.speed_limit_kbps
+                  ? `This download is capped at ${download.speed_limit_kbps} KB/s.`
+                  : 'This download has no per-download cap.'}
+                {settings?.speed_limit_kbps
+                  ? ` The global limit is ${settings.speed_limit_kbps} KB/s — the effective speed is the lower of the two.`
+                  : ' There is no global speed limit set.'}
+              </p>
+              <div className="mt-4 flex flex-wrap items-center gap-2">
+                <label htmlFor="speed-cap" className="font-semibold">
+                  Limit this download to
+                </label>
+                <input
+                  id="speed-cap"
+                  type="number"
+                  min={0}
+                  max={1_000_000}
+                  step={1}
+                  inputMode="numeric"
+                  value={capInput}
+                  onChange={(e) => setCapInput(e.target.value)}
+                  placeholder="No cap"
+                  aria-label="Per-download speed cap in KB/s"
+                  className="h-8 w-28 rounded-md border border-border-input bg-bg px-2 font-mono text-sm text-text"
+                />
+                <span className="text-text-muted">KB/s</span>
+                <Button variant="primary" size="sm" onClick={() => void handleApplyCap()} disabled={capBusy}>
+                  Apply
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={capBusy || !download.speed_limit_kbps}
+                  onClick={() => void handleApplyCap('')}
+                >
+                  Remove cap
+                </Button>
+              </div>
+              <p className="mt-2 text-sm text-text-muted">
+                Leave it empty for no cap. The cap applies at once — the download keeps running.
+              </p>
+            </div>
+          ) : null}
+          {tab === 'completion' ? (
+            <div className="mt-2 text-sm">
+              <p className="font-semibold">Finished file</p>
+              {download.status === 'complete' ? (
+                <>
+                  <p className="mt-1 break-all font-mono text-sm text-text-muted" title={download.save_path}>
+                    {download.save_path}
+                  </p>
+                  <ScanStatus scan={scan} />
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {scan && scan.status !== 'scanning' ? (
+                      <Button variant="secondary" size="sm" onClick={handleRescan} disabled={scanBusy !== null}>
+                        <ShieldCheck className="h-4 w-4" aria-hidden="true" /> Scan again
+                      </Button>
+                    ) : null}
+                    {threatFound ? (
+                      <>
+                        <Button variant="secondary" size="sm" onClick={handleQuarantine} disabled={scanBusy !== null}>
+                          Quarantine
+                        </Button>
+                        <Button variant="danger" size="sm" onClick={handleDeleteFile} disabled={scanBusy !== null}>
+                          Delete file
+                        </Button>
+                      </>
+                    ) : null}
+                  </div>
+                </>
               ) : (
-                <p className="mt-2 text-sm text-text-muted">Scan result not available yet.</p>
+                <p className="mt-1 text-text-muted">
+                  The file actions and the scan result appear here once the download finishes.
+                </p>
+              )}
+              <p className="mt-5 font-semibold">When the queue finishes</p>
+              {queue ? (
+                <>
+                  <p className="mt-1 text-text-muted">
+                    Queue &ldquo;{queue.name}&rdquo;: {completeActionLabel(queue.on_complete_action)}
+                    {queue.on_complete_action === 'run_program' && queue.on_complete_program
+                      ? ` — ${queue.on_complete_program}`
+                      : ''}
+                  </p>
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <label htmlFor="completion-action" className="font-semibold">
+                      When done
+                    </label>
+                    <select
+                      id="completion-action"
+                      value={completionAction}
+                      onChange={(e) => setCompletionAction(e.target.value as QueueCompleteAction)}
+                      className="h-8 rounded-md border border-border-input bg-bg px-2 text-sm text-text"
+                    >
+                      <option value="none">Do nothing when done</option>
+                      <option value="open_file">Open the file when done</option>
+                      <option value="run_program">Run a program when done</option>
+                      <option value="shutdown">Shut down the computer when done</option>
+                      <option value="hibernate">Hibernate the computer when done</option>
+                    </select>
+                    {completionAction === 'run_program' ? (
+                      <input
+                        type="text"
+                        value={completionProgram}
+                        onChange={(e) => setCompletionProgram(e.target.value)}
+                        placeholder="Program path"
+                        aria-label="Program to run when done"
+                        className="h-8 w-64 rounded-md border border-border-input bg-bg px-2 font-mono text-sm text-text"
+                      />
+                    ) : null}
+                    <Button variant="primary" size="sm" onClick={handleSaveCompletion} disabled={completionBusy}>
+                      Save
+                    </Button>
+                  </div>
+                  {completionSaved ? (
+                    <p role="status" className="mt-2 text-success">
+                      Saved.
+                    </p>
+                  ) : null}
+                  <p className="mt-2 text-text-muted">
+                    Shut down and hibernate ask first — a 60 second countdown appears in the main
+                    window, and the action runs only when the queue actually downloaded something.
+                  </p>
+                </>
+              ) : (
+                <p className="mt-1 text-text-muted">
+                  This download is not in a queue — completion actions are set per queue, in
+                  Queues &amp; scheduler.
+                </p>
               )}
             </div>
           ) : null}
         </>
       ) : null}
+
+      <ProgressBar
+        percent={percent}
+        size="tall"
+        status={download.status === 'complete' ? 'complete' : download.status === 'error' ? 'error' : download.status === 'paused' ? 'paused' : 'downloading'}
+        label={`Progress of ${download.filename}`}
+      />
 
       {actionError ? (
         <p role="alert" className="mt-4 text-sm text-danger">
@@ -538,21 +851,6 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
             <Button variant="secondary" onClick={handleOpenFolder} disabled={folderBusy}>
               <FolderOpen className="h-4 w-4" aria-hidden="true" /> Open folder
             </Button>
-            {scan && scan.status !== 'scanning' ? (
-              <Button variant="secondary" onClick={handleRescan} disabled={scanBusy !== null}>
-                <ShieldCheck className="h-4 w-4" aria-hidden="true" /> Scan again
-              </Button>
-            ) : null}
-            {threatFound ? (
-              <>
-                <Button variant="secondary" onClick={handleQuarantine} disabled={scanBusy !== null}>
-                  Quarantine
-                </Button>
-                <Button variant="danger" onClick={handleDeleteFile} disabled={scanBusy !== null}>
-                  Delete file
-                </Button>
-              </>
-            ) : null}
           </>
         ) : null}
         {download.status === 'downloading' || download.status === 'paused' ? (

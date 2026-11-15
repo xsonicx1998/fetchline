@@ -1,45 +1,69 @@
 import { useState } from 'react'
-import { Folder, FolderOpen, List, Play, Plus, Trash2 } from 'lucide-react'
-import type { CategoryRow, DownloadRow, QueueRow } from '../lib/types'
+import { CircleCheck, Clock, Folder, FolderOpen, Globe, List, Play, Plus, Trash2 } from 'lucide-react'
+import type { CategoryRow, DownloadRow, GrabberProjectRow, QueueRow } from '../lib/types'
+
+/** Which list the main table shows. 'all' is every download (or
+ *  one category's); 'unfinished' / 'finished' filter by status the
+ *  way IDM's tree does; 'grabber' shows one site-grabber project's
+ *  downloads. */
+export type SidebarFilter = 'all' | 'unfinished' | 'finished' | 'grabber'
 
 interface CategorySidebarProps {
   categories: CategoryRow[]
   downloads: DownloadRow[]
   queues: QueueRow[]
+  grabberProjects: GrabberProjectRow[]
   selectedCategory: string | null
   selectedQueue: string | null
+  selectedFilter: SidebarFilter
+  selectedGrabberId: string | null
   onSelectCategory: (categoryId: string | null) => void
   onSelectQueue: (queueId: string | null) => void
+  onSelectFilter: (filter: SidebarFilter, grabberId?: string | null) => void
   onAddCategory: () => void
   onAddQueue: () => void
   onDeleteCategory: (category: CategoryRow) => void
   onOpenScheduler: (queueId: string) => void
+  onRunGrabber: (projectId: string) => void
+  onNewGrabber: () => void
   /** A download row was dropped on a category or queue. */
   onDropDownload: (downloadId: string, target: { kind: 'category' | 'queue'; id: string }) => void
 }
 
 /** S04 + S05 — categories and queues sidebar (components.md:
- *  CategoriesTree). Categories filter the main table; queues do the
- *  same for their files. Downloads can be dragged from the table onto
- *  a category (moves them there) or onto a queue (adds them to it). */
+ *  CategoriesTree), IDM's arrangement: the category tree, then
+ *  Unfinished / Finished, then Grabber projects, then Queues.
+ *  Categories filter the main table; queues do the same for their
+ *  files; the status rows filter by completion; a grabber project
+ *  filters to the downloads it produced. Downloads can be dragged
+ *  from the table onto a category (moves them there) or onto a
+ *  queue (adds them to it). */
 export function CategorySidebar({
   categories,
   downloads,
   queues,
+  grabberProjects,
   selectedCategory,
   selectedQueue,
+  selectedFilter,
+  selectedGrabberId,
   onSelectCategory,
   onSelectQueue,
+  onSelectFilter,
   onAddCategory,
   onAddQueue,
   onDeleteCategory,
   onOpenScheduler,
+  onRunGrabber,
+  onNewGrabber,
   onDropDownload,
 }: CategorySidebarProps) {
   const [dropTarget, setDropTarget] = useState<string | null>(null)
 
   const countFor = (id: string | null) =>
     id === null ? downloads.length : downloads.filter((d) => d.category_id === id).length
+  const unfinishedCount = downloads.filter((d) => d.status !== 'complete').length
+  const finishedCount = downloads.filter((d) => d.status === 'complete').length
 
   function handleDrop(e: React.DragEvent, target: { kind: 'category' | 'queue'; id: string }) {
     e.preventDefault()
@@ -68,6 +92,8 @@ export function CategorySidebar({
       active ? 'bg-accent-soft font-semibold text-accent' : 'text-text hover:bg-surface-2'
     } ${dropTarget === key ? 'outline outline-2 outline-accent' : ''}`
 
+  const allActive = selectedCategory === null && selectedQueue === null && selectedFilter === 'all'
+
   return (
     <nav
       aria-label="Categories and queues"
@@ -79,9 +105,10 @@ export function CategorySidebar({
         onClick={() => {
           onSelectCategory(null)
           onSelectQueue(null)
+          onSelectFilter('all')
         }}
-        aria-current={selectedCategory === null && selectedQueue === null || undefined}
-        className={rowClass(selectedCategory === null && selectedQueue === null, 'all')}
+        aria-current={allActive || undefined}
+        className={rowClass(allActive, 'all')}
       >
         <FolderOpen className="h-4 w-4 shrink-0" aria-hidden="true" />
         <span className="flex-1 truncate">All downloads</span>
@@ -94,6 +121,7 @@ export function CategorySidebar({
             onClick={() => {
               onSelectCategory(c.id)
               onSelectQueue(null)
+              onSelectFilter('all')
             }}
             aria-current={selectedCategory === c.id || undefined}
             className={`${rowClass(selectedCategory === c.id, `cat:${c.id}`)} flex-1`}
@@ -124,6 +152,75 @@ export function CategorySidebar({
         New category
       </button>
 
+      <div className="my-1 h-px shrink-0 bg-border" aria-hidden="true" />
+      <button
+        type="button"
+        onClick={() => onSelectFilter('unfinished')}
+        aria-current={selectedFilter === 'unfinished' || undefined}
+        className={rowClass(selectedFilter === 'unfinished', 'unfinished')}
+      >
+        <Clock className="h-4 w-4 shrink-0" aria-hidden="true" />
+        <span className="flex-1 truncate">Unfinished</span>
+        <span className="text-xs text-text-muted">{unfinishedCount}</span>
+      </button>
+      <button
+        type="button"
+        onClick={() => onSelectFilter('finished')}
+        aria-current={selectedFilter === 'finished' || undefined}
+        className={rowClass(selectedFilter === 'finished', 'finished')}
+      >
+        <CircleCheck className="h-4 w-4 shrink-0" aria-hidden="true" />
+        <span className="flex-1 truncate">Finished</span>
+        <span className="text-xs text-text-muted">{finishedCount}</span>
+      </button>
+
+      <p className="px-2 pb-1 pt-3 text-xs font-semibold uppercase text-text-muted">Grabber projects</p>
+      {grabberProjects.map((p) => {
+        const running = p.status === 'exploring' || p.status === 'downloading'
+        const active = selectedFilter === 'grabber' && selectedGrabberId === p.id
+        return (
+          <div key={p.id} className="group flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => onSelectFilter('grabber', p.id)}
+              aria-current={active || undefined}
+              title={`${p.name} — ${p.files_downloaded} downloaded, ${p.files_matched} matched`}
+              className={`${rowClass(active, `grabber:${p.id}`)} flex-1`}
+            >
+              <Globe className="h-4 w-4 shrink-0" aria-hidden="true" />
+              <span className="flex-1 truncate">{p.name}</span>
+              <span className="text-xs text-text-muted">
+                {p.files_downloaded} file{p.files_downloaded === 1 ? '' : 's'}
+              </span>
+              {running ? (
+                <span className="shrink-0 rounded-full bg-accent px-2 py-0.5 text-xs font-semibold text-on-accent">
+                  Running
+                </span>
+              ) : null}
+            </button>
+            {running ? null : (
+              <button
+                type="button"
+                onClick={() => onRunGrabber(p.id)}
+                aria-label={`Run grabber project ${p.name}`}
+                title={`Run ${p.name}`}
+                className="shrink-0 rounded-md p-1 text-text-muted opacity-0 hover:bg-surface-2 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
+              >
+                <Play className="h-4 w-4" aria-hidden="true" />
+              </button>
+            )}
+          </div>
+        )
+      })}
+      <button
+        type="button"
+        onClick={onNewGrabber}
+        className="flex h-8 items-center gap-2 rounded-md px-2 text-left text-base text-text-muted hover:bg-surface-2"
+      >
+        <Plus className="h-4 w-4 shrink-0" aria-hidden="true" />
+        New grabber project
+      </button>
+
       <p className="px-2 pb-1 pt-3 text-xs font-semibold uppercase text-text-muted">Queues</p>
       {queues.map((q) => (
         <div key={q.id} className="group flex items-center gap-1" {...dropProps(`queue:${q.id}`, { kind: 'queue', id: q.id })}>
@@ -132,6 +229,7 @@ export function CategorySidebar({
             onClick={() => {
               onSelectQueue(q.id)
               onSelectCategory(null)
+              onSelectFilter('all')
             }}
             onDoubleClick={() => onOpenScheduler(q.id)}
             aria-current={selectedQueue === q.id || undefined}

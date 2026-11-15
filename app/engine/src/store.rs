@@ -239,6 +239,17 @@ pub struct DownloadRow {
     pub error_message: Option<String>,
     pub created_at: String,
     pub completed_at: Option<String>,
+    /// Last attempt / last activity (UTC ISO-8601): the row's
+    /// `updated_at`, bumped on every status change (start, pause,
+    /// resume, error, complete) and on the 2 s checkpoint while
+    /// downloading — the engine's record of the last try, shown
+    /// as the table's "Last Try" column (Round 44).
+    #[serde(default)]
+    pub updated_at: String,
+    /// Site-grabber project that produced this download, if any
+    /// (Round 44: the categories tree filters by project).
+    #[serde(default)]
+    pub grabber_project_id: Option<String>,
     /// Per-download speed cap in KB/s (S12); `None` = no
     /// per-download cap (the global cap still applies).
     /// `#[serde(default)]` so rows written before S12 still read.
@@ -2178,7 +2189,7 @@ impl Store {
             "SELECT id, url, final_url, filename, save_path, category_id, queue_id, \
              queue_position, size_bytes, downloaded_bytes, status, speed_bps, eta_seconds, \
              etag, last_modified, error_message, created_at, completed_at, \
-             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges \
+             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges, updated_at, grabber_project_id \
              FROM downloads WHERE queue_id = ?1 AND status != 'deleted' \
              ORDER BY queue_position ASC, created_at ASC",
         )?;
@@ -2268,7 +2279,7 @@ impl Store {
             "SELECT id, url, final_url, filename, save_path, category_id, queue_id, \
              queue_position, size_bytes, downloaded_bytes, status, speed_bps, eta_seconds, \
              etag, last_modified, error_message, created_at, completed_at, \
-             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges \
+             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges, updated_at, grabber_project_id \
              FROM downloads WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![id], row_to_download)?;
@@ -2284,7 +2295,7 @@ impl Store {
             "SELECT id, url, final_url, filename, save_path, category_id, queue_id, \
              queue_position, size_bytes, downloaded_bytes, status, speed_bps, eta_seconds, \
              etag, last_modified, error_message, created_at, completed_at, \
-             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges \
+             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges, updated_at, grabber_project_id \
              FROM downloads WHERE status != 'deleted' ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], row_to_download)?;
@@ -2610,5 +2621,7 @@ fn row_to_download(r: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadRow> {
         scan_detail: r.get(21)?,
         scan_scanned_at: r.get(22)?,
         accept_ranges: r.get::<_, Option<i64>>(23)?.map(|v| v != 0),
+        updated_at: r.get(24)?,
+        grabber_project_id: r.get(25)?,
     })
 }

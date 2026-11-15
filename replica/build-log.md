@@ -2757,3 +2757,109 @@ itself, runner-only). Packaging only — no engine change, no licence work.
   still shows through in dark mode. The run this push triggers is
   the proof — its smoke screenshot should show the dark theme
   with the background and the header logo.
+
+## Round 44 — main window rebuilt to IDM's layout, in Sonic colors — 2026-11-16
+- User instruction (with two reference images): the app should look
+  EXACTLY like IDM's design — same layout and icons — only with OUR
+  colors from the second picture. References: IDM 6.38 light
+  (`~/workspace/user/files/17655_3_ggwt.png`) and the same layout
+  recolored in Sonic colors (`~/workspace/user/files/17657_4_wx7s.jpg`).
+  Clean-room rule stands: no IDM brand, logo, or icon artwork copied —
+  Lucide icons with the same meanings/positions, in the Sonic palette.
+  No Registration menu (licence S11 stays set aside) and no "Tell a
+  Friend" button. Every existing feature kept, rearranged.
+- Menu bar (new `app/src/components/MenuBar.tsx`): logo 28 px at the
+  left, then Tasks / File / Downloads / View / Help; status text +
+  theme toggle at the right. Tasks: Add URL, Add batch, Download all
+  links, Resume, Stop, Stop all, Delete, Delete completed. File: Open
+  folder, Remove selected, Settings. Downloads: Video grabber, Site
+  grabber, Move to category (all categories), Start Queue / Stop Queue
+  / Sync queue now (the selected queue, else the main queue). View:
+  Dark theme (checkmark), Progress window. Help: Check for updates,
+  Settings. One menu open at a time; Escape / click-outside closes;
+  hovering another top entry switches. The old header (logo + title +
+  status + theme toggle + Help dropdown) is gone.
+- Toolbar (new `app/src/components/Toolbar.tsx`): IDM order, 68 px
+  tall, big icons (28 px) + one-line labels in fixed 76 px columns
+  with `truncate` — this also fixes the Round 43 nit of the "Add a
+  link" label wrapping to two lines. Add URL (Plus, info), Resume
+  (Download, info), Stop (Ban, danger), Stop All (Hand, danger),
+  Delete (Trash2, muted), Delete Completed (Trash2, danger), Options
+  (Settings, info), Scheduler (Clock, accent), Start Queue (Play,
+  info), Stop Queue (Square, danger), Grabber (Globe, info + dropdown:
+  Video grabber / Site grabber / Download all links / Batch). Stop All
+  pauses every downloading download (frontend loop over the existing
+  `pauseDownload` — no engine command exists); Delete Completed
+  deletes every complete download (loop over `deleteDownload`).
+  Disabled states as before (greyed when nothing selected). The
+  move-to-category select left the toolbar — it lives in the Downloads
+  menu now.
+- Categories tree (`CategorySidebar.tsx` rewritten): Categories
+  (All downloads + categories + New category), Unfinished (Clock
+  icon, count = status != complete) and Finished (CircleCheck icon,
+  count = complete), "Grabber projects" section (Globe icon, name,
+  `files_downloaded` count, "Running" pill while exploring or
+  downloading, hover Play button runs the project), Queues section
+  (unchanged). New `SidebarFilter` type `'all' | 'unfinished' |
+  'finished' | 'grabber'`; App holds `selectedFilter` +
+  `selectedGrabberId` alongside `selectedCategory`/`selectedQueue`,
+  and selecting any one clears the others.
+- Table (`DownloadTable.tsx` rewritten): columns File Name
+  (ProgressRing 24 px + filename), Q (queue name or '—'), Size,
+  Status (StatusBadge + percent text for downloading/paused rows),
+  Time left, Transfer rate, Last Try, Description. The old Category
+  column is gone (the sidebar filter shows it) and the old Progress
+  bar column is gone (ring + percent-in-status replace it).
+  Description = error_message first, then the quota-paused note,
+  then the scan-threat note, else empty. No information lost.
+- Engine change (minimal, needed for the Last Try column and the
+  grabber filter): `DownloadRow` gained `updated_at: String` +
+  `grabber_project_id: Option<String>` (both `#[serde(default)]`)
+  in `app/engine/src/store.rs`; the three SELECTs feeding
+  `row_to_download` (`list_downloads`, `list_queue_files`,
+  `get_download`) now also select `updated_at, grabber_project_id`
+  (indices 24, 25 — appended, no renumbering; BUG-026 lesson: the
+  three SELECTs must stay in sync). Frontend `types.ts` DownloadRow
+  gained the same two fields. "Last Try" semantics: `updated_at`
+  is bumped on every status change and on the 2 s checkpoint while
+  downloading, so it is the engine's closest record of a last try.
+  Kept test added: `list_downloads_carries_updated_at_and_grabber_project`
+  in `engine_tests.rs` (creates a real grabber project first — the
+  first version tagged a nonexistent project id and failed on a
+  FOREIGN KEY violation, which is how the test earned its keep).
+- Progress window (`ProgressWindow.tsx` restructured): IDM's three
+  tabs — Download status (the current fields: dl grid, quota note,
+  speed graph, per-part bars, retry countdown, error, finished-file
+  block), Speed Limiter (per-download cap input wired to the
+  existing `setDownloadSpeedLimit`, live-changeable; empty/0 = no
+  cap; the note says the effective rate is the min of the
+  per-download cap and the global cap), Options on completion
+  (queue completion-action editor via the existing `updateQueue` —
+  none / open file / run program / shutdown / hibernate + program
+  input when run_program + Save; the 60 s countdown note; the S14
+  scan status + Scan again / Quarantine / Delete actions). The tab
+  bar hides in compact mode; the tall progress bar sits below the
+  tabs (IDM's order) and stays always visible. Closing the window
+  still never cancels the download. Scan rendering is a local
+  `ScanStatus` function inside `ProgressWindow.tsx` (not a separate
+  file — both tabs live in that file, so a shared file would buy
+  nothing), used by both the status tab's finished block and the
+  completion tab. Two review catches fixed before the build: the
+  queue-fetch effect now depends on the `queue_id` string, not the
+  whole row (the 500 ms poll replaces the row object every tick
+  and would have refetched + reseeded the completion editor while
+  the user types), and the cap handler takes an optional value
+  parameter so Remove cap passes '' instead of reading the stale
+  input from its closure.
+- Contrast re-check (WCAG AA, inline checker in /tmp, not
+  committed): **58/58 pass, 0 failed** — the 24 pairs from
+  tokens.json plus 34 new toolbar-icon pairs (accent / info /
+  danger / success / warning on surface, surface-raised and bg,
+  both themes; text-faint on surface for disabled icons;
+  text-muted on surface-raised). Lowest margin is the pre-existing
+  light-border-input on light-bg at 3.07 (UI threshold 3.0).
+- Verified on Linux: full engine suite **417/417 pass, 0 failed**
+  (416 + the new test); `cargo check --tests` 0 warnings; `npm run
+  build` passes. The run this push triggers is the proof — its
+  smoke screenshot should show the new menu bar, toolbar,
+  categories tree and table in the dark Sonic theme.
