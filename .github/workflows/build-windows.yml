@@ -176,7 +176,7 @@ jobs:
           Write-Host "MSI installed OK"
 
           # 3. Launch the app and give it 30 s to start.
-          $exe = 'C:\Program Files\Fetchline\fetchline.exe'
+          $exe = 'C:\Program Files\Sonic Manager\fetchline.exe'
           if (-not (Test-Path $exe)) { throw "fetchline.exe not found at $exe" }
           $proc = Start-Process -FilePath $exe -PassThru
           Write-Host "Launched fetchline, PID $($proc.Id)"
@@ -294,7 +294,7 @@ jobs:
           # the host test below writes to that same file, and the app
           # must not be running while it does (it would drain the row
           # before the check reads it).
-          $exe = 'C:\Program Files\Fetchline\fetchline.exe'
+          $exe = 'C:\Program Files\Sonic Manager\fetchline.exe'
           if (-not (Test-Path $exe)) { throw "fetchline.exe not found at $exe" }
           $proc = Start-Process -FilePath $exe -PassThru
           Write-Host "Launched fetchline, PID $($proc.Id)"
@@ -330,10 +330,10 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           # The host + registry key under test are the ones the MSI
-          # installed (C:\Program Files\Fetchline\fetchline-host.exe);
+          # installed (C:\Program Files\Sonic Manager\fetchline-host.exe);
           # the script reads the installed key + manifest and verifies
           # them instead of registering its own.
-          python scripts/capture-test.py --host-exe 'C:\Program Files\Fetchline\fetchline-host.exe' --db-path "$env:APPDATA\com.fetchline.app\fetchline\app.db" --extension-dir "$env:GITHUB_WORKSPACE\app\extension" --chrome-exe 'C:\Program Files\Google\Chrome\Application\chrome.exe' --app-exe 'C:\Program Files\Fetchline\fetchline.exe' --url 'https://raw.githubusercontent.com/mohandksonic-ui/fetchline/7255dff9ec2863b16bda2772a839654b51274c32/LICENSE' --expected-sha256 'c2ef3696eecd8d51c0e615afe9437e5d620abcd9272b9d9f4bcbbd1e4a95f793' --downloads-dir "$env:USERPROFILE\Downloads"
+          python scripts/capture-test.py --host-exe 'C:\Program Files\Sonic Manager\fetchline-host.exe' --db-path "$env:APPDATA\com.fetchline.app\fetchline\app.db" --extension-dir "$env:GITHUB_WORKSPACE\app\extension" --chrome-exe 'C:\Program Files\Google\Chrome\Application\chrome.exe' --app-exe 'C:\Program Files\Sonic Manager\fetchline.exe' --url 'https://raw.githubusercontent.com/mohandksonic-ui/fetchline/7255dff9ec2863b16bda2772a839654b51274c32/LICENSE' --expected-sha256 'c2ef3696eecd8d51c0e615afe9437e5d620abcd9272b9d9f4bcbbd1e4a95f793' --downloads-dir "$env:USERPROFILE\Downloads"
 
       - name: Upload capture-test evidence
         if: always()
