@@ -673,3 +673,24 @@ async fn sound_disabled_event_records_nothing_and_playback_is_windows_only() {
         assert!(mgr.play_sound("download_complete").is_ok());
     }
 }
+
+/// S03 progress window: the auto-open switch defaults to on on a
+/// fresh database and round-trips through update_settings — off
+/// stays off, so the table stays the only progress view.
+#[test]
+fn show_progress_window_defaults_on_and_round_trips() {
+    let dir = tmpdir();
+    let store = Store::open(&dir.join("app.db")).unwrap();
+    assert!(
+        store.get_settings().unwrap().show_progress_window,
+        "default on"
+    );
+    let mut s = store.get_settings().unwrap();
+    s.show_progress_window = false;
+    let saved = store.update_settings(&s).unwrap();
+    assert!(!saved.show_progress_window);
+    assert!(!store.get_settings().unwrap().show_progress_window);
+    let mut s2 = store.get_settings().unwrap();
+    s2.show_progress_window = true;
+    assert!(store.update_settings(&s2).unwrap().show_progress_window);
+}

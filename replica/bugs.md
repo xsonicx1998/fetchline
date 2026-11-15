@@ -3823,6 +3823,61 @@ connector push to xsonicx1998/fetchline (files:
 — this entry, plus the Round 37 status correction
 above). No workflow change. Run #6 is the proof.
 
+## Round 39 — BUG-044 (live `download-progress` events never reach the frontend: no Tauri capability grants `plugin:event|listen`) + progress window (S03) — 2026-11-15
+
+Symptom: none visible — that is the bug. The main window's
+`download-progress` listener (App.tsx `onProgress`) never fired
+in the built app, so the old progress overlay's "live" speed, ETA
+and 60 s speed graph never updated between the 1 s table polls;
+the graph never got a sample in production and showed its "builds
+as the download runs" placeholder forever. The 1 s `listDownloads`
+poll masked it completely (rows carry speed, ETA and scan results),
+so nothing ever looked broken.
+
+Root cause (proven, not inferred): this app ships NO Tauri
+capability files — no `src-tauri/capabilities/` directory, no
+`app > security > capabilities` in `tauri.conf.json`, no
+`src-tauri/permissions/` app manifest — and no generated
+capability in the build output. Vendored tauri 2.12.5
+(`src/webview/mod.rs`, `on_message`) checks the ACL exactly
+when the command is a `plugin:` command, or the app defined an
+ACL manifest, or the origin is remote; with an empty resolved
+ACL every `plugin:` command is rejected. The installed
+`@tauri-apps/api` 2.12.4 routes `listen` to
+`invoke('plugin:event|listen', …)`, `WebviewWindow` creation to
+`plugin:webview|create_webview_window`, and `setTitle` to
+`plugin:window|set_title` — all denied. App commands (`invoke`
+of a `#[tauri::command]`) run ungated: local origin, no app ACL
+manifest, no `plugin:` prefix. The same denial also silences
+the other two frontend listeners — `queue-action-pending`
+(shutdown/hibernate countdown never appears mid-session; only
+the mount-time `getPendingAction` sweep catches one) and
+`update-available` (the weekly-check dialog never appears) —
+those two are NOT fixed here; their fix is a capabilities file
+or polling, a separate decision.
+
+Fix (this round): the progress window is built around the ACL
+instead of through it — created, focused, resized and titled
+from Rust (`open_progress_window` / `set_progress_window_compact`
+commands + title updates in the progress-event forwarder in
+`app/src-tauri/src/lib.rs`), and its live feed is polling
+(`list_downloads` + new `get_progress_snapshot`, backed by
+`DownloadManager::last_progress`, stashed in `emit()`). The dead
+`onProgress` listener is removed from App.tsx (with its `live`
+state and the `onProgress` bridge helper) rather than left to
+fail quietly; the 1 s poll is documented as the table's real
+live path. No download behaviour changed: pause/resume/cancel/
+retry reuse the existing commands, and the engine only gained
+stored facts (`accept_ranges` on the row, `show_progress_window`
+on settings) plus the snapshot accessor.
+
+Status: fixed as described; engine tests 3 new (settings
+round-trip, `accept_ranges` persistence, snapshot matches the
+completion event). The window itself has never opened in the
+running desktop app — no GUI test on this VM or the VPS — so a
+human pass on real Windows is still needed (auto-open, title,
+Hide details resize, close-does-not-cancel).
+
 ## Known limitations, not bugs (round-24 additions)
 
 - The Tauri shell never compiles or runs on this VM, so a

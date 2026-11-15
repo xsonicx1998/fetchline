@@ -27,6 +27,10 @@ export interface DownloadRow {
   completed_at: string | null
   /** Per-download speed cap in KB/s (S12); null = no cap. */
   speed_limit_kbps: number | null
+  /** Whether the probe found the server range-capable (S03
+   *  progress window): true = resumable, false = no ranges,
+   *  null = unknown (added before this was stored). */
+  accept_ranges: boolean | null
   /** Paused because the download quota was reached (S12). */
   quota_paused: boolean
   /** Antivirus scan result (S14): the outcome of the scanner
@@ -345,6 +349,11 @@ export interface Settings {
    *  desktop app drains it (default true); false leaves it queued
    *  for the user to start by hand. Milestone 2 / S13 finish. */
   browser_start_drained: boolean
+  /** Progress window (S03): open a separate progress window when
+   *  a download starts (default true). Off leaves the table as
+   *  the only progress view; double-clicking a row still opens
+   *  its window. */
+  show_progress_window: boolean
   antivirus_command: string | null
   /** Antivirus hook (S14): the on/off switch for the scan
    *  (default on — an empty command still means no scan) and

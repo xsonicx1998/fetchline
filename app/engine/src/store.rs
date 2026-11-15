@@ -114,6 +114,11 @@ pub struct Settings {
     pub theme: String,
     pub browser_integration: bool,
     pub browser_start_drained: bool,
+    /// Progress window (S03, 2026-11-15): when a download starts,
+    /// a separate progress window opens for it (default on). Off
+    /// leaves the table as the only progress view; double-clicking
+    /// a row still opens its window.
+    pub show_progress_window: bool,
     pub antivirus_command: Option<String>,
     /// Antivirus hook (S14): the on/off switch (default on — an
     /// empty command still means no scan) and the scan timeout in
@@ -171,6 +176,7 @@ impl Default for Settings {
             theme: "light".to_string(),
             browser_integration: true,
             browser_start_drained: true,
+            show_progress_window: true,
             antivirus_command: None,
             antivirus_enabled: true,
             antivirus_timeout_secs: crate::antivirus::DEFAULT_SCAN_TIMEOUT_SECS,
@@ -254,6 +260,13 @@ pub struct DownloadRow {
     pub scan_detail: Option<String>,
     #[serde(default)]
     pub scan_scanned_at: Option<String>,
+    /// Whether the probe found the server range-capable (S03
+    /// progress window): `Some(true)` = resumable, `Some(false)` =
+    /// no ranges, `None` = unknown (a download added before this
+    /// was stored). `#[serde(default)]` so rows written before
+    /// S03 still read.
+    #[serde(default)]
+    pub accept_ranges: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -554,6 +567,13 @@ impl Store {
         for (table, column, ddl) in [
             ("settings", "start_on_startup", "INTEGER NOT NULL DEFAULT 0"),
             ("settings", "browser_start_drained", "INTEGER NOT NULL DEFAULT 1"),
+            // Progress window (S03, 2026-11-15): the auto-open
+            // switch, default on.
+            (
+                "settings",
+                "show_progress_window",
+                "INTEGER NOT NULL DEFAULT 1",
+            ),
             ("settings", "default_action", "TEXT NOT NULL DEFAULT 'start_now'"),
             ("settings", "duplicate_action", "TEXT NOT NULL DEFAULT 'rename'"),
             ("settings", "confirm_delete", "INTEGER NOT NULL DEFAULT 1"),
@@ -646,6 +666,23 @@ impl Store {
             ("downloads", "scan_detail", "TEXT"),
             ("downloads", "scan_scanned_at", "TEXT"),
         ] {
+            let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+            let cols: Vec<String> = stmt
+                .query_map([], |r| r.get::<_, String>(1))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            drop(stmt);
+            if !cols.iter().any(|c| c == column) {
+                conn.execute(
+                    &format!("ALTER TABLE {table} ADD COLUMN {column} {ddl}"),
+                    [],
+                )?;
+            }
+        }
+        // Added in the progress-window milestone (S03, 2026-11-15):
+        // whether the probe found the server range-capable, so the
+        // progress window can show resume capability honestly.
+        // NULL = unknown (a download added before this was stored).
+        for (table, column, ddl) in [("downloads", "accept_ranges", "INTEGER")] {
             let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
             let cols: Vec<String> = stmt
                 .query_map([], |r| r.get::<_, String>(1))?
@@ -1167,7 +1204,7 @@ impl Store {
              dialup_hangup_after_completion, dialup_redial_attempts, \
              update_url, last_update_check_at, \
              quota_enabled, quota_mb, quota_hours, \
-             antivirus_enabled, antivirus_timeout_secs \
+             antivirus_enabled, antivirus_timeout_secs, show_progress_window \
              FROM settings WHERE id = 1",
             [],
             |r| {
@@ -1213,6 +1250,7 @@ impl Store {
                     antivirus_timeout_secs: r.get::<_, Option<i64>>(27)?.unwrap_or(
                         crate::antivirus::DEFAULT_SCAN_TIMEOUT_SECS,
                     ),
+                    show_progress_window: r.get::<_, i64>(28)? != 0,
                 })
             },
         );
@@ -1344,6 +1382,7 @@ impl Store {
              update_url = ?22, last_update_check_at = ?23, \
              quota_enabled = ?24, quota_mb = ?25, quota_hours = ?26, \
              antivirus_enabled = ?27, antivirus_timeout_secs = ?28, \
+             show_progress_window = ?29, \
              updated_at = datetime('now') WHERE id = 1",
             params![
                 s.default_download_folder.trim(),
@@ -1377,6 +1416,7 @@ impl Store {
                 s.quota_hours,
                 if s.antivirus_enabled { 1 } else { 0 },
                 s.antivirus_timeout_secs,
+                if s.show_progress_window { 1 } else { 0 },
             ],
         )?;
         drop(conn);
@@ -2138,7 +2178,7 @@ impl Store {
             "SELECT id, url, final_url, filename, save_path, category_id, queue_id, \
              queue_position, size_bytes, downloaded_bytes, status, speed_bps, eta_seconds, \
              etag, last_modified, error_message, created_at, completed_at, \
-             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at \
+             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges \
              FROM downloads WHERE queue_id = ?1 AND status != 'deleted' \
              ORDER BY queue_position ASC, created_at ASC",
         )?;
@@ -2181,14 +2221,15 @@ impl Store {
         size_bytes: Option<i64>,
         etag: Option<&str>,
         last_modified: Option<&str>,
+        accept_ranges: Option<bool>,
     ) -> Result<String> {
         let id = Self::new_id();
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO downloads \
-             (id, url, final_url, filename, save_path, category_id, size_bytes, etag, last_modified, status) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued')",
-            params![id, url, final_url, filename, save_path, category_id, size_bytes, etag, last_modified],
+             (id, url, final_url, filename, save_path, category_id, size_bytes, etag, last_modified, accept_ranges, status) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'queued')",
+            params![id, url, final_url, filename, save_path, category_id, size_bytes, etag, last_modified, accept_ranges.map(|b| b as i64)],
         )?;
         Ok(id)
     }
@@ -2227,7 +2268,7 @@ impl Store {
             "SELECT id, url, final_url, filename, save_path, category_id, queue_id, \
              queue_position, size_bytes, downloaded_bytes, status, speed_bps, eta_seconds, \
              etag, last_modified, error_message, created_at, completed_at, \
-             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at \
+             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges \
              FROM downloads WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![id], row_to_download)?;
@@ -2243,7 +2284,7 @@ impl Store {
             "SELECT id, url, final_url, filename, save_path, category_id, queue_id, \
              queue_position, size_bytes, downloaded_bytes, status, speed_bps, eta_seconds, \
              etag, last_modified, error_message, created_at, completed_at, \
-             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at \
+             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges \
              FROM downloads WHERE status != 'deleted' ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], row_to_download)?;
@@ -2568,5 +2609,6 @@ fn row_to_download(r: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadRow> {
         scan_status: r.get(20)?,
         scan_detail: r.get(21)?,
         scan_scanned_at: r.get(22)?,
+        accept_ranges: r.get::<_, Option<i64>>(23)?.map(|v| v != 0),
     })
 }

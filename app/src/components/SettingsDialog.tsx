@@ -524,6 +524,21 @@ export function SettingsDialog({ open, categories, onClose, onSaved }: SettingsD
                 Fetchline picks it up. Off leaves it queued in the download list, to start by
                 hand. Only applies while catching downloads from the browser is on.
               </p>
+              <label className="flex items-center gap-2 text-base">
+                <input
+                  type="checkbox"
+                  checked={settings.show_progress_window}
+                  onChange={(e) => set('show_progress_window', e.target.checked)}
+                  className="h-4 w-4 accent-accent"
+                />
+                Show the download progress window when a download starts
+              </label>
+              <p className={hintCls}>
+                On (the default), each download that starts opens its own small window with its
+                speed, time left and parts. Closing the window never stops the download, and
+                double-clicking a download opens its window again. Off leaves the table as the
+                only progress view.
+              </p>
               <div>
                 <label htmlFor="set-excluded" className={labelCls}>
                   Excluded sites

@@ -93,6 +93,28 @@ export async function openFolder(id: string): Promise<void> {
   return invoke('open_folder', { id })
 }
 
+/** Open (or focus, when it already exists) the separate progress
+ *  window for a download (S03). The window is a real OS window,
+ *  titled "<percent>% <filename>"; closing it never cancels the
+ *  download. */
+export async function openProgressWindow(id: string): Promise<void> {
+  return invoke('open_progress_window', { downloadId: id })
+}
+
+/** Resize a progress window between its full view (speed graph,
+ *  parts, scan details) and its compact view (S03). */
+export async function setProgressWindowCompact(id: string, compact: boolean): Promise<void> {
+  return invoke('set_progress_window_compact', { downloadId: id, compact })
+}
+
+/** The latest progress event for a download (S03) — the progress
+ *  window's live feed, since the frontend `download-progress`
+ *  listener never fires in the built app (BUG-044: no Tauri
+ *  capability grants `plugin:event|listen`). */
+export async function getProgressSnapshot(id: string): Promise<ProgressEvent | null> {
+  return invoke<ProgressEvent | null>('get_progress_snapshot', { downloadId: id })
+}
+
 export async function deleteDownload(id: string, deleteFile: boolean): Promise<void> {
   return invoke('delete_download', { id, deleteFile })
 }
@@ -403,11 +425,6 @@ export async function quarantineDownload(id: string): Promise<string> {
  *  application. Refused when the scanner flagged the file. */
 export async function openFile(id: string): Promise<void> {
   return invoke('open_file', { id })
-}
-
-/** Subscribe to live `download-progress` events from the Rust engine. */
-export function onProgress(cb: (event: ProgressEvent) => void): Promise<() => void> {
-  return listen<ProgressEvent>('download-progress', (e) => cb(e.payload))
 }
 
 /** Subscribe to `queue-action-pending` events: a queue drained and its

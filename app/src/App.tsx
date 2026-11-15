@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { CalendarClock, Clapperboard, FolderDown, Globe, Link2, ListPlus, Moon, Pause, Play, Settings as SettingsIcon, Square, Sun, Trash2, X } from 'lucide-react'
 import {
   addToQueue,
@@ -15,9 +15,9 @@ import {
   listDownloads,
   listQueues,
   moveToCategory,
-  onProgress,
   onQueueAction,
   onUpdateAvailable,
+  openProgressWindow,
   pauseDownload,
   resumeDownload,
   startQueue,
@@ -25,7 +25,7 @@ import {
   updateSettings,
 } from './lib/api'
 import { formatSpeed } from './lib/format'
-import type { CategoryRow, DownloadRow, PendingAction, ProgressEvent, QueueRow, QuotaStatus, Settings, UpdateCheckResult } from './lib/types'
+import type { CategoryRow, DownloadRow, PendingAction, QueueRow, QuotaStatus, Settings, UpdateCheckResult } from './lib/types'
 import { AddCategoryDialog } from './components/AddCategoryDialog'
 import { AddDownloadDialog } from './components/AddDownloadDialog'
 import { AddQueueDialog } from './components/AddQueueDialog'
@@ -34,7 +34,6 @@ import { Button } from './components/Button'
 import { CategorySidebar } from './components/CategorySidebar'
 import { DownloadAllDialog } from './components/DownloadAllDialog'
 import { DownloadTable } from './components/DownloadTable'
-import { ProgressDialog } from './components/ProgressDialog'
 import { QueueActionDialog } from './components/QueueActionDialog'
 import { SchedulerDialog } from './components/SchedulerDialog'
 import { SettingsDialog } from './components/SettingsDialog'
@@ -43,12 +42,15 @@ import { UpdateDialog } from './components/UpdateDialog'
 import { VideoGrabberDialog } from './components/VideoGrabberDialog'
 
 /** S01 — main window. Header, toolbar, categories + queues sidebar,
- *  download table, status bar. Live progress arrives on
- *  `download-progress` events; the list is also refreshed once a
- *  second so paused and finished rows settle even if an event is
- *  missed. Queue completion actions arrive on `queue-action-pending`:
+ *  download table, status bar. The list is refreshed once a second
+ *  and that refresh is the live path for the table — the
+ *  `download-progress` listener that used to patch rows between
+ *  polls is gone (BUG-044: it never fired in the built app). Queue
+ *  completion actions are subscribed on `queue-action-pending`:
  *  shutdown / hibernate wait for the countdown dialog, the others
- *  run at once. */
+ *  run at once — but that listener shares the same BUG-044 denial,
+ *  so a waiting action is also surfaced by the mount-time
+ *  `getPendingAction` sweep below. */
 export default function App() {
   const [downloads, setDownloads] = useState<DownloadRow[]>([])
   const [categories, setCategories] = useState<CategoryRow[]>([])
@@ -68,8 +70,6 @@ export default function App() {
   const [showScheduler, setShowScheduler] = useState(false)
   const [schedulerQueueId, setSchedulerQueueId] = useState<string | null>(null)
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
-  const [progressId, setProgressId] = useState<string | null>(null)
-  const [live, setLive] = useState<ProgressEvent | null>(null)
   const [theme, setTheme] = useState<'light' | 'dark'>('light')
   const [error, setError] = useState<string | null>(null)
   const [settings, setSettings] = useState<Settings | null>(null)
@@ -146,33 +146,17 @@ export default function App() {
     void refreshQueues()
     void refreshSettings()
     const timer = window.setInterval(() => void refreshAll(), 1000)
-    let unlistenProgress: (() => void) | undefined
     let unlistenAction: (() => void) | undefined
     let unlistenUpdate: (() => void) | undefined
-    void onProgress((event) => {
-      setLive(event)
-      setDownloads((prev) =>
-        prev.map((d) =>
-          d.id === event.id
-            ? {
-                ...d,
-                downloaded_bytes: event.downloaded_bytes,
-                size_bytes: event.size_bytes,
-                speed_bps: event.speed_bps,
-                eta_seconds: event.eta_seconds,
-                status: event.status as DownloadRow['status'],
-                // S14: the completion event (and the later event
-                // the detached scan emits) carries the scan result.
-                scan_status: event.scan?.status ?? d.scan_status,
-                scan_detail: event.scan?.detail ?? d.scan_detail,
-                scan_scanned_at: event.scan?.scanned_at ?? d.scan_scanned_at,
-              }
-            : d,
-        ),
-      )
-    }).then((fn) => {
-      unlistenProgress = fn
-    })
+    // NOTE (BUG-044): there used to be a `download-progress`
+    // listener here that patched rows live between polls. It never
+    // fired in the built app — this app ships no Tauri capability
+    // files, so `plugin:event|listen` is denied by the ACL and the
+    // subscription promise rejects silently. The 1 s poll below is
+    // the real live path for the table (it always was: the rows
+    // carry speed, ETA and scan results), and the progress window
+    // polls the engine's `get_progress_snapshot` instead. The dead
+    // listener is gone rather than left to fail quietly.
     void onQueueAction((action) => {
       // Shutdown / hibernate wait for the countdown dialog; the
       // other actions have nothing to cancel, so they run at once.
@@ -210,7 +194,6 @@ export default function App() {
       .catch(() => undefined)
     return () => {
       window.clearInterval(timer)
-      unlistenProgress?.()
       unlistenAction?.()
       unlistenUpdate?.()
     }
@@ -262,10 +245,6 @@ export default function App() {
     () => downloads.find((d) => d.id === selectedId) ?? null,
     [downloads, selectedId],
   )
-  const progressDownload = useMemo(
-    () => downloads.find((d) => d.id === progressId) ?? null,
-    [downloads, progressId],
-  )
   const visible = useMemo(() => {
     if (selectedQueue !== null) return queueFiles
     if (selectedCategory === null) return downloads
@@ -309,6 +288,49 @@ export default function App() {
       setError(e instanceof Error ? e.message : String(e))
     }
   }
+
+  /** Open (or focus) a download's separate progress window (S03).
+   *  Explicit (double-click / Enter): a failure shows in the
+   *  error banner. The auto-open below calls it quiet instead, so
+   *  a window that cannot open never spams the banner while a
+   *  download runs. */
+  async function openProgressWindowFor(id: string, quiet: boolean) {
+    try {
+      await openProgressWindow(id)
+    } catch (e) {
+      if (!quiet) setError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  /** S03 progress window: open a window for each download that
+   *  starts, while the setting is on. The first snapshot only
+   *  seeds the set — downloads already running at startup do not
+   *  pop windows. A download that leaves `downloading` leaves the
+   *  set, so resuming it opens its window again. Settings must
+   *  have loaded first: while they are null the switch is
+   *  unknown, and a window opened in that gap would ignore a
+   *  user who turned it off. */
+  const seenDownloading = useRef<Set<string> | null>(null)
+  useEffect(() => {
+    if (seenDownloading.current === null) {
+      seenDownloading.current = new Set(
+        downloads.filter((d) => d.status === 'downloading').map((d) => d.id),
+      )
+      return
+    }
+    if (settings === null || !settings.show_progress_window) return
+    for (const d of downloads) {
+      if (d.status === 'downloading' && !seenDownloading.current.has(d.id)) {
+        seenDownloading.current.add(d.id)
+        void openProgressWindowFor(d.id, true)
+      }
+    }
+    for (const id of [...seenDownloading.current]) {
+      if (!downloads.some((d) => d.id === id && d.status === 'downloading')) {
+        seenDownloading.current.delete(id)
+      }
+    }
+  }, [downloads, settings])
 
   return (
     <div className="flex h-full flex-col bg-bg text-text">
@@ -496,7 +518,7 @@ export default function App() {
             categories={categories}
             selectedId={selectedId}
             onSelect={setSelectedId}
-            onOpenProgress={setProgressId}
+            onOpenProgress={(id) => void openProgressWindowFor(id, false)}
             onAdd={() => setShowAdd(true)}
           />
         </main>
@@ -652,14 +674,6 @@ export default function App() {
           setPendingAction(null)
           void refreshAll()
         }}
-      />
-      <ProgressDialog
-        download={progressDownload}
-        live={progressId !== null && live?.id === progressId ? live : null}
-        onClose={() => setProgressId(null)}
-        onPause={() => progressDownload && void run(() => pauseDownload(progressDownload.id))}
-        onResume={() => progressDownload && void run(() => resumeDownload(progressDownload.id))}
-        onCancel={() => progressDownload && void run(() => cancelDownload(progressDownload.id).then(() => setProgressId(null)))}
       />
     </div>
   )

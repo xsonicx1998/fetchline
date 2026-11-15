@@ -280,6 +280,18 @@ pub struct DownloadManager {
     /// Global speed cap, shared by every running download (S12).
     limiter: Arc<RateLimiter>,
     events: broadcast::Sender<ProgressEvent>,
+    /// The latest progress event per download (S03 progress
+    /// window, 2026-11-15). The frontend's `download-progress`
+    /// listener never fires in the built app (BUG-044: no Tauri
+    /// capability grants `plugin:event|listen`), so the window
+    /// polls this snapshot instead of listening — the same event
+    /// the Rust forwarder broadcasts, kept here as well. Entries
+    /// are kept for the session (the completion event is what the
+    /// window shows after a download finishes); one small event
+    /// per download that ever ran, so the map stays bounded by
+    /// the download list. A stale entry only ever shows old
+    /// numbers.
+    last_progress: Arc<StdMutex<HashMap<String, ProgressEvent>>>,
     running: AsyncMutex<HashMap<String, Running>>,
     /// Stop flags of queues currently being drained, by queue id.
     /// The runner task detaches on spawn and removes its own entry
@@ -350,6 +362,7 @@ impl DownloadManager {
             max_retries: AtomicU32::new(Settings::default().max_retries as u32),
             limiter: Arc::new(RateLimiter::new(0)),
             events,
+            last_progress: Arc::new(StdMutex::new(HashMap::new())),
             running: AsyncMutex::new(HashMap::new()),
             queue_runs: AsyncMutex::new(HashMap::new()),
             sync_runs: AsyncMutex::new(HashMap::new()),
@@ -1273,6 +1286,7 @@ impl DownloadManager {
             size,
             info.etag.as_deref(),
             info.last_modified.as_deref(),
+            Some(info.accept_ranges),
         )?;
         // Browser cookies (S13 finish): kept in memory for this
         // download's segment requests, never on disk — see the
@@ -4126,7 +4140,7 @@ impl DownloadManager {
                 }
             })
             .collect();
-        let _ = self.events.send(ProgressEvent {
+        let event = ProgressEvent {
             id: id.to_string(),
             filename: row.filename.clone(),
             downloaded_bytes: total,
@@ -4148,7 +4162,25 @@ impl DownloadManager {
             } else {
                 None
             },
-        });
+        };
+        // S03 progress window: keep the latest event per download
+        // (see the `last_progress` field). The window polls it —
+        // the frontend listener never fires (BUG-044).
+        self.last_progress
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), event.clone());
+        let _ = self.events.send(event);
+    }
+
+    /// The latest progress event for a download, or `None` when
+    /// it has never emitted one (queued, or added before this
+    /// session started). The progress window polls this every
+    /// 500 ms for its live speed, segments, retry countdown and
+    /// scan result — the same event the `download-progress`
+    /// broadcast carries to the (deaf) frontend listener.
+    pub fn last_progress(&self, id: &str) -> Option<ProgressEvent> {
+        self.last_progress.lock().unwrap().get(id).cloned()
     }
 
     /// A snapshot event for a terminal state (paused / error): no

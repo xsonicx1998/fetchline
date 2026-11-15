@@ -2534,3 +2534,50 @@ itself, runner-only). Packaging only — no engine change, no licence work.
   (gdk-3.0) — CI is the proof: the next run must show the host
   staged in the build log, both installers produced, and the
   capture job green against the installed host + keys.
+
+## Progress window — separate OS window per download, auto-open + Settings toggle (S03) — 2026-11-15
+
+- The in-app progress overlay is gone: each download that starts now opens its own
+  separate OS window (Tauri `WebviewWindow`, titled "<percent>% <filename>"), one
+  window per download. Closing it never cancels the download; double-clicking (or
+  Enter on) a table row reopens or focuses its window. Options > General gains
+  "Show the download progress window when a download starts" (default on); off
+  leaves the table as the only progress view, double-click still opens the window.
+- Window content (IDM's dialog, Fetchline's own look — violet tokens, Inter,
+  Lucide, no IDM green bar / layout / wording): filename, source URL, file size,
+  downloaded amount, transfer rate, time left, resume capability (Yes/No/Unknown),
+  progress bar, per-part bars, 60 s speed graph, Pause/Resume, Cancel, "Hide
+  details" (collapses to a compact view and shrinks the window), Open / Open
+  folder / Scan again / Quarantine / Delete on completion with the S14 scan
+  states, retry countdown from the engine's backoff.
+- Resume capability is now stored, not guessed: the probe's `accept_ranges` is
+  persisted on the download row (`accept_ranges INTEGER`, NULL = unknown for rows
+  added before this was stored; `create_download` takes it; all three row
+  SELECTs carry it; `row_to_download` maps it; migration + schema.sql).
+- Why the window is built the way it is (BUG-044): this app ships NO Tauri
+  capability files, so every frontend `plugin:` command is denied by the ACL
+  while app commands run ungated (proven from vendored tauri 2.12.5
+  `webview/mod.rs` + the installed `@tauri-apps/api` 2.12.4, which routes
+  `listen` to `plugin:event|listen` and `WebviewWindow` creation to
+  `plugin:webview|create_webview_window`). So the window is created, focused
+  and resized from Rust (`open_progress_window` / `set_progress_window_compact`
+  commands), its title is updated from Rust in the progress-event forwarder,
+  and its live feed is polling: `list_downloads` + a new `get_progress_snapshot`
+  command (the engine keeps the latest `ProgressEvent` per download in
+  `DownloadManager::last_progress`, stashed in `emit()`). The old overlay's
+  "live" events never arrived in production — the 1 s table poll was always
+  the real live path — so the main window's dead `onProgress` listener is
+  removed (the `onProgress` bridge helper goes with it); the window's 500 ms
+  poll is also what feeds its speed graph, so the graph actually builds here.
+- Verified on Linux: full engine suite **416/416 pass, 0 failed** (413
+  before + 3 new: settings round-trip for `show_progress_window`,
+  `accept_ranges` persistence, `last_progress` snapshot matches the
+  completion event — all three pass by name in the log), `cargo check
+  --tests` 0 warnings, `npm run build` passes. The Tauri shell itself
+  cannot be compiled or run on this Linux VM (gdk-3.0) — the new
+  `WebviewWindowBuilder` / `set_title` / `set_size` calls were verified
+  against vendored tauri 2.12.5 source instead, and the window cannot be
+  GUI-tested on the VPS either (session 0, no desktop). CI is the proof:
+  the smoke test must still show the app launching, and the window needs
+  a human pass on real Windows (auto-open on start, title updates, Hide
+  details resize, close-does-not-cancel).

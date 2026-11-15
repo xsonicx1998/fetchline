@@ -333,3 +333,35 @@ async fn open_folder_validation() {
     assert!(mgr.folder_for_download("no-such-download").is_err());
     assert!(mgr.open_folder("no-such-download").is_err());
 }
+
+/// S03 progress window: the latest progress event is kept per
+/// download, so the window can poll it — the frontend listener
+/// never fires in the built app (BUG-044). After a download
+/// completes, the snapshot is the completion event: same id,
+/// downloaded == size, status complete.
+#[tokio::test]
+async fn last_progress_snapshot_matches_completion_event() {
+    let server = MockServer::start(MockConfig::default());
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let mgr = DownloadManager::new(Arc::clone(&store), 4);
+    let (id, _) = mgr
+        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .await
+        .unwrap();
+    // Nothing stashed before the download runs.
+    assert!(mgr.last_progress(&id).is_none());
+    mgr.start_download(&id).await.unwrap();
+    assert!(wait_for_status(&mgr, &id, "complete", 30).await);
+    let snap = mgr
+        .last_progress(&id)
+        .expect("a completion event was stashed");
+    assert_eq!(snap.id, id);
+    assert_eq!(snap.status, "complete");
+    assert_eq!(snap.downloaded_bytes, snap.size_bytes.unwrap());
+    let row = mgr.get_download(&id).unwrap().unwrap();
+    assert_eq!(
+        std::fs::read(&row.save_path).unwrap(),
+        payload(512 * 1024)
+    );
+}

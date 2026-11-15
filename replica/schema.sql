@@ -73,6 +73,10 @@ CREATE TABLE IF NOT EXISTS downloads (
   -- automatically when the quota window rolls over or is reset —
   -- a download the user paused by hand is never auto-resumed.
   quota_paused INTEGER NOT NULL DEFAULT 0,
+  -- Whether the probe found the server range-capable (S03 progress
+  -- window, 2026-11-15): 1 = resumable, 0 = no ranges, NULL =
+  -- unknown (a download added before this was stored).
+  accept_ranges INTEGER,
   -- Antivirus scan result (S14, 2026-11-15): the outcome of the
   -- scanner hook run on completion — clean | infected |
   -- scan_failed | not_configured | timed_out | scanning — with
@@ -184,6 +188,10 @@ CREATE TABLE IF NOT EXISTS settings (
   browser_start_drained INTEGER NOT NULL DEFAULT 1, -- Milestone 2 (S13 finish):
     -- 1 = a drained browser link starts downloading at once;
     -- 0 = it stays queued, the old behaviour
+  -- Progress window (S03, 2026-11-15): 1 = open a separate
+  -- progress window when a download starts (default); 0 = the
+  -- table is the only progress view (double-click still opens it).
+  show_progress_window INTEGER NOT NULL DEFAULT 1,
   antivirus_command TEXT,             -- NULL = no scanner configured
   -- Antivirus hook (S14, 2026-11-15): the on/off switch for the
   -- scan (default on — the command being empty still means no

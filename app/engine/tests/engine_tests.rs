@@ -816,7 +816,7 @@ async fn create_category_validation_errors() {
 async fn move_to_category_unknown_ids_error() {
     let store = Store::open_in_memory().unwrap();
     let id = store
-        .create_download("http://127.0.0.1/x.bin", None, "x.bin", "/tmp/x.bin", "cat-video", None, None, None)
+        .create_download("http://127.0.0.1/x.bin", None, "x.bin", "/tmp/x.bin", "cat-video", None, None, None, None)
         .unwrap();
     assert!(store.move_to_category("no-such-download", "cat-video").is_err());
     let err = store.move_to_category(&id, "no-such-category").unwrap_err();
@@ -2819,4 +2819,74 @@ async fn scheduler_tick_drains_queue_with_settings_applied() {
     assert!(wait_for_queue_drained(&mgr, &queue.id, 30).await);
     let files = mgr.list_queue_files(&queue.id).unwrap();
     assert!(files.is_empty(), "queue did not drain under the new settings");
+}
+
+/// S03 progress window: the probe's range capability is stored on
+/// the download row, so the window can show resume capability
+/// honestly — Yes / No / Unknown (`None`, for rows added before
+/// this was stored).
+#[test]
+fn accept_ranges_persisted_on_download_row() {
+    let store = Store::open_in_memory().unwrap();
+    let yes = store
+        .create_download(
+            "http://127.0.0.1/a.bin",
+            None,
+            "a.bin",
+            "/tmp/a.bin",
+            "cat-video",
+            Some(100),
+            None,
+            None,
+            Some(true),
+        )
+        .unwrap();
+    let no = store
+        .create_download(
+            "http://127.0.0.1/b.bin",
+            None,
+            "b.bin",
+            "/tmp/b.bin",
+            "cat-video",
+            Some(100),
+            None,
+            None,
+            Some(false),
+        )
+        .unwrap();
+    let unknown = store
+        .create_download(
+            "http://127.0.0.1/c.bin",
+            None,
+            "c.bin",
+            "/tmp/c.bin",
+            "cat-video",
+            Some(100),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        store.get_download(&yes).unwrap().unwrap().accept_ranges,
+        Some(true)
+    );
+    assert_eq!(
+        store.get_download(&no).unwrap().unwrap().accept_ranges,
+        Some(false)
+    );
+    assert_eq!(
+        store
+            .get_download(&unknown)
+            .unwrap()
+            .unwrap()
+            .accept_ranges,
+        None
+    );
+    // The list query carries it too (same row mapper).
+    let listed = store.list_downloads().unwrap();
+    assert_eq!(
+        listed.iter().find(|d| d.id == yes).unwrap().accept_ranges,
+        Some(true)
+    );
 }

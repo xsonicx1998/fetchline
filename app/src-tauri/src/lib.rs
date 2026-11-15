@@ -18,7 +18,7 @@ use fetchline_engine::{
     QueueRow, QuotaStatus, ScanResult, Settings, SiteLoginInput, SiteLoginRow, SoundSetting,
     SoundSettingInput, Store, SyncResult, UpdateCheckResult,
 };
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, Size, State, WebviewUrl, WebviewWindowBuilder};
 
 /// Shared state: one manager for the whole app lifetime.
 pub struct AppState {
@@ -166,6 +166,108 @@ async fn retry_now(state: State<'_, AppState>, id: String) -> Result<(), String>
 #[tauri::command]
 async fn open_folder(state: State<'_, AppState>, id: String) -> Result<(), String> {
     state.manager.open_folder(&id).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Download progress window (S03, 2026-11-15). One separate OS window
+// per download, titled "<percent>% <filename>" — the IDM-style
+// dialog, with Fetchline's own look. The window is created here, in
+// Rust, not from the frontend: this app ships no Tauri capability
+// files, so the frontend `plugin:webview|create_webview_window`
+// command is denied by the ACL (BUG-044) while app commands like
+// these run ungated (local origin, no app ACL manifest — see
+// `tauri::webview::on_message` in vendored tauri 2.12.5). The
+// window's own title is likewise updated from Rust, in the
+// progress-event forwarder below — the frontend `set_title`
+// command is denied for the same reason. Closing the window never
+// cancels the download: the engine keeps running and the window
+// is only a view of it; double-clicking the row reopens it.
+// ---------------------------------------------------------------------------
+
+/// Window label for one download's progress window.
+fn progress_window_label(download_id: &str) -> String {
+    format!("progress-{download_id}")
+}
+
+/// Title of a progress window: "<percent>% <filename>" while the
+/// size is known, the filename alone when it is not.
+fn progress_window_title(downloaded_bytes: u64, size_bytes: Option<u64>, filename: &str) -> String {
+    match size_bytes {
+        Some(size) if size > 0 => {
+            let percent = downloaded_bytes.saturating_mul(100).saturating_div(size).min(100);
+            format!("{percent}% {filename}")
+        }
+        _ => filename.to_string(),
+    }
+}
+
+/// Open (or focus, when it already exists) the separate progress
+/// window for a download. The window loads the same frontend
+/// bundle with `#progress=<id>` in the URL, so `main.tsx` renders
+/// the progress view instead of the main window. Errors when the
+/// download does not exist.
+#[tauri::command]
+fn open_progress_window(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    download_id: String,
+) -> Result<(), String> {
+    let row = state
+        .manager
+        .get_download(&download_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Download not found: {download_id}"))?;
+    let label = progress_window_label(&download_id);
+    if let Some(window) = app.get_webview_window(&label) {
+        // Already open — bring it forward instead of a second copy.
+        window.set_focus().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    let url = WebviewUrl::App(format!("index.html#progress={download_id}").into());
+    WebviewWindowBuilder::new(&app, &label, url)
+        .title(progress_window_title(
+            row.downloaded_bytes as u64,
+            row.size_bytes.map(|s| s as u64),
+            &row.filename,
+        ))
+        .inner_size(600.0, 680.0)
+        .min_inner_size(520.0, 320.0)
+        .resizable(true)
+        .center()
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Resize a progress window between its full view (speed graph,
+/// parts, scan details) and its compact view (file, bar, speed,
+/// buttons). Called by the window's own "Hide details" toggle.
+#[tauri::command]
+fn set_progress_window_compact(
+    app: AppHandle,
+    download_id: String,
+    compact: bool,
+) -> Result<(), String> {
+    let label = progress_window_label(&download_id);
+    let window = app
+        .get_webview_window(&label)
+        .ok_or_else(|| format!("No progress window open for download {download_id}"))?;
+    let (width, height) = if compact { (600.0, 300.0) } else { (600.0, 680.0) };
+    window
+        .set_size(Size::Logical(LogicalSize::new(width, height)))
+        .map_err(|e| e.to_string())
+}
+
+/// The latest progress event for a download (see
+/// `DownloadManager::last_progress`). The progress window polls
+/// this — the frontend `download-progress` listener never fires
+/// in the built app (BUG-044).
+#[tauri::command]
+fn get_progress_snapshot(
+    state: State<'_, AppState>,
+    download_id: String,
+) -> Result<Option<fetchline_engine::ProgressEvent>, String> {
+    Ok(state.manager.last_progress(&download_id))
 }
 
 /// Antivirus hook (S14): run the configured scanner against a
@@ -792,6 +894,20 @@ pub fn run() {
             let mut rx = manager.subscribe();
             tauri::async_runtime::spawn(async move {
                 while let Ok(event) = rx.recv().await {
+                    // S03 progress window: keep an open window's
+                    // title live ("<percent>% <filename>") from
+                    // Rust — the frontend cannot set its own title
+                    // (BUG-044: `plugin:window|set_title` is
+                    // denied). A closed window simply has no label
+                    // to update; the download itself is untouched.
+                    let label = progress_window_label(&event.id);
+                    if let Some(window) = handle.get_webview_window(&label) {
+                        let _ = window.set_title(&progress_window_title(
+                            event.downloaded_bytes,
+                            event.size_bytes,
+                            &event.filename,
+                        ));
+                    }
                     let _ = handle.emit("download-progress", event);
                 }
             });
@@ -852,6 +968,9 @@ pub fn run() {
             cancel_download,
             retry_now,
             open_folder,
+            open_progress_window,
+            set_progress_window_compact,
+            get_progress_snapshot,
             run_antivirus_scan,
             get_scan_result,
             test_antivirus_scanner,

@@ -1689,7 +1689,7 @@ tests drive a 1-hour window with `now + 3601`, never by waiting.
 | S12-C5 | happy: two at once | Global 64 KiB/s; A capped 16 KiB/s, B uncapped; both 256 KiB | B finishes first while A is still downloading; both byte-exact | cargo test `per_download_cap_throttles_one_download_while_another_runs_at_the_global_cap` | PASS |
 | S12-C6 | happy: live clear | 256 KiB at 16 KiB/s, clear the cap after 2 s | Finishes in < 12 s (vs ~15 s if the cap stayed) | cargo test `per_download_cap_can_be_cleared_live_mid_download` | PASS |
 | S12-C7 | negative: validation | Cap -5, 10,000,001 KB/s, unknown download id | Rejected (same 10,000,000 bound as the global cap, BUG-008); 10,000,000 accepted | cargo test `per_download_cap_validation_rejects_absurd_and_negative_values` | PASS |
-| S12-C8 | manual: add dialog + progress | S02 cap field, S03 dialog | Cap stored before start; dialog shows "capped at X KB/s" and the quota-paused note when applicable | blocked — no desktop binary (code reviewed: `AddDownloadDialog.tsx`, `ProgressDialog.tsx`) | BLOCKED |
+| S12-C8 | manual: add dialog + progress | S02 cap field, S03 dialog | Cap stored before start; dialog shows "capped at X KB/s" and the quota-paused note when applicable | blocked — no desktop binary (code reviewed: `AddDownloadDialog.tsx`, `ProgressWindow.tsx`) | BLOCKED |
 
 ### S12 — Sync counts toward the quota
 
@@ -1759,7 +1759,7 @@ running desktop app is marked **blocked**.
 | S14-R1 | regression: queue reads | Add a download to the main queue, list its files | Files read back with `scan_status: None` (was: `Db(InvalidColumnIndex(20))` — every queue read failed) | cargo test `queue_files_read_back_with_scan_columns` | FAIL→FIXED (BUG-026) |
 | S14-U1 | unit: command split | Quoted Windows path with spaces, `{file}` in quotes, unterminated quote, empty template | Tokenised correctly; unterminated quote / empty template are errors | unit tests in `antivirus.rs` (`split_command_handles_quotes_and_spaces`, `scan_timeout_bounds_are_rejected_not_clamped`, `output_threat_markers`) | PASS |
 | S14-M1 | manual: Settings | Options > Downloads virus-check section (enable, command, timeout, Test) | Values persist, Test reports the scanner's verdict, note says Fetchline includes no scanner | blocked — no desktop binary (code reviewed: `SettingsDialog.tsx`) | BLOCKED |
-| S14-M2 | manual: dialog | S14 completion dialog (file path, Open / Open folder, scan result, Scan again, Quarantine / Delete on a threat) | Open disabled on a threat, Quarantine/Delete only on a threat, scan states shown in words | blocked — no desktop binary (code reviewed: `ProgressDialog.tsx`) | BLOCKED |
+| S14-M2 | manual: dialog | S14 completion dialog (file path, Open / Open folder, scan result, Scan again, Quarantine / Delete on a threat) | Open disabled on a threat, Quarantine/Delete only on a threat, scan states shown in words | blocked — no desktop binary (code reviewed: `ProgressWindow.tsx`) | BLOCKED |
 | S14-T1 | to check: real scanner | Windows Defender (MpCmdRun) against a real finished download on Windows | Real exit codes, output text and timing; a genuine clean/threat verdict end to end | — | TO CHECK (Windows) |
 
 ### Regression (all earlier areas, re-run in full)
