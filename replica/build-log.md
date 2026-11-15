@@ -2637,3 +2637,51 @@ itself, runner-only). Packaging only — no engine change, no licence work.
   user's PC is needed for the final look. Engine error strings and
   the HTTP User-Agent still say "Fetchline" (out of this round's
   scope — needs a follow-up decision).
+
+## Round 41 — workflow path fix (Sonic Manager folder) + theme finish: icons from the user's logo + background backdrop — 2026-11-16
+
+- Workflow path fix (browser route, commit a45e225 on top of
+  b809284, 4+/4-): the rename moved the install folder, so the two
+  test jobs' hardcoded `C:\Program Files\Fetchline\fetchline.exe`
+  (smoke-test line 179, capture-test line 297) and the capture
+  command's `--host-exe` / `--app-exe` (line 336, plus the line 333
+  comment) now read `C:\Program Files\Sonic Manager\...`. The
+  `--db-path` (`com.fetchline.app`), the Chrome path, and the pinned
+  raw URL are untouched. A parent diff of the repo file against
+  local found exactly one difference — line 315, a comment whose
+  leading spaces differ (cosmetic; YAML ignores comment indent).
+  Run #10 at this head: build-windows SUCCESS, smoke-test SUCCESS
+  (the path fix is proven — the app launched), extension-capture-test
+  FAILED at "Run browser capture test" (see BUG-045 in bugs.md).
+- Images in the repo (browser route, connector cannot push
+  binaries): `app/src-tauri/icons/logo.jpg` (commit fce8f0d, 116 KB)
+  and `app/src/assets/background.jpg` (commit d516643, 140 KB),
+  both verified HTTP 200 and rendering. Repo head before this
+  push: d516643.
+- Theme finish (this push): `scripts/generate-icons.py` reads
+  `app/src-tauri/icons/logo.jpg` (fails loudly if it is missing)
+  and writes the 1024 app icon from the full logo plus extension
+  icons 16/32/48/128 — 16/32 use the head crop of the mark's curl,
+  48/128 the full logo. `app/src/background.css` puts the
+  background JPG under a dark scrim as the body backdrop, dark
+  theme only; `app/src/main.tsx` imports it right after
+  `./index.css`. The app root divs (App.tsx, ProgressWindow.tsx)
+  carry no `bg-bg` class, so the body backdrop shows through.
+  BUG-045 (capture test's expected popup string, stale after the
+  rebrand) is fixed in the same push — test-only, see bugs.md.
+- Verified on Linux: full engine suite **416/416 pass, 0 failed**;
+  `cargo check --tests` 0 warnings (engine and host); `npm run
+  build` passes and emits the background asset
+  (`dist/assets/background-*.jpg`, 143.45 kB); icons generated
+  locally at every size (icon.png 1024x1024; icon16/32/48/128);
+  `py_compile` OK on the edited capture-test.py. The generated
+  PNGs are git-ignored binaries and are not pushed — CI regenerates
+  them from logo.jpg.
+- Honest limits: the finished look has never been seen on real
+  Windows (no Tauri shell build on this VM, no desktop on the VPS);
+  the CI smoke-test screenshot from this run's artifact is the
+  launch proof and a human pass on the user's PC is needed for the
+  final look. Run #8's single flaky FTP pause/resume test
+  ("file finished before the pause") did not reproduce in run #9
+  and is not a real defect; if it recurs it needs a test-only
+  timing fix (wait-for-active before pausing).

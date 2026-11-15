@@ -1,0 +1,19 @@
+/* Sonic Manager backdrop — the user's background art, under a dark
+   scrim so labels stay readable (the art is busy: lightning and
+   rings must never fight the text). Dark theme only: the art is a
+   dark-navy image, so the light theme keeps its flat background.
+   Imported after index.css in main.tsx, so it wins over the plain
+   body background there. The image file
+   (app/src/assets/background.jpg) is binary: it reaches the repo
+   through the GitHub web UI.
+   NOTE: this only shows because the app root divs (App.tsx,
+   ProgressWindow.tsx) carry no bg-bg class — the body backdrop
+   shows through them. Do not re-add bg-bg there. */
+[data-theme="dark"] body {
+  background-image:
+    linear-gradient(rgba(10, 15, 36, 0.84), rgba(10, 15, 36, 0.88)),
+    url('./assets/background.jpg');
+  background-size: cover;
+  background-position: center;
+  background-attachment: fixed;
+}

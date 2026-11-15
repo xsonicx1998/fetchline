@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client'
 import App from './App'
 import { ProgressWindow } from './components/ProgressWindow'
 import './index.css'
+import './background.css'
 
 /** A progress window loads the same bundle with
  *  `#progress=<download id>` in the URL (set by the

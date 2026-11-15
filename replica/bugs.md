@@ -3952,6 +3952,34 @@ seen on real Windows — a human pass on the user's PC is needed
 for the final look, and the smoke-test screenshot from this
 run's artifact is the launch proof.
 
+## Round 41 — BUG-045 (rebrand fallout, test-only: the capture test still expected the old popup string) + theme finish (icons + background) — 2026-11-16
+
+BUG-045 — test-only, found while watching run #10. Round 40 renamed
+the extension popup's connected status to "Connected to the Sonic
+Manager desktop app" (popup.js:94), but `scripts/capture-test.py`
+still expected the old string: the Phase 2 poll at line 734 and the
+strict check at line 742 both match on "Connected to the Fetchline
+desktop app", and the module docstring (line 26) described the old
+text. So even with a working popup and a reachable host, Phase 2
+could never pass — the poll would exhaust its retries and fail with
+"popup did not report a connection". Consistent with run #10
+(a45e225): build-windows SUCCESS, smoke-test SUCCESS, but
+extension-capture-test FAILED at "Run browser capture test". The
+exact FAIL line from run #10's log was not read in this session
+(no live-browser access here); the mismatch is proven from the
+code alone and is a guaranteed Phase 2 failure either way.
+
+Fix (test-only, this round): the three occurrences in
+capture-test.py now expect "Connected to the Sonic Manager desktop
+app" (docstring + both checks). No product code touched, no
+assertion weakened — the check is the same strict match, against
+the string the popup actually shows. `py_compile` OK; a repo-wide
+grep confirms no "Connected to the Fetchline" string is left
+anywhere the test or the popup reads.
+
+Status: fixed as described. The fix rides in the same push as the
+theme finish below, so the run it triggers is the proof.
+
 ## Known limitations, not bugs (round-24 additions)
 
 - The Tauri shell never compiles or runs on this VM, so a

@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Regenerate Fetchline's icon files from the project's own artwork.
+"""Regenerate Sonic Manager's icon files from the project's own artwork.
 
-The icon is drawn fresh for this project (no third-party artwork): a violet
-rounded square (design token light accent #6d28d9) with a white download
-arrow above a tray line — the same design as app/extension/icons/icon.svg.
+Source: ``app/src-tauri/icons/logo.jpg`` — the user's logo (neon
+red/blue speed mark on dark navy). The file is binary, so it is not
+stored in the repository the usual way: it was supplied by the user
+and uploaded to the repo through the GitHub web UI. If it is missing,
+this script fails loudly instead of silently falling back to the old
+artwork.
 
 Why this script exists: the PNG/ICO icon files are binary, so they are not
 stored in the repository. Run this once after cloning (or let CI run it)
@@ -18,52 +21,57 @@ Outputs:
 Run `npx @tauri-apps/cli icon app/src-tauri/icons/icon.png` afterwards
 (or let the CI workflow do it) to produce the Tauri set
 (32x32.png, 128x128.png, 128x128@2x.png, icon.ico) in app/src-tauri/icons.
+
+The mark is a wide horizontal streak: scaled whole to 16 px it turns
+to mud (verified), so the small extension icons (16/32) use a crop of
+the mark's head — the red/blue curl on the right of the logo — while
+48/128 and the 1024 app icon use the full logo.
 """
 
 import sys
 from pathlib import Path
 
 try:
-    from PIL import Image, ImageDraw
+    from PIL import Image
 except ImportError:
     print("Pillow is required: pip install pillow", file=sys.stderr)
     sys.exit(1)
 
 ROOT = Path(__file__).resolve().parent.parent
-VIOLET = (109, 40, 217, 255)  # #6d28d9
-WHITE = (255, 255, 255, 255)
+LOGO = ROOT / "app" / "src-tauri" / "icons" / "logo.jpg"
 
-
-def draw_icon(size: int) -> Image.Image:
-    """Draw the Fetchline icon at the given square size."""
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    s = size / 128.0  # the SVG design is on a 128x128 grid
-    # Violet rounded square.
-    d.rounded_rectangle(
-        [2 * s, 2 * s, 126 * s, 126 * s], radius=24 * s, fill=VIOLET
-    )
-    # Download arrow: stem + head.
-    d.rectangle([58 * s, 24 * s, 70 * s, 72 * s], fill=WHITE)
-    d.polygon([(36 * s, 62 * s), (92 * s, 62 * s), (64 * s, 92 * s)], fill=WHITE)
-    # Tray line.
-    d.rectangle([26 * s, 100 * s, 102 * s, 109 * s], fill=WHITE)
-    return img
+# Square crop of the mark's head (the red/blue curl, right side of
+# the 2048x2048 logo) — the part that stays legible at 16 px.
+HEAD_CROP = (1150, 763, 1668, 1281)
 
 
 def main() -> None:
+    if not LOGO.is_file():
+        print(
+            f"logo source missing: {LOGO} — upload the user's logo.jpg "
+            "to the repo (GitHub web UI) and re-run",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     tauri_dir = ROOT / "app" / "src-tauri" / "icons"
     ext_dir = ROOT / "app" / "extension" / "icons"
     tauri_dir.mkdir(parents=True, exist_ok=True)
     ext_dir.mkdir(parents=True, exist_ok=True)
 
-    source = draw_icon(1024)
+    logo = Image.open(LOGO).convert("RGB")
+    if logo.size != (2048, 2048):
+        print(f"warning: logo is {logo.size}, expected 2048x2048", file=sys.stderr)
+
+    source = logo.resize((1024, 1024), Image.LANCZOS)
     source.save(tauri_dir / "icon.png")
     print(f"wrote {tauri_dir / 'icon.png'}")
 
+    head = logo.crop(HEAD_CROP)
     for px in (16, 32, 48, 128):
         out = ext_dir / f"icon{px}.png"
-        draw_icon(px).save(out)
+        base = head if px <= 32 else logo
+        base.resize((px, px), Image.LANCZOS).save(out)
         print(f"wrote {out}")
 
 

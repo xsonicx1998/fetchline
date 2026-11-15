@@ -23,7 +23,7 @@ so the extension was never registered: no worker in /json/list,
 nothing in Preferences), then open popup.html in the SAME launch
 (``Target.createTarget`` + ``attachToTarget``, flatten) and poll
 its status text over that pipe session until it reports
-"Connected to the Fetchline desktop app". There is no second
+"Connected to the Sonic Manager desktop app". There is no second
 launch and no /json/list discovery: a loadUnpacked install does
 NOT survive a fresh Chrome launch (VPS experiments A–D, Round
 38 — the registration is flushed only on a clean shutdown, and
@@ -731,7 +731,7 @@ def phase_browser(chrome_exe, extension_dir, host_exe):
                 )
                 value = result.get("result", {}).get("value", "")
                 status_text = value if isinstance(value, str) else ""
-                if "Connected to the Fetchline desktop app" in status_text:
+                if "Connected to the Sonic Manager desktop app" in status_text:
                     break
                 time.sleep(0.5)
         except (TimeoutError, RuntimeError, OSError) as e:
@@ -739,7 +739,7 @@ def phase_browser(chrome_exe, extension_dir, host_exe):
                 log("    chrome stderr: " + line)
             fail("browser", f"popup check failed: {e}")
         log(f"  popup status text: {status_text!r}")
-        if "Connected to the Fetchline desktop app" not in status_text:
+        if "Connected to the Sonic Manager desktop app" not in status_text:
             for line in chrome_stderr_tail(stderr_path, 30):
                 log("    chrome stderr: " + line)
             fail("browser", f"popup did not report a connection (status text: {status_text!r}) — Chrome could not reach the host")
