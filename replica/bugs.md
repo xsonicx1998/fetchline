@@ -3243,6 +3243,72 @@ Verified: `cargo check --tests` 0 warnings; update_tests
 5x 9/9; full engine suite 413/413 on Linux. VPS
 verification … to follow.
 
+## Round 34 — BUG-042: capture test Phase 2 takes Chrome's built-in Hangouts component extension for ours — 2026-11-15
+
+Symptom (new repo xsonicx1998/fetchline, CI run #1
+43739218909, head e591f95): build-windows SUCCESS,
+smoke-test SUCCESS, extension-capture-test FAILED at step 6
+"Run browser capture test" after 6 s, exit 1. Log line 20
+verbatim: `FAIL: browser: discovered extension id
+nkeimhogjdpnpccoofpliimaahmaaome is not the stable id
+mioamdgogndabpcjbdekggcnlkkfpmbj derived from manifest.json's
+key — the extension was not loaded with its shipped key`.
+Phase 1 (host protocol) PASSED on the runner.
+
+Root cause — test harness only, proven, not guessed:
+`nkeimhogjdpnpccoofpliimaahmaaome` is Chrome's built-in
+hidden "Google Hangouts" component extension
+(`hangout_services`), shipped with every Chrome install —
+confirmed by web search (Simon Willison's 2024 post on the
+hidden extension; `chrome://system` extension listings show
+the same id as "Google Hangouts"). `/json/list` returns
+EVERY target, including component-extension service workers,
+and the old `extension_id_from_targets` returned the FIRST
+`chrome-extension://` URL in the list — which was Hangouts'
+worker, not ours. The extension itself was never the problem:
+the key-derived id is correct (`chrome_id_from_key` on the
+repo manifest's key returns `mioamdgogndabpcjbdekggcnlkkfpmbj`,
+verified locally), and on the user's real PC the extension
+shows the stable id. The Preferences fallback (which matches
+by extension-dir path) would have returned the right id, but
+it never ran — the CDP discovery returned a (wrong) id first.
+
+Fix (`scripts/capture-test.py`, test-only; no product code,
+no assertion weakened):
+- New `find_expected_target_id(port, expected_id)`: polls
+  `/json/list` until a target carrying the EXPECTED id
+  appears — the only sound way to identify our extension
+  among the targets is to look for the expected id itself.
+  It also collects every chrome-extension id seen, so the
+  log now shows what was present (Hangouts is logged as
+  ignored, not mistaken for ours).
+- The Preferences fallback stays, with a short poll (it is
+  written when Chrome registers the extension), and the
+  strict comparison `discovered != expected -> FAIL` is
+  unchanged: if Chrome ever really loaded our extension
+  with a path-derived id, the Preferences entry would hold
+  that id and the check would still fail — proven by a
+  synthetic case (see below).
+- The old first-match `extension_id_from_targets` is deleted.
+
+Verified locally: `py_compile` OK; the discovery logic was
+checked against 5 synthetic cases (Hangouts-first target
+list -> correct id; our worker absent -> None with the seen
+list; Preferences path-match -> correct id; a path-derived
+id in Preferences still surfaces for the strict check; key
+derivation -> stable id) — all pass. Phase 1 dry-run green
+locally against the release host (ping/get_settings/
+download_link + pending_links row). Phases 2–3 need the CI
+run; the fixed test now actually exercises the real
+Chrome -> host handshake on the runner for the first time.
+
+Note: this does NOT explain the user's PC failure (his
+extension shows the stable id; the spawn failure there is a
+separate, still-open question). If the runner reproduces the
+same "could not reach the host" failure at the popup step,
+that gives a place to iterate on the real handshake with
+logs, instead of guessing on his PC.
+
 ## Known limitations, not bugs (round-24 additions)
 
 - The Tauri shell never compiles or runs on this VM, so a

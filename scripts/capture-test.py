@@ -31,7 +31,11 @@ installed host — Phase 1 alone only proves the host binary, not
 Chrome's side of it. The extension id is stable because
 manifest.json carries a public `key` (Chrome derives the id
 from it); the test derives the expected id from that key and
-requires the discovered id to match it.
+requires the discovered id to match it. Discovery looks for a
+CDP target carrying the EXPECTED id (BUG-042: /json/list also
+lists Chrome's built-in Hangouts component extension, whose id
+used to be mistaken for ours) and falls back to the Preferences
+entry for the extension dir, which Chrome writes on registration.
 
 Phase 3 — drain to file: launch the installed desktop app,
 wait for it to drain the queue (startup + 30 s tick) and download
@@ -212,13 +216,35 @@ def chrome_targets(port, timeout=30):
     raise TimeoutError(f"Chrome DevTools endpoint did not answer in {timeout}s: {last_err}")
 
 
-def extension_id_from_targets(targets):
-    for t in targets:
-        url = t.get("url", "")
-        m = re.match(r"chrome-extension://([a-z]{32})/", url)
-        if m:
-            return m.group(1)
-    return None
+def find_expected_target_id(port, expected_id, timeout=20):
+    """Poll /json/list until a target belonging to the extension
+    with ``expected_id`` appears, or the deadline passes.
+
+    BUG-042: /json/list returns EVERY target, including Chrome's
+    built-in component extensions — the hidden Google Hangouts
+    extension (id nkeimhogjdpnpccoofpliimaahmaaome) is always
+    present, and its service-worker target used to come first, so
+    taking the first chrome-extension:// URL returned Hangouts'
+    id, not ours. The only sound way to identify OUR extension
+    among the targets is to look for the expected id itself: if
+    Chrome loaded our extension with its shipped key, a target
+    with that id exists. Returns (id_or_None, sorted_seen_ids)."""
+    deadline = time.time() + timeout
+    seen = set()
+    while time.time() < deadline:
+        try:
+            targets = chrome_targets(port, timeout=5)
+        except TimeoutError:
+            time.sleep(1)
+            continue
+        for t in targets:
+            m = re.match(r"chrome-extension://([a-z]{32})/", t.get("url", ""))
+            if m:
+                seen.add(m.group(1))
+        if expected_id in seen:
+            return expected_id, sorted(seen)
+        time.sleep(1)
+    return None, sorted(seen)
 
 
 def extension_id_from_preferences(profile_dir, extension_dir):
@@ -374,22 +400,33 @@ def phase_browser(chrome_exe, extension_dir, host_exe):
     )
     try:
         try:
-            targets = chrome_targets(9222, timeout=30)
+            chrome_targets(9222, timeout=30)
         except TimeoutError as e:
             fail("browser", str(e))
-        ext_id = extension_id_from_targets(targets)
+        # The extension's service worker starts lazily, so poll for
+        # a target carrying the expected id. Any other
+        # chrome-extension:// id in the list belongs to a different
+        # extension (Chrome's built-in Hangouts component extension
+        # is always there — BUG-042) and must never be mistaken for
+        # ours.
+        ext_id, seen_ids = find_expected_target_id(9222, expected_id, timeout=20)
+        if ext_id:
+            others = [i for i in seen_ids if i != expected_id]
+            log(f"  extension target found in CDP (id {ext_id})"
+                + (f"; other chrome-extension ids present (ignored): {others}" if others else ""))
+        else:
+            log(f"  expected id {expected_id} not among CDP targets "
+                f"(seen: {seen_ids or 'none'}); falling back to Preferences")
+            # Preferences is written when Chrome registers the
+            # extension; poll briefly in case it is not flushed yet.
+            pref_deadline = time.time() + 10
+            while time.time() < pref_deadline:
+                ext_id = extension_id_from_preferences(profile_dir, extension_dir)
+                if ext_id:
+                    break
+                time.sleep(1)
         if not ext_id:
-            # The service worker may be idle; fall back to Preferences.
-            time.sleep(3)
-            try:
-                targets = chrome_targets(9222, timeout=10)
-                ext_id = extension_id_from_targets(targets)
-            except TimeoutError:
-                pass
-        if not ext_id:
-            ext_id = extension_id_from_preferences(profile_dir, extension_dir)
-        if not ext_id:
-            fail("browser", "could not discover the extension ID (no chrome-extension:// target and no Preferences entry)")
+            fail("browser", "could not discover the extension ID (no chrome-extension:// target with the expected id and no Preferences entry)")
         log(f"  extension ID: {ext_id}")
         if ext_id != expected_id:
             fail(
