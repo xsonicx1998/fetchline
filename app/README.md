@@ -1,15 +1,13 @@
-# Fetchline — desktop download manager (vertical slice)
+# Sonic Manager — desktop download manager (vertical slice)
 
 [![Windows build](https://github.com/mohandksonic-ui/fetchline/actions/workflows/build-windows.yml/badge.svg)](https://github.com/mohandksonic-ui/fetchline/actions/workflows/build-windows.yml)
 
 > Windows installer: every push to `main` builds one automatically — see the
-> [root README](../README.md#download-windows-no-setup-needed). The name
-> "Fetchline" is provisional and will change before release.
+> [root README](../README.md#download-windows-no-setup-needed).
 
 Clean-room rebuild of download-manager behaviour, from
 `../replica/recon.md` / `../replica/architecture.md` / `../replica/design/`.
-Working name **Fetchline** (provisional — replica-brand will give the final
-name). No code, assets, copy or branding from the original application is
+**Sonic Manager**. No code, assets, copy or branding from the original application is
 used anywhere in this project.
 
 ## What this slice does (vertical slice only)

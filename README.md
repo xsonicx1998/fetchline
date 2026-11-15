@@ -1,11 +1,8 @@
-# Fetchline
+# Sonic Manager
 
 [![Windows build](https://github.com/mohandksonic-ui/fetchline/actions/workflows/build-windows.yml/badge.svg)](https://github.com/mohandksonic-ui/fetchline/actions/workflows/build-windows.yml)
 
-> **The name "Fetchline" is provisional** — a temporary working name while the
-> product is being built. It will be renamed before release.
-
-Fetchline is a Windows desktop download manager — a clean-room rebuild of
+Sonic Manager is a Windows desktop download manager — a clean-room rebuild of
 download-manager behaviour, written from scratch. No code, assets, copy or
 branding from any other download manager is used anywhere in this project.
 

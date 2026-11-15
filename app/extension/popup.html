@@ -2,21 +2,21 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Fetchline</title>
+  <title>Sonic Manager</title>
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
   <header>
     <img src="icons/icon32.png" alt="" width="32" height="32">
     <div>
-      <h1>Fetchline</h1>
+      <h1>Sonic Manager</h1>
       <p id="status" class="status status-unknown">Checking connection…</p>
     </div>
   </header>
 
   <main>
     <label class="row">
-      <span>Catch downloads in Fetchline</span>
+      <span>Catch downloads in Sonic Manager</span>
       <input type="checkbox" id="catchToggle" checked>
     </label>
     <p id="desktopNote" class="note" hidden></p>
@@ -26,13 +26,13 @@
       <input type="checkbox" id="siteToggle">
     </label>
 
-    <button id="sendTab" type="button">Send this page to Fetchline</button>
+    <button id="sendTab" type="button">Send this page to Sonic Manager</button>
     <button id="findVideos" type="button">Find videos on this page</button>
     <button id="openApp" type="button" class="secondary">Check the desktop app</button>
     <p id="pendingInfo" class="note" role="status">Waiting links: unknown — check the desktop app.</p>
-    <p id="handoffInfo" class="note" role="status">Nothing sent to Fetchline yet.</p>
+    <p id="handoffInfo" class="note" role="status">Nothing sent to Sonic Manager yet.</p>
     <p id="result" class="note" role="status"></p>
-    <p class="note">Fetchline can’t be launched from the browser. If the check above says the desktop app isn’t reachable, open Fetchline from the Start menu (Windows) or Applications, then try again.</p>
+    <p class="note">Sonic Manager can’t be launched from the browser. If the check above says the desktop app isn’t reachable, open Sonic Manager from the Start menu (Windows) or Applications, then try again.</p>
   </main>
 
   <script src="popup.js"></script>

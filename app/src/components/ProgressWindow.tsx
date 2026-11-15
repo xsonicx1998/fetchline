@@ -21,6 +21,7 @@ import type { SpeedSample } from '../lib/speedGraph'
 import type { DownloadRow, ProgressEvent, ScanResult } from '../lib/types'
 import { Button } from './Button'
 import { ProgressBar } from './ProgressBar'
+import { ProgressRing } from './ProgressRing'
 import { StatusBadge } from './StatusBadge'
 
 /** S03 — the download progress WINDOW. A separate OS window per
@@ -36,12 +37,13 @@ import { StatusBadge } from './StatusBadge'
  *
  *  Live feed: the window polls `list_downloads` (the row) and
  *  `get_progress_snapshot` (the latest progress event) every
- *  500 ms. Polling is deliberate — the frontend
- *  `download-progress` listener never fires in the built app
- *  (BUG-044: no Tauri capability grants `plugin:event|listen`),
- *  so the snapshot is the window's live feed. The 500 ms poll is
- *  also what feeds the speed graph, so the graph actually builds
- *  here (in the old overlay it never got a sample in production).
+ *  500 ms. Polling is deliberate — the `download-progress`
+ *  listener was removed in Round 39 and polling is this window's
+ *  verified live feed (the main window's listeners work again
+ *  since Round 40 added the capability file, but this window
+ *  keeps polling by design). The 500 ms poll is also what feeds
+ *  the speed graph, so the graph actually builds here (in the old
+ *  overlay it never got a sample in production).
  *  The window title is updated from Rust, in the progress-event
  *  forwarder — the frontend cannot set its own title for the
  *  same capability reason. */
@@ -234,7 +236,7 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
 
   if (!loaded) {
     return (
-      <div className="flex h-full flex-col bg-bg p-6 text-text">
+      <div className="flex h-full flex-col p-6 text-text">
         <p className="text-sm text-text-muted">Loading download…</p>
       </div>
     )
@@ -242,7 +244,7 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
 
   if (!download) {
     return (
-      <div className="flex h-full flex-col bg-bg p-6 text-text">
+      <div className="flex h-full flex-col p-6 text-text">
         <h1 className="text-lg font-semibold">Download removed</h1>
         <p className="mt-2 text-sm text-text-muted">
           This download is no longer in the list — it was removed from the main window.
@@ -286,7 +288,7 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
     download.accept_ranges === true ? 'Yes' : download.accept_ranges === false ? 'No' : 'Unknown'
 
   return (
-    <div className="flex h-full flex-col bg-bg p-6 text-text">
+    <div className="flex h-full flex-col p-6 text-text">
       <div className="mb-4 flex items-start justify-between gap-4">
         <div className="min-w-0">
           <h1 className="truncate text-lg font-semibold" title={download.filename}>
@@ -300,14 +302,22 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
                 : statusLabel(download.status)}
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => window.close()}
-          aria-label="Close"
-          className="rounded-md p-1 text-text-muted hover:bg-surface-2"
-        >
-          <X className="h-5 w-5" aria-hidden="true" />
-        </button>
+        <div className="flex shrink-0 items-start gap-2">
+          <ProgressRing
+            percent={percent}
+            status={download.status === 'complete' ? 'complete' : download.status === 'error' ? 'error' : download.status === 'paused' ? 'paused' : 'downloading'}
+            size={56}
+            label={`Progress of ${download.filename}`}
+          />
+          <button
+            type="button"
+            onClick={() => window.close()}
+            aria-label="Close"
+            className="rounded-md p-1 text-text-muted hover:bg-surface-2"
+          >
+            <X className="h-5 w-5" aria-hidden="true" />
+          </button>
+        </div>
       </div>
 
       <div className="mb-4 flex items-center gap-3">

@@ -148,15 +148,18 @@ export default function App() {
     const timer = window.setInterval(() => void refreshAll(), 1000)
     let unlistenAction: (() => void) | undefined
     let unlistenUpdate: (() => void) | undefined
-    // NOTE (BUG-044): there used to be a `download-progress`
-    // listener here that patched rows live between polls. It never
-    // fired in the built app — this app ships no Tauri capability
-    // files, so `plugin:event|listen` is denied by the ACL and the
-    // subscription promise rejects silently. The 1 s poll below is
-    // the real live path for the table (it always was: the rows
-    // carry speed, ETA and scan results), and the progress window
-    // polls the engine's `get_progress_snapshot` instead. The dead
-    // listener is gone rather than left to fail quietly.
+    // NOTE (BUG-044, fixed in Round 40): there used to be a
+    // `download-progress` listener here that patched rows live
+    // between polls. It never fired in the built app — this app
+    // shipped no Tauri capability files, so `plugin:event|listen`
+    // was denied by the ACL and the subscription promise rejected
+    // silently. `app/src-tauri/capabilities/default.json` now
+    // grants `core:event:allow-listen` to the main window, so the
+    // two subscriptions below work as written. The 1 s poll is
+    // still the live path for the table (the rows carry speed,
+    // ETA and scan results), and the progress window polls the
+    // engine's `get_progress_snapshot` instead — the dead
+    // `download-progress` listener stays removed.
     void onQueueAction((action) => {
       // Shutdown / hibernate wait for the countdown dialog; the
       // other actions have nothing to cancel, so they run at once.
@@ -333,9 +336,9 @@ export default function App() {
   }, [downloads, settings])
 
   return (
-    <div className="flex h-full flex-col bg-bg text-text">
+    <div className="flex h-full flex-col text-text">
       <header className="flex h-12 shrink-0 items-center justify-between border-b border-border bg-surface px-4">
-        <h1 className="text-lg font-bold">Fetchline</h1>
+        <h1 className="text-lg font-bold">Sonic Manager</h1>
         <div className="flex items-center gap-2">
           <span className="text-sm text-text-muted">
             {runningCount > 0 ? `${runningCount} downloading · ${formatSpeed(totalSpeed)}` : 'Idle'}

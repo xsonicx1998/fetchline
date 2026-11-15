@@ -51,6 +51,7 @@ export default {
       boxShadow: {
         card: 'var(--shadow-card)',
         pop: 'var(--shadow-pop)',
+        glow: 'var(--shadow-glow)',
       },
       spacing: {
         'sidebar': '232px',

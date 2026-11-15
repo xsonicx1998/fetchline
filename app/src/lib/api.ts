@@ -108,9 +108,11 @@ export async function setProgressWindowCompact(id: string, compact: boolean): Pr
 }
 
 /** The latest progress event for a download (S03) — the progress
- *  window's live feed, since the frontend `download-progress`
- *  listener never fires in the built app (BUG-044: no Tauri
- *  capability grants `plugin:event|listen`). */
+ *  window's live feed. It polls this instead of listening for
+ *  `download-progress` events: the listener was removed in Round 39
+ *  (BUG-044) and polling is the window's verified live path. (The
+ *  main window's `queue-action-pending` / `update-available`
+ *  listeners work again since Round 40 added the capability file.) */
 export async function getProgressSnapshot(id: string): Promise<ProgressEvent | null> {
   return invoke<ProgressEvent | null>('get_progress_snapshot', { downloadId: id })
 }

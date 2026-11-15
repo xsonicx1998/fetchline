@@ -1,4 +1,4 @@
-// Tailwind mapping — Fetchline (Tauri desktop)
+// Tailwind mapping — Sonic Manager (Tauri desktop)
 // Tokens live in ../replica/design/tokens.json and are wired in
 // src/index.css. Components use bg-surface, text-muted, etc. — never raw hex.
 /** @type {import('tailwindcss').Config} */
@@ -51,6 +51,7 @@ export default {
       boxShadow: {
         card: 'var(--shadow-card)',
         pop: 'var(--shadow-pop)',
+        glow: 'var(--shadow-glow)',
       },
       spacing: {
         sidebar: '232px',

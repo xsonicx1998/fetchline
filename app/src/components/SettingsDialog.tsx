@@ -490,7 +490,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved }: SettingsD
                   onChange={(e) => set('start_on_startup', e.target.checked)}
                   className="h-4 w-4 accent-accent"
                 />
-                Start Fetchline when Windows starts
+                Start Sonic Manager when Windows starts
               </label>
               <p className={hintCls}>
                 Stored for now — registering the app in Windows startup is part of the installed
@@ -521,7 +521,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved }: SettingsD
               </label>
               <p className={hintCls}>
                 On (the default), a link the browser hands over starts downloading as soon as
-                Fetchline picks it up. Off leaves it queued in the download list, to start by
+                Sonic Manager picks it up. Off leaves it queued in the download list, to start by
                 hand. Only applies while catching downloads from the browser is on.
               </p>
               <label className="flex items-center gap-2 text-base">
@@ -560,7 +560,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved }: SettingsD
                   className={`${inputCls} font-mono`}
                 />
                 <p className={hintCls}>
-                  Fetchline will not download from these sites, or their subdomains. Downloads,
+                  Sonic Manager will not download from these sites, or their subdomains. Downloads,
                   batches and Download All all honour this list.
                 </p>
               </div>
@@ -574,7 +574,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved }: SettingsD
                 Check for updates weekly
               </label>
               <p className={hintCls}>
-                When on, Fetchline checks the update server once a week (on the scheduler&apos;s
+                When on, Sonic Manager checks the update server once a week (on the scheduler&apos;s
                 regular tick) and asks before updating — nothing is ever installed
                 automatically. Turning it off stops the automatic check; Help &gt; Check for
                 updates still works.
@@ -592,7 +592,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved }: SettingsD
                   className={`${inputCls} font-mono`}
                 />
                 <p className={hintCls}>
-                  Fetchline&apos;s own release server — the check fetches a version list from
+                  Sonic Manager&apos;s own release server — the check fetches a version list from
                   here. The address above is a placeholder: replace it with the real release
                   server before shipping. Last checked:{' '}
                   {settings.last_update_check_at
@@ -982,7 +982,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved }: SettingsD
                   ) : null}
                 </div>
                 <p className={hintCls}>
-                  Fetchline does not include a scanner — use one already installed on your
+                  Sonic Manager does not include a scanner — use one already installed on your
                   computer, for example Windows Defender. A file the scanner flags is never
                   opened automatically; the completion dialog offers Delete or Quarantine
                   instead.
@@ -1215,7 +1215,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved }: SettingsD
             <div className="flex flex-col gap-4">
               <p className="text-sm text-text-muted">
                 Saved sign-ins for sites that ask for a username and password. When a download
-                from one of these sites starts, Fetchline signs in with the saved login (HTTP
+                from one of these sites starts, Sonic Manager signs in with the saved login (HTTP
                 Basic sign-in only). Passwords are never shown here — only whether one is saved.
               </p>
               {logins.length === 0 ? (
@@ -1360,7 +1360,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved }: SettingsD
               <p className="text-sm text-text-muted">
                 Dial-up settings, from when downloads ran over a phone line. Most of this is
                 legacy on modern Windows: the connection itself is managed by Windows, and
-                Fetchline never dials or hangs up on its own here — the one part that still does
+                Sonic Manager never dials or hangs up on its own here — the one part that still does
                 something is hanging up after a queue finishes, which uses the same confirmation
                 as the other completion actions.
               </p>
@@ -1393,7 +1393,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved }: SettingsD
               </label>
               <p className={hintCls}>
                 Stored only: dialling happens through Windows (RAS) where a dial-up connection
-                exists, and that has never been run on this machine — Fetchline does not dial here.
+                exists, and that has never been run on this machine — Sonic Manager does not dial here.
               </p>
               <label className="flex items-center gap-2 text-base">
                 <input
@@ -1405,7 +1405,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved }: SettingsD
                 Hang up after a queue finishes
               </label>
               <p className={hintCls}>
-                When a queue drains cleanly and has no other completion action, Fetchline offers
+                When a queue drains cleanly and has no other completion action, Sonic Manager offers
                 to hang up the connection above (on Windows, with the usual confirmation). A queue
                 with its own action keeps that action instead, and a queue that downloaded nothing
                 hangs up nothing.

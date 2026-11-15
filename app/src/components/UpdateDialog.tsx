@@ -50,8 +50,8 @@ export function UpdateDialog({ result, checkError, checking, onClose }: UpdateDi
             : checkError
               ? 'Could not check for updates'
               : result?.update_available
-                ? `Fetchline ${result.latest_version} is available`
-                : 'Fetchline is up to date'}
+                ? `Sonic Manager ${result.latest_version} is available`
+                : 'Sonic Manager is up to date'}
         </h2>
 
         {checking ? (
@@ -62,7 +62,7 @@ export function UpdateDialog({ result, checkError, checking, onClose }: UpdateDi
           <div>
             <p className="mt-2 text-sm text-text-muted">{checkError}</p>
             <p className="mt-2 text-sm text-text-muted">
-              Nothing was installed or changed. Fetchline will try again at the next weekly
+              Nothing was installed or changed. Sonic Manager will try again at the next weekly
               check.
             </p>
           </div>
@@ -92,7 +92,7 @@ export function UpdateDialog({ result, checkError, checking, onClose }: UpdateDi
             {result.update_available && (
               <div className="mt-4">
                 <p className="text-sm text-text-muted">
-                  Fetchline never installs an update without asking. To update, download the
+                  Sonic Manager never installs an update without asking. To update, download the
                   installer from:
                 </p>
                 {result.download_url ? (
@@ -111,7 +111,7 @@ export function UpdateDialog({ result, checkError, checking, onClose }: UpdateDi
                   </div>
                 ) : (
                   <p className="mt-2 text-sm text-text-muted">
-                    The update server did not give an installer address — check the Fetchline
+                    The update server did not give an installer address — check the Sonic Manager
                     release page for version {result.latest_version}.
                   </p>
                 )}

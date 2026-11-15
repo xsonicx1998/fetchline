@@ -212,17 +212,17 @@ async function handToFetchline(message) {
   try {
     reply = await sendToHost(message);
   } catch (err) {
-    await recordHandoff(false, `Could not reach Fetchline: ${err.message || err}`);
+    await recordHandoff(false, `Could not reach Sonic Manager: ${err.message || err}`);
     throw err;
   }
   if (reply && reply.ok === false) {
-    const error = reply.error || "Fetchline refused the link";
+    const error = reply.error || "Sonic Manager refused the link";
     await recordHandoff(false, error);
     throw new Error(error);
   }
   await recordHandoff(
     true,
-    (reply && reply.message) || "Sent to Fetchline",
+    (reply && reply.message) || "Sent to Sonic Manager",
     reply && typeof reply.pending_count === "number" ? reply.pending_count : undefined,
   );
   return reply;
@@ -233,12 +233,12 @@ async function handToFetchline(message) {
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({
     id: "fetchline-download",
-    title: "Download with Fetchline",
+    title: "Download with Sonic Manager",
     contexts: ["link", "image", "video", "audio"],
   });
   chrome.contextMenus.create({
     id: "fetchline-download-all",
-    title: "Download all links on this page with Fetchline",
+    title: "Download all links on this page with Sonic Manager",
     contexts: ["page"],
   });
   void refreshDesktopSettings();
@@ -355,7 +355,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     (async () => {
       const state = await loadState();
       if (state[STORE_KEYS.desktopIntegration] === false) {
-        sendResponse({ ok: false, error: "Browser integration is turned off in Fetchline settings" });
+        sendResponse({ ok: false, error: "Browser integration is turned off in Sonic Manager settings" });
         return;
       }
       const tabs = await chrome.tabs.query({ active: true, currentWindow: true });

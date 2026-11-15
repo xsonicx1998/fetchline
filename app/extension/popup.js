@@ -23,16 +23,16 @@ const desktopNote = $("desktopNote");
 // (extension/tests/popup.test.js).
 function formatPendingCount(count) {
   if (typeof count !== "number") return "Waiting links: unknown — check the desktop app.";
-  if (count === 0) return "No links waiting in Fetchline.";
-  if (count === 1) return "1 link waiting in Fetchline — it will start downloading shortly.";
-  return `${count} links waiting in Fetchline — they will start downloading shortly.`;
+  if (count === 0) return "No links waiting in Sonic Manager.";
+  if (count === 1) return "1 link waiting in Sonic Manager — it will start downloading shortly.";
+  return `${count} links waiting in Sonic Manager — they will start downloading shortly.`;
 }
 
 function formatHandoff(handoff) {
-  if (!handoff) return "Nothing sent to Fetchline yet.";
+  if (!handoff) return "Nothing sent to Sonic Manager yet.";
   const when = new Date(handoff.at).toLocaleTimeString();
-  if (handoff.ok) return `Last sent ${when}: ${handoff.message || "Sent to Fetchline."}`;
-  return `Last send failed ${when}: ${handoff.message || "Fetchline could not be reached."}`;
+  if (handoff.ok) return `Last sent ${when}: ${handoff.message || "Sent to Sonic Manager."}`;
+  return `Last send failed ${when}: ${handoff.message || "Sonic Manager could not be reached."}`;
 }
 
 async function loadHandoffStatus() {
@@ -91,12 +91,12 @@ async function refreshStatus() {
   try {
     const reply = await sendToHost({ type: "ping" });
     if (reply && reply.ok !== false) {
-      setStatus("ok", "Connected to the Fetchline desktop app");
+      setStatus("ok", "Connected to the Sonic Manager desktop app");
     } else {
       setStatus("bad", "Desktop app answered with an error");
     }
   } catch {
-    setStatus("bad", "Desktop app not reachable — is Fetchline installed and running?");
+    setStatus("bad", "Desktop app not reachable — is Sonic Manager installed and running?");
   }
   // Pull the desktop settings too, so the toggle below reflects
   // the desktop flag (and seeds the excluded-sites list).
@@ -121,7 +121,7 @@ async function loadToggles() {
   if (desktopOff) {
     desktopNote.hidden = false;
     desktopNote.textContent =
-      "Catching is turned off in Fetchline’s settings. Turn browser integration back on in the desktop app to catch downloads again.";
+      "Catching is turned off in Sonic Manager’s settings. Turn browser integration back on in the desktop app to catch downloads again.";
   } else {
     desktopNote.hidden = true;
     desktopNote.textContent = "";
@@ -163,7 +163,7 @@ siteToggle.addEventListener("change", async () => {
   // back as excluded only in the extension — the desktop list
   // itself is edited in Fetchline’s Settings, not from here.
   resultEl.textContent = siteToggle.checked
-    ? `${host} will no longer be caught. Change this back here, or in Fetchline’s Settings for the desktop list.`
+    ? `${host} will no longer be caught. Change this back here, or in Sonic Manager’s Settings for the desktop list.`
     : `${host} will be caught again.`;
 });
 
@@ -175,16 +175,16 @@ $("sendTab").addEventListener("click", async () => {
   }
   try {
     const reply = await sendToHost({ type: "download_link", url: tab.url, referrer: null });
-    if (reply && reply.ok === false) throw new Error(reply.error || "Fetchline refused the link");
-    resultEl.textContent = "Sent to Fetchline — it will appear in the download list.";
+    if (reply && reply.ok === false) throw new Error(reply.error || "Sonic Manager refused the link");
+    resultEl.textContent = "Sent to Sonic Manager — it will appear in the download list.";
     await recordHandoff(
       true,
-      "Sent to Fetchline — it will appear in the download list.",
+      "Sent to Sonic Manager — it will appear in the download list.",
       reply && typeof reply.pending_count === "number" ? reply.pending_count : undefined,
     );
   } catch (err) {
-    resultEl.textContent = `Could not reach Fetchline: ${err.message}`;
-    await recordHandoff(false, `Could not reach Fetchline: ${err.message}`);
+    resultEl.textContent = `Could not reach Sonic Manager: ${err.message}`;
+    await recordHandoff(false, `Could not reach Sonic Manager: ${err.message}`);
   }
 });
 

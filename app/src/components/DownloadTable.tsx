@@ -2,6 +2,7 @@ import { Download, Link2 } from 'lucide-react'
 import { formatBytes, formatEta, formatSpeed, progressPercent } from '../lib/format'
 import type { CategoryRow, DownloadRow } from '../lib/types'
 import { ProgressBar } from './ProgressBar'
+import { ProgressRing } from './ProgressRing'
 import { StatusBadge } from './StatusBadge'
 
 interface DownloadTableProps {
@@ -88,11 +89,19 @@ export function DownloadTable({ downloads, categories, selectedId, onSelect, onO
                 <StatusBadge status={d.status} />
               </td>
               <td className="px-3 py-2">
-                <ProgressBar
-                  percent={percent}
-                  status={d.status === 'complete' ? 'complete' : d.status === 'error' ? 'error' : d.status === 'paused' ? 'paused' : 'downloading'}
-                  label={`Progress of ${d.filename}`}
-                />
+                <div className="flex items-center gap-2">
+                  <ProgressRing
+                    percent={percent}
+                    status={d.status === 'complete' ? 'complete' : d.status === 'error' ? 'error' : d.status === 'paused' ? 'paused' : 'downloading'}
+                    size={24}
+                    label={`Progress of ${d.filename}`}
+                  />
+                  <ProgressBar
+                    percent={percent}
+                    status={d.status === 'complete' ? 'complete' : d.status === 'error' ? 'error' : d.status === 'paused' ? 'paused' : 'downloading'}
+                    label={`Progress of ${d.filename}`}
+                  />
+                </div>
               </td>
               <td className="whitespace-nowrap px-3 py-2 font-mono text-sm text-text-muted">
                 {d.status === 'downloading' ? formatSpeed(d.speed_bps) : '—'}

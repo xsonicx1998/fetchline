@@ -2581,3 +2581,59 @@ itself, runner-only). Packaging only — no engine change, no licence work.
   the smoke test must still show the app launching, and the window needs
   a human pass on real Windows (auto-open on start, title updates, Hide
   details resize, close-does-not-cancel).
+
+## Sonic Manager rebrand + retheme, BUG-044 fix — 2026-11-15
+- Done: display name "Sonic Manager" everywhere visible — `productName`
+  + window title in `tauri.conf.json`, extension `name` / `description` /
+  `default_title`, README titles, all user-visible "Fetchline" copy in
+  the app and extension. Identifiers unchanged (`com.fetchline.app`,
+  `com.fetchline.host`); the repo rename is a separate step. No mapping
+  note about the internal identifier is written anywhere in the project
+  files, per the user's instruction.
+- Done: theme restyle from the user's own images (logo, background,
+  reference mockup — inspiration only, not shipped). Palette sampled
+  with PIL: dark navy #0a0f24, neon red #f73244, neon blue #23a9ea
+  (gold #d9b350 is in the background art only, not a UI token).
+  Dark theme is the neon look; light theme uses deeper red #c92a2a /
+  blue #0b6fc4 with white button text. Tokens live in
+  `replica/design/tokens.json` (mirrored in `tokens.css` and
+  `app/src/index.css`); the extension popup is restyled dark Sonic.
+- Done: new `ProgressRing` component — circular progress ring from
+  the reference mockup's download cards (24 px in table rows, 56 px
+  with the percent inside in the progress-window header). Primary
+  buttons get the glow shadow (`shadow-glow` in both tailwind
+  configs).
+- Done: BUG-044 fix (approach (a), capabilities file — the standard
+  Tauri fix): `app/src-tauri/capabilities/default.json` grants
+  `core:event:allow-listen` + `core:event:allow-unlisten` to the
+  `main` window only, so the `queue-action-pending` and
+  `update-available` listeners in App.tsx work as written. Nothing
+  else is granted; progress windows keep polling by design and the
+  removed `download-progress` listener stays removed.
+- Icons + background (held for a follow-up push — binary files cannot
+  go through the connector): `scripts/generate-icons.py` now reads
+  `app/src-tauri/icons/logo.jpg` (fails loudly if missing) and makes
+  the 1024 app icon from the full logo plus extension icons
+  16/32/48/128 — 16/32 use a head crop of the mark's curl, because
+  the whole logo at 16 px turns to mud (verified by eye). The
+  background JPG becomes the main-window backdrop under a dark
+  scrim (`app/src/background.css`, dark theme only); the app root
+  divs carry no `bg-bg` class so the body backdrop shows through.
+  The logo/background JPGs must reach the repo via the GitHub web UI
+  BEFORE that follow-up lands — the workflow runs generate-icons.py
+  in both jobs, so landing the adapted script without logo.jpg would
+  fail CI at the icon step.
+- Verified on Linux: full engine suite **416/416 pass, 0 failed**
+  (the extension-manifest test now expects "Sonic Manager");
+  `cargo check --tests` 0 warnings (engine + host; the Tauri app
+  crate cannot be checked on this VM — gdk-3.0, pre-existing);
+  `npm run build` passes; the background build was verified with a
+  temporary import (asset emitted, import reverted); contrast
+  re-checked on the tokens.json pairs — **24/24 pass** (text 4.5 /
+  UI 3.0), light and dark.
+- Honest limits: the new look has never been seen on real Windows
+  (no Tauri shell build on this VM, no desktop on the VPS); the CI
+  smoke-test screenshot is the launch proof and a human pass on the
+  user's PC is needed for the final look. Engine error strings and
+  the HTTP User-Agent still say "Fetchline" (out of this round's
+  scope — needs a follow-up decision).

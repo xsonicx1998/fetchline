@@ -1,6 +1,7 @@
-/* Fetchline extension popup. Colours and type come from the design
-   tokens (replica/design/tokens.json): light accent #6d28d9,
-   Inter, 14px base. No other values are introduced here. */
+/* Sonic Manager extension popup. Colours come from the Sonic
+   palette (replica/design/tokens.json, dark theme): navy base
+   #0a0f24, neon-red accent #f73244, neon-blue #23a9ea, Inter,
+   14px base. No other values are introduced here. */
 
 * { box-sizing: border-box; }
 
@@ -11,8 +12,8 @@ body {
   font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   font-size: 14px;
   line-height: 20px;
-  color: #171a21;
-  background: #ffffff;
+  color: #f2f5fb;
+  background: #0a0f24;
 }
 
 header {
@@ -29,9 +30,9 @@ h1 {
   font-weight: 600;
 }
 
-.status { margin: 0; font-size: 13px; color: #5a6472; }
-.status-ok { color: #16794c; }
-.status-bad { color: #b42318; }
+.status { margin: 0; font-size: 13px; color: #a8b4d0; }
+.status-ok { color: #32d583; }
+.status-bad { color: #ff6b6b; }
 
 main { display: flex; flex-direction: column; gap: 12px; }
 
@@ -43,7 +44,7 @@ main { display: flex; flex-direction: column; gap: 12px; }
   cursor: pointer;
 }
 
-.row input { width: 18px; height: 18px; accent-color: #6d28d9; }
+.row input { width: 18px; height: 18px; accent-color: #f73244; }
 .row input:disabled { cursor: not-allowed; }
 
 button {
@@ -52,14 +53,15 @@ button {
   border-radius: 8px;
   font: inherit;
   font-weight: 600;
-  color: #ffffff;
-  background: #6d28d9;
+  color: #0a0f24;
+  background: #f73244;
+  box-shadow: 0 0 12px rgba(247, 50, 68, .45);
   cursor: pointer;
 }
-button:hover { background: #5b21b6; }
-button:disabled { opacity: 0.5; cursor: not-allowed; }
-button.secondary { color: #171a21; background: #eceef1; }
-button.secondary:hover { background: #e2e5ea; }
+button:hover { background: #ff4d5e; }
+button:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; }
+button.secondary { color: #f2f5fb; background: #1a2547; box-shadow: none; }
+button.secondary:hover { background: #1e2c52; }
 
-.note { margin: 0; font-size: 13px; line-height: 18px; color: #5a6472; }
+.note { margin: 0; font-size: 13px; line-height: 18px; color: #a8b4d0; }
 .note:empty { display: none; }

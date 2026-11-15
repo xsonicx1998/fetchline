@@ -3878,6 +3878,80 @@ running desktop app — no GUI test on this VM or the VPS — so a
 human pass on real Windows is still needed (auto-open, title,
 Hide details resize, close-does-not-cancel).
 
+## Round 40 — BUG-044 resolution (capabilities file restores the two dead listeners) + Sonic Manager rebrand/retheme — 2026-11-15
+
+BUG-044 (found in Round 39): the app shipped no Tauri capability
+files, so every frontend `plugin:` command was denied by the ACL.
+The progress window was built around it, but two listeners stayed
+silently dead: `queue-action-pending` (the shutdown countdown
+never appeared mid-session) and `update-available` (the weekly-
+update dialog never appeared).
+
+Fix (this round, approach (a) — capabilities file, the standard
+Tauri fix): new `app/src-tauri/capabilities/default.json`,
+granting exactly `core:event:allow-listen` +
+`core:event:allow-unlisten` to the `main` window only (verified
+against vendored Tauri 2.12.5: capability files in
+`src-tauri/capabilities/` are auto-enabled by
+`generate_context!()`; the main window's label is `main`). No
+other permission is granted, and the progress windows (labels
+`progress-<id>`) get nothing — they keep polling by design, and
+the removed `download-progress` listener stays removed. The two
+listeners in App.tsx (`onQueueAction`, `onUpdateAvailable`) now
+work as written; the stale BUG-044 comments in App.tsx, api.ts
+and ProgressWindow.tsx were updated to say so. The same file is
+what CI's Windows build will validate — the Tauri shell cannot be
+compiled on this Linux VM (gdk-3.0), so the first real proof is
+the CI build passing and, on the user's PC, the shutdown countdown
+and the weekly-update dialog appearing.
+
+Rebrand/retheme in the same round (user's own images; display
+name "Sonic Manager"; identifiers com.fetchline.app /
+com.fetchline.host unchanged; repo rename is a separate step):
+productName + window title, extension name/description/title,
+README titles, all user-visible "Fetchline" copy in the app and
+extension (comments and internal identifiers left alone; engine
+error strings and the HTTP User-Agent still say "Fetchline" —
+not in this round's scope, flagged for a follow-up decision).
+Palette sampled from the logo/background/reference with PIL
+(navy #0a0f24, neon red #f73244, neon blue #23a9ea; gold #d9b350
+appears in the background art only, not as a UI token). Tokens
+use neon red/blue on dark and deeper red/blue on light
+(#c92a2a / #0b6fc4). Contrast re-checked on the tokens.json
+pairs (24/24 pass, text 4.5 / UI 3.0); text-faint is
+decorative-only (ring/icon strokes) and passes the 3.0 UI
+threshold. New ProgressRing component (table rows 24 px,
+progress-window header 56 px with the percent inside); primary
+buttons get the glow shadow; extension popup restyled dark
+Sonic. Icons from the logo: full logo for 1024/128/48, a head
+crop (the red/blue curl) for 16/32 — the whole logo at 16 px
+turns to mud (verified by eye). Background art as the main-window
+backdrop under a dark scrim, dark theme only; the app root divs
+carry no bg-bg class so the body backdrop shows through.
+
+Sequencing (binary files): the logo/background JPGs cannot be
+pushed via the connector, so they go to the repo through the
+GitHub web UI first; only then do the adapted
+scripts/generate-icons.py (reads logo.jpg, fails loudly if it is
+missing) and app/src/background.css (+ its main.tsx import) land
+in a follow-up push. This push keeps the old icon.svg-based
+generator and no background import, so CI stays green meanwhile.
+The workflow runs generate-icons.py in both the build-windows
+and capture-test jobs, so the follow-up must land only after
+logo.jpg is in the repo or both jobs fail at the icon step.
+
+Status: fixed as described. Verified on Linux: full engine suite
+**416/416 pass, 0 failed** (the manifest-name test was updated
+to "Sonic Manager"); `cargo check --tests` 0 warnings (engine
+and host; the Tauri app crate cannot be checked on this VM —
+gdk-3.0); `npm run build` passes; icons generated locally at
+every size with the 16 px legibility checked by eye; the
+background build was verified with a temporary import (asset
+emitted, then the import reverted). The new look has never been
+seen on real Windows — a human pass on the user's PC is needed
+for the final look, and the smoke-test screenshot from this
+run's artifact is the launch proof.
+
 ## Known limitations, not bugs (round-24 additions)
 
 - The Tauri shell never compiles or runs on this VM, so a

@@ -1,4 +1,4 @@
-/* Design tokens — IDM rebuild (Tauri desktop)
+/* Design tokens — Sonic Manager rebuild (Tauri desktop)
    Generated from replica/design/tokens.json. Light theme is the default;
    dark theme applies with [data-theme="dark"] on <html>.
    Never use raw hex in components — use these custom properties. */
@@ -13,17 +13,17 @@
   --color-text: #171a21;
   --color-text-muted: #5a6472;
   --color-text-faint: #7d8794;
-  --color-accent: #6d28d9;
-  --color-accent-hover: #5b21b6;
-  --color-accent-soft: #ede9fe;
+  --color-accent: #c92a2a;
+  --color-accent-hover: #a82323;
+  --color-accent-soft: #fdecec;
   --color-on-accent: #ffffff;
   --color-danger: #b42318;
   --color-danger-soft: #fef3f2;
   --color-success: #16794c;
   --color-success-soft: #ecfdf3;
-  --color-warning: #b45309;
+  --color-warning: #8a6d1a;
   --color-warning-soft: #fffaeb;
-  --color-info: #175cd3;
+  --color-info: #0b6fc4;
   --color-info-soft: #eff8ff;
 
   --font-sans: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -36,35 +36,37 @@
 
   --shadow-card: 0 1px 2px rgba(16, 24, 40, .06), 0 1px 3px rgba(16, 24, 40, .10);
   --shadow-pop: 0 12px 32px rgba(16, 24, 40, .16);
+  --shadow-glow: 0 0 12px rgba(201, 42, 42, .35);
 
   --motion-fast: 120ms; --motion-base: 200ms; --motion-ease: cubic-bezier(.2, .8, .2, 1);
 }
 
 [data-theme="dark"] {
-  --color-bg: #0e1116;
-  --color-surface: #171b22;
-  --color-surface-2: #1f242e;
-  --color-surface-raised: #222834;
-  --color-border: #2a303c;
-  --color-border-input: #6b7280;
-  --color-text: #f2f4f7;
-  --color-text-muted: #a3abb8;
-  --color-text-faint: #7d8794;
-  --color-accent: #a78bfa;
-  --color-accent-hover: #c4b5fd;
-  --color-accent-soft: #2e2440;
-  --color-on-accent: #17112b;
-  --color-danger: #f97066;
+  --color-bg: #0a0f24;
+  --color-surface: #111a35;
+  --color-surface-2: #1a2547;
+  --color-surface-raised: #1e2c52;
+  --color-border: #2a3a66;
+  --color-border-input: #5a6b9a;
+  --color-text: #f2f5fb;
+  --color-text-muted: #a8b4d0;
+  --color-text-faint: #7d8aa8;
+  --color-accent: #f73244;
+  --color-accent-hover: #ff4d5e;
+  --color-accent-soft: #3a1620;
+  --color-on-accent: #0a0f24;
+  --color-danger: #ff6b6b;
   --color-danger-soft: #3a1d1d;
   --color-success: #32d583;
   --color-success-soft: #12261c;
-  --color-warning: #fdb022;
+  --color-warning: #f5c542;
   --color-warning-soft: #33270e;
-  --color-info: #84adff;
-  --color-info-soft: #16233d;
+  --color-info: #23a9ea;
+  --color-info-soft: #12283d;
 
   --shadow-card: 0 1px 2px rgba(0, 0, 0, .30);
   --shadow-pop: 0 12px 32px rgba(0, 0, 0, .50);
+  --shadow-glow: 0 0 16px rgba(247, 50, 68, .45), 0 0 32px rgba(247, 50, 68, .18);
 }
 
 html, body { background: var(--color-bg); color: var(--color-text); font-family: var(--font-sans); }

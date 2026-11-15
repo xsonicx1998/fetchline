@@ -585,7 +585,7 @@ fn extension_manifest_is_mv3_and_minimal() {
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
     let m: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert_eq!(m["manifest_version"], 3);
-    assert_eq!(m["name"], "Fetchline");
+    assert_eq!(m["name"], "Sonic Manager");
     assert!(m["description"].as_str().unwrap().len() > 10);
     assert_eq!(m["background"]["service_worker"], "background.js");
     assert_eq!(m["action"]["default_popup"], "popup.html");
