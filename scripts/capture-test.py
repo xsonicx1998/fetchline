@@ -330,6 +330,17 @@ class PipeCDP:
     (inherited handles keep their value in the child) and
     Chrome reads/writes those handles. The reader runs on a
     thread because select() cannot wait on a pipe on Windows.
+
+    Launch contract, per platform (CPython's subprocess docs
+    + Lib/subprocess.py): ``pass_fds`` is POSIX-only — CPython
+    rejects it outright on Windows (``assert not pass_fds,
+    "pass_fds not supported on Windows."``), which killed run
+    #3 in under a second. On Windows the child inherits the
+    pipe HANDLEs because they are flagged inheritable AND the
+    process is created with bInheritHandles, i.e. Popen with
+    ``close_fds=False``; on POSIX the child ends are placed
+    on fds 3/4 and kept open with ``pass_fds`` (which forces
+    close_fds True). The two mechanisms must never be mixed.
     """
 
     def __init__(self, chrome_exe, profile_dir, stderr_path):
@@ -359,12 +370,36 @@ class PipeCDP:
 
             os.set_inheritable(rA, True)
             os.set_inheritable(wB, True)
+            # Loud and early: the handles MUST be inheritable or
+            # Chrome can never see them — close_fds=False only
+            # inherits handles flagged inheritable. Fail here,
+            # naming the platform, instead of launching a Chrome
+            # that silently has no DevTools pipe.
+            if not os.get_inheritable(rA) or not os.get_inheritable(wB):
+                for fd in (rA, wA, rB, wB):
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                raise RuntimeError(
+                    "Windows pipe setup failed: DevTools pipe handles "
+                    "are not inheritable (os.name=nt) — Chrome would "
+                    "never receive the pipe named by "
+                    "--remote-debugging-io-pipes"
+                )
             in_handle = msvcrt.get_osfhandle(rA)
             out_handle = msvcrt.get_osfhandle(wB)
             args.append(
                 "--remote-debugging-io-pipes=%d,%d" % (in_handle, out_handle)
             )
-            child_fds = (rA, wB)
+            # Windows: CPython rejects pass_fds outright (run #3:
+            # AssertionError "pass_fds not supported on Windows.").
+            # The child inherits the two pipe HANDLEs because they
+            # are flagged inheritable and CreateProcess is called
+            # with bInheritHandles (close_fds=False); inherited
+            # HANDLEs keep their numeric value in the child, which
+            # is exactly what --remote-debugging-io-pipes names.
+            popen_kwargs = {"close_fds": False}
             self._write_fd = wA
             self._read_fd = rB
         else:
@@ -384,7 +419,10 @@ class PipeCDP:
             if wB != 4:
                 os.dup2(wB, 4)
                 os.close(wB)
-            child_fds = (3, 4)
+            # POSIX: pass_fds keeps fds 3/4 open across the exec
+            # (it also forces close_fds True — the two must not
+            # be combined the other way round).
+            popen_kwargs = {"pass_fds": (3, 4)}
         err = open(stderr_path, "wb")
         self._err_file = err
         try:
@@ -393,8 +431,21 @@ class PipeCDP:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=err,
-                pass_fds=child_fds,
+                **popen_kwargs,
             )
+        except AssertionError as e:
+            # CPython's Windows guard (Lib/subprocess.py,
+            # _execute_child: "pass_fds not supported on
+            # Windows."). A bare AssertionError deep in the run
+            # tells nobody what went wrong — name the platform
+            # and the mechanism. install_extension_via_pipe
+            # catches RuntimeError and turns it into a FAIL line.
+            err.close()
+            raise RuntimeError(
+                f"cannot start Chrome on {sys.platform}: {e} "
+                "(DevTools pipe handles must be inherited via "
+                "close_fds=False, never pass_fds)"
+            ) from e
         except Exception:
             err.close()
             raise

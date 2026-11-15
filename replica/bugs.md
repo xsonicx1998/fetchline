@@ -3430,6 +3430,100 @@ that reproduces his failure on the runner for the first
 time and the iteration continues from the popup's error,
 not from discovery.
 
+## Round 36 — BUG-042 follow-up: PipeCDP passes pass_fds on Windows, which CPython rejects outright — 2026-11-15
+
+Symptom (new repo xsonicx1998/fetchline, CI run #3
+43748778847, head 8f7641b6): build-windows SUCCESS,
+smoke-test SUCCESS, extension-capture-test FAILED at step
+"Run browser capture test" after only ~1 s, exit 1 — the
+script died at startup, before Phase 2/3. Log read via the
+cloud browser as xsonicx1998: PHASE 1 PASSED, then the
+traceback (only one):
+```
+File ".../scripts/capture-test.py", line 527, in install_extension_via_pipe
+    pipe = PipeCDP(chrome_exe, profile_dir, stderr_path)
+File ".../scripts/capture-test.py", line 391, in __init__
+    self._proc = subprocess.Popen(...)
+File "C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\subprocess.py", line 1448, in _execute_child
+    assert not pass_fds, "pass_fds not supported on Windows."
+AssertionError: pass_fds not supported on Windows.
+```
+Chrome was never launched through the pipe; the extension
+was never installed.
+
+Root cause — test harness only, proven from the traceback
++ CPython's own source, not guessed: `PipeCDP.__init__`
+built the Windows launch correctly (inheritable pipe
+handles + `--remote-debugging-io-pipes=<h1>,<h2>`) but then
+passed `pass_fds=child_fds` to `subprocess.Popen`
+unconditionally. CPython's Windows `_execute_child`
+(Lib/subprocess.py:1448) starts with `assert not pass_fds`
+— `pass_fds` is POSIX-only by design (the docs say so; on
+POSIX it forces close_fds True). The new pipe-install code
+was written and synthetically tested on the POSIX path only
+(the 14 fake-peer tests run on fds 3/4 under Linux), so this
+Windows-only failure was never exercised before CI. The idea
+itself (install via `Extensions.loadUnpacked` over
+`--remote-debugging-pipe`) is unaffected — only the Windows
+handle-passing was wrong.
+
+Fix (`scripts/capture-test.py`, test-only; no product code,
+no assertion weakened):
+- Windows now launches with `close_fds=False` and NEVER
+  `pass_fds`: the child inherits the two pipe HANDLEs
+  because they are flagged inheritable (`os.set_inheritable`)
+  and CreateProcess is called with bInheritHandles
+  (`int(not close_fds)` — verified in CPython 3.12's
+  Lib/subprocess.py `_execute_child`); inherited HANDLEs keep
+  their numeric value in the child, which is exactly what
+  `--remote-debugging-io-pipes` names (confirmed by
+  chromedp's README: "On Windows the pipes are handles that
+  the switch --remote-debugging-io-pipes names", and by the
+  CPython docs: with close_fds false, "file descriptors obey
+  their inheritable flag", and on Windows close_fds true
+  inherits nothing except STARTUPINFO handle_list / standard
+  redirection). POSIX is unchanged (fds 3/4 + pass_fds).
+- Failure is loud and early on either platform: on Windows
+  the handles are checked with `os.get_inheritable` right
+  after flagging them — if they are not inheritable the
+  constructor raises a RuntimeError naming the platform
+  before launching anything; a Popen AssertionError is
+  caught and re-raised as a RuntimeError naming the platform
+  and the mechanism (`close_fds=False`, never pass_fds),
+  which `install_extension_via_pipe` already catches and
+  turns into a `FAIL: browser:` line — run #3's bare
+  traceback can no longer escape the script.
+- New committed test file `scripts/test_capture_pipe.py`
+  (7 tests, run: `python3 scripts/test_capture_pipe.py`).
+  The previous 14 synthetic tests were ephemeral (only
+  their logs survived in /tmp); this file replaces them with
+  a committed suite: 5 POSIX fake-peer tests (normal reply,
+  event interleaved, chunked reply reassembled, error reply
+  -> RuntimeError, early exit -> RuntimeError) plus 2
+  Windows-branch tests that drive the real `PipeCDP.__init__`
+  with `os.name` patched to `"nt"`, a fake `msvcrt`, and a
+  Popen mock that raises exactly as CPython does on Windows
+  whenever `pass_fds` is passed — asserting the call never
+  carries `pass_fds`, carries `close_fds=False`, and names
+  the io-pipes handles; and that non-inheritable handles fail
+  before any launch. The Windows path itself can only be
+  proven by the CI run (no Windows Python on this VM).
+
+Verified locally: `py_compile` OK for both files; new test
+file 7/7 pass; Phase 1 dry-run green locally against the
+release host (ping/get_settings/download_link +
+pending_links row). Full engine suite 413/413, 0 failed;
+`cargo check --tests` 0 warnings; `npm run build` passes.
+Phases 2–3 need the CI run.
+
+Note: this still does NOT explain the user's PC failure
+(his extension shows the stable id; the host runs
+standalone; no crash in Event Viewer). If the CI run now
+reaches the popup and fails there with "could not reach the
+host", that reproduces his failure on the runner for the
+first time and the iteration continues from the popup's
+error, not from discovery.
+
 ## Known limitations, not bugs (round-24 additions)
 
 - The Tauri shell never compiles or runs on this VM, so a
