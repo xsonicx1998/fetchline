@@ -3241,7 +3241,27 @@ Fix:
   recorded here).
 Verified: `cargo check --tests` 0 warnings; update_tests
 5x 9/9; full engine suite 413/413 on Linux. VPS
-verification … to follow.
+verification (2026-11-15 ~21:05 EET, Windows Server 2025,
+instance i-0013aa5b18cec04b8, checkout verified at commit
+2a75c089 "Fix BUG-041: busy_timeout + best-effort WAL in
+Store::open, counter in update tmpdir"): full engine suite
+**412/412 passed, 0 failed** (`cargo test --no-fail-fast`,
+log C:\Windows\TEMP\bug041-full-suite.log, 30,666 bytes,
+last written 17:04 UTC; copy in
+~/workspace/vps-test-evidence/bug041-full-suite.log and
+s3://fetchline-vps-evidence-ce1331eb/bug041-full-suite.log).
+Per-binary: lib 56, antivirus 17, engine_tests 111,
+extension 32, final_verify2 4, final_verify 16, grabber 28,
+grabber_verify 14, kerberos 14, options 14, progress 7,
+proxy 15, quota 19, real_download 2, sync 23, update 9,
+video 31, doc-tests 0 — zero FAILED lines, zero panics. The
+previously failing test
+`newer_version_available_shows_changelog_and_never_installs`
+passes (update_tests 9/9). 412 = Linux's 413 minus the one
+#[cfg(not(windows))] shutdown test. **BUG-041 is proven
+fixed on Windows.** (Retrieval was delayed by an expired AWS
+session; the suite itself had finished before the expiry and
+the instance was left running by the user's choice.)
 
 ## Round 34 — BUG-042: capture test Phase 2 takes Chrome's built-in Hangouts component extension for ours — 2026-11-15
 
@@ -3523,6 +3543,285 @@ reaches the popup and fails there with "could not reach the
 host", that reproduces his failure on the runner for the
 first time and the iteration continues from the popup's
 error, not from discovery.
+
+## Round 37 — BUG-042 follow-up: the extension's icons are missing from the repo, so Chrome's loadUnpacked refuses to install it — 2026-11-15
+
+Symptom (new repo xsonicx1998/fetchline, CI run #4
+43750793531, head 5869dfb4): build-windows SUCCESS,
+smoke-test SUCCESS, extension-capture-test FAILED at step
+"Run browser capture test" after only ~7 s, exit 1. Log
+read via the cloud browser as xsonicx1998; the exact FAIL
+line, verbatim:
+```
+FAIL: browser: could not install the extension via CDP pipe: Extensions.loadUnpacked failed: {'code': -32600, 'message': "Could not load icon 'icons/icon16.png' specified in 'action'."}
+```
+Phase 1 PASSED; Phase 2 died at the install step
+(`installing extension via CDP pipe
+(Extensions.loadUnpacked)`); the popup handshake and Phase
+3 never ran.
+
+Root cause — proven, not guessed: `manifest.json`
+`action.default_icon` names `icons/icon16.png`,
+`icon32.png`, `icon48.png`, `icon128.png`, and those files
+exist locally (174–847 bytes each) but are NOT in the repo
+(raw.githubusercontent.com at head 5869dfb4 returns 404 for
+`app/extension/icons/icon16.png` while manifest.json returns
+200). `scripts/generate-icons.py` creates them from the
+committed `app/extension/icons/icon.svg`, and the
+`build-windows` job runs it — but the
+`extension-capture-test` job never did (its dependency step
+only installed `websocket-client`). Chrome's
+`Extensions.loadUnpacked` strictly validates the icons a
+manifest names, so the install fails before any extension
+code runs. This also explains runs #1/#2: the extension
+NEVER loaded in CI at all — the Hangouts first-match (run
+#1) and the discovery exhaustion (run #2) are downstream of
+that. The branded-Chrome 137 removal of `--load-extension`
+is real but secondary here: even with the flag, an
+extension with missing icons cannot load.
+
+Why the fix is a workflow step and not committed PNGs:
+the connector's `push-files` builds a local UTF-8 snapshot
+— binary files fail its validation (the same reason a
+`.pyc` had to be dropped from the new-repo upload), and the
+MCP `create_or_update_file` / `push_files` tools carry
+text content only ("Do not base64-encode it; this server
+does that"), so no connector route can commit a PNG. The
+icons stay generated, not committed, exactly as the
+workflow header comment already states.
+
+Fix (CI-only; `.github/workflows/build-windows.yml`,
+`extension-capture-test` job, "Install capture-test
+dependencies" step — no product code, no test code, no
+assertion changed):
+```
+- name: Install capture-test dependencies
+  run: |
+    python -m pip install websocket-client pillow
+    python scripts/generate-icons.py
+```
+with a comment naming run #4's exact error and why the
+step exists. This mirrors the `build-windows` job, which
+already runs the same two commands.
+
+Verified locally: workflow YAML parses (jobs
+build-windows / smoke-test / extension-capture-test; 346
+lines); fresh-checkout simulation — a temp dir with the
+repo contents MINUS the icons, running the new step's exact
+commands, regenerates all four PNGs byte-identical to the
+local ones (md5 icon16 5ae9c6dd…, icon32 ca6855ff…,
+icon48 8a9b9e95…, icon128 f15a136e…) and every icon
+reference in manifest.json resolves; `py_compile` OK;
+full engine suite 413/413, 0 failed; `cargo check --tests`
+0 warnings; `npm run build` passes. A real Chrome load
+cannot run on this VM; the CI run is the proof for that.
+
+Status, updated in Round 38: the workflow file WAS uploaded
+via a browser task (signed in as xsonicx1998, Edit on the
+EXISTING file page) at ~21:43 EET as commit 998b358
+("Generate extension icons in capture-test job (BUG-042
+follow-up)", 11 additions / 1 deletion), verified by
+raw.githubusercontent read-back. It triggered run #5
+(43753981942, head 998b358, completed ~21:55 EET):
+build-windows SUCCESS + smoke-test SUCCESS,
+extension-capture-test FAILED — but the step ran 38 s (vs
+run #4's 7 s). Log read via the cloud browser as
+xsonicx1998 (job 132936322990): the install NOW WORKS
+("CDP install returned id
+mioamdgogndabpcjbdekggcnlkkfpmbj" / "installed id matches
+the stable id") — `Extensions.loadUnpacked` succeeded for
+the first time in CI. Phase 1 PASSED. Then discovery
+failed with the same message as run #2:
+`FAIL: browser: could not discover the extension ID (no
+chrome-extension:// target with the expected id and no
+Preferences entry)` — the installed extension never
+appeared in the test launch's CDP /json/list (only the 4
+component extensions) and the Preferences fallback found
+nothing. The popup handshake + Phase 3 never ran. The
+icons fix is proven; the failure moved to the two-launch
+design — see Round 38.
+
+Note: this is CI-only and still does NOT explain the
+user's PC failure (his extension ZIP was built from the
+local dir, which HAS the icons). If run #5 reaches the
+popup and fails there with "could not reach the host",
+that reproduces his failure on the runner for the first
+time. (Round 38: it did — and the cause turned out to be
+BUG-043, a real product bug, not the test.)
+
+## Round 38 — BUG-042 follow-up (two-launch design is unfixable) + BUG-043 (real product bug: the host exits on Chrome's launch arguments, so the popup handshake could never succeed anywhere) — 2026-11-15
+
+Symptom (new repo xsonicx1998/fetchline, CI run #5
+43753981942, head 998b358): build-windows SUCCESS,
+smoke-test SUCCESS, extension-capture-test FAILED at step
+"Run browser capture test" after 38 s (vs run #4's 7 s),
+exit 1. Log read via the cloud browser as xsonicx1998
+(job 132936322990); the exact FAIL line, verbatim:
+```
+FAIL: browser: could not discover the extension ID (no chrome-extension:// target with the expected id and no Preferences entry)
+```
+PROGRESS: the install now works — "CDP install returned
+id mioamdgogndabpcjbdekggcnlkkfpmbj" / "installed id
+matches the stable id" (`Extensions.loadUnpacked`
+succeeded for the first time in CI; the Round 37 icons fix
+is proven). Phase 1 PASSED. Then discovery failed: the
+installed extension never appeared in the test launch's
+CDP /json/list (only the 4 component extensions) and the
+Preferences fallback found nothing. Popup handshake +
+Phase 3 never ran.
+
+Root cause 1 (test design, proven on the VPS) — the
+two-launch design cannot work. Experiments on the VPS
+(fresh clone at C:\fetchline2, head 998b358, branded
+Chrome 157.0.8103.79, debug scripts
+~/workspace/vps-test/dbg-profile.py, dbg2-profile.py):
+- A (terminate, the old behaviour): `loadUnpacked`
+  returns the stable id and the worker IS running in
+  launch A itself (`Target.getTargets` shows
+  `service_worker chrome-extension://mioamdgogndabpcjbdekggcnlkkfpmbj/background.js`),
+  but while A is alive AND after terminate, `Default/
+  Preferences` and `Default/Secure Preferences` DO NOT
+  EXIST on disk — the registration never flushed.
+  Launch B finds nothing; its popup target stays
+  about:blank.
+- B (clean shutdown via `Browser.close`): after A exits,
+  Secure Preferences DOES contain the extension
+  (`id=mioamdgogndabpcjbdekggcnlkkfpmbj`,
+  `path='C:\fetchline2\app\extension'`, `location=4`) —
+  the registration persists on clean shutdown. But
+  launch B STILL finds nothing, and after B's clean stop
+  the entry is GONE from Secure Preferences. Launch B
+  itself removes it.
+- C (B without `--enable-unsafe-extension-debugging`)
+  and D (B with it): identical — the flag is innocent.
+Two separate defects: (1) `pipe.close()` terminates
+launch A, so Chrome never flushes the registration to
+disk; (2) a fresh Chrome launch REMOVES a
+`loadUnpacked`-installed extension (stored location=4,
+the unpacked/load kind, tied to the installing session)
+— so a clean shutdown alone is NOT sufficient either.
+Chrome's stderr was clean in all launches. The fix is
+not a better discovery check: there is nothing to
+discover in a second launch. The whole phase must run in
+ONE launch.
+
+Root cause 2 (BUG-043, REAL PRODUCT BUG — found by the
+single-launch experiment, and it explains the user's PC
+failure too). The single-launch experiment (dbg3:
+install via pipe in launch A, then `Target.createTarget`
+popup.html + `attachToTarget` + `Runtime.evaluate` over
+the pipe) proved the mechanism works — the popup loaded
+(`document.title: 'Fetchline'`) — but its status went to
+"Desktop app not reachable" and Chrome's stderr showed:
+```
+ERROR:chrome\browser\extensions\api\messaging\native_message_process_host.cc:378] Error when writing to Native Messaging host: -101
+```
+three times. The host itself answers fine when driven
+directly (VPS dbg4: ping → `{"ok":true,"type":"pong"}`,
+returncode 0; CI Phase 1 passes the same way). A
+throwaway wrapper exe (~/workspace/vps-test/
+host-wrapper.rs, logs every spawn then execs the real
+host) proved why: Chrome spawns the host with TWO extra
+arguments — the extension origin, then
+`--parent-window=<hwnd>`:
+```
+args: ["...host-wrapper.exe", "chrome-extension://mioamdgogndabpcjbdekggcnlkkfpmbj/", "--parent-window=1966140"]
+args: ["...host-wrapper.exe", "chrome-extension://mioamdgogndabpcjbdekggcnlkkfpmbj/", "--parent-window=0"]
+```
+and the host's `main()` rejected ANY unknown argument
+with `exit(2)` — so it died instantly on every Chrome
+spawn, before reading a single frame, and Chrome's write
+failed with -101 (ERR_CONNECTION_RESET). Through the
+wrapper (which drops the extra args) the popup reported
+`Connected to the Fetchline desktop app` and all three
+spawns exited 0. This was never caught because every
+host test drives it directly (`--db-path` only) — the
+Chrome spawn path was never exercised anywhere, on the
+VPS, in CI, or on the user's PC. It is the same failure
+the user sees on his PC ("Could not reach Fetchline:
+Error when communicating with the native messaging
+host") despite a correct install, correct registry key,
+correct manifest, and a host that runs standalone.
+
+Fix 1 (product, `app/host/src/main.rs` — BUG-043):
+arg parsing extracted into `parse_host_args`, which
+ignores the browser's launch arguments — any
+`chrome-extension://…/` or `moz-extension://…/` origin,
+and `--parent-window=<hwnd>` (plus the bare
+`--parent-window` form, consuming a following numeric
+handle only, so a following real flag is never eaten).
+`--db-path`, `--help`/`-h` unchanged; genuinely unknown
+arguments still exit(2) with the usage text. Regression
+tests: 2 unit tests in main.rs (Chrome argv ignored in
+both orders and mixed with `--db-path`; Firefox origin;
+unknown args still rejected) + 1 integration test
+(`app/host/tests/chrome_argv_spawn.rs`, process-level:
+spawns the built host exactly as Chrome does and
+requires a framed pong, then EOF and a clean exit 0).
+
+Fix 2 (test-only, `scripts/capture-test.py` — the
+two-launch design): `phase_browser` is now ONE launch
+over the CDP pipe — install via `Extensions.loadUnpacked`,
+then `Target.createTarget` popup.html +
+`Target.attachToTarget` (flatten) + `Runtime.evaluate`
+on that session, polling the status text up to 20 s.
+`PipeCDP.call` gained an optional `session_id`
+(sent as `sessionId`, replies matched on id AND
+sessionId; a new session-mismatch test covers the skip).
+`install_extension_via_pipe` became `install_extension`
+(takes an open pipe, returns the id, does NOT close the
+launch). Deleted dead code: `chrome_targets`,
+`find_expected_target_id`, `extension_id_from_profile`
+(the /json/list discovery + Preferences fallback can
+never succeed — see root cause 1), the websocket popup
+check, and the `re` / `urllib.request` imports. Phase 2
+is stdlib-only now (websocket-client no longer needed;
+the workflow still installs it — harmless, left alone
+to avoid a workflow change this round). Clean shutdown
+(`Browser.close` best-effort, then `pipe.close()`) at
+the end of the phase. No assertion weakened: the
+installed id must still equal the stable id, and the
+popup must still report "Connected to the Fetchline
+desktop app". The icon fix, pass_fds fix, and
+--load-extension handling are untouched (all proven).
+
+Verified locally: `py_compile` OK; pipe tests 9/9
+(7 old + 2 new session tests,
+scripts/test_capture_pipe.py); host tests 3/3
+(`cargo test -p fetchline-host`); full engine suite
+413/413, 0 failed; `cargo check --tests` 0 warnings;
+`npm run build` passes. Fresh-checkout simulation =
+the VPS run below (fresh clone + the synced files).
+
+Verified on the VPS (real Windows, branded Chrome
+157): host tests 3/3 pass on Windows (`cargo test -p
+fetchline-host`, SSM command d806adce, 1m 31s). Then,
+with the FIXED host (no wrapper) and the rewritten
+script: dbg3 `RESULT PASS: popup reports Connected to
+the Fetchline desktop app`, and the real
+`capture-test.py` Phases 1+2 (`--skip-drain`):
+`PHASE 1 PASSED` (ping / get_settings /
+download_link / pending_links row confirmed) +
+`PHASE 2 PASSED` (registry key + manifest verified,
+CDP install returned the stable id, popup status text
+'Connected to the Fetchline desktop app') →
+`CAPTURE TEST PASSED (phases run: host, browser)`.
+Phase 3 was skipped: it needs the desktop app's GUI,
+which cannot run on the VPS (session 0) — CI run #6
+is the proof for it. The user-facing consequence: the
+next installer (run #6) contains the BUG-043 fix, so
+installing it should make capture work on his PC too —
+the same spawn that failed there now succeeds on the
+VPS with the identical Chrome + host.
+
+Status: pushed with the code fix in this round's
+connector push to xsonicx1998/fetchline (files:
+`app/host/src/main.rs`,
+`app/host/tests/chrome_argv_spawn.rs`,
+`scripts/capture-test.py`,
+`scripts/test_capture_pipe.py`, `replica/bugs.md`
+— this entry, plus the Round 37 status correction
+above). No workflow change. Run #6 is the proof.
 
 ## Known limitations, not bugs (round-24 additions)
 

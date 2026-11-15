@@ -104,33 +104,95 @@ fn resolve_db_path(flag: Option<PathBuf>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("fetchline.db"))
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() {
-    let mut args = std::env::args().skip(1);
-    let mut db_flag: Option<PathBuf> = None;
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--db-path" => match args.next() {
-                Some(p) => db_flag = Some(PathBuf::from(p)),
-                None => {
-                    eprintln!("--db-path needs a path");
-                    print_usage();
-                    std::process::exit(2);
-                }
+/// What the command line asked for. `--db-path` and `--help` are
+/// ours; everything else a browser adds when it spawns the host is
+/// ignored — see `is_browser_launch_arg`.
+struct HostArgs {
+    db_path: Option<PathBuf>,
+    help: bool,
+}
+
+/// Parse the host's command line.
+///
+/// BUG-043: Chrome starts a native-messaging host with TWO extra
+/// arguments — the calling extension's origin
+/// (`chrome-extension://<id>/`) and `--parent-window=<hwnd>`
+/// (Chromium's native_message_process_host; the HWND is the
+/// browser window, 0 in headless). Firefox passes its origin
+/// (`moz-extension://<uuid>/`) the same way. The old parser
+/// rejected ANY unknown argument with exit(2), so the host died
+/// instantly on every Chrome spawn — Chrome's write to its stdin
+/// then failed with -101 (ERR_CONNECTION_RESET) and the popup
+/// reported "Desktop app not reachable". The host answers fine
+/// when driven directly (CI Phase 1, the host smoke tests), so
+/// this only ever showed up in a real browser spawn — which is
+/// why it was never caught. Unknown arguments that are NOT
+/// browser launch args still exit(2).
+fn parse_host_args<I, S>(args: I) -> Result<HostArgs, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut out = HostArgs {
+        db_path: None,
+        help: false,
+    };
+    let mut it = args.into_iter().peekable();
+    while let Some(arg) = it.next() {
+        let arg = arg.as_ref();
+        match arg {
+            "--db-path" => match it.next() {
+                Some(p) => out.db_path = Some(PathBuf::from(p.as_ref())),
+                None => return Err("--db-path needs a path".to_string()),
             },
-            "--help" | "-h" => {
-                print_usage();
-                return;
+            "--help" | "-h" => out.help = true,
+            _ if is_browser_launch_arg(arg) => {
+                // Chrome's --parent-window is passed as
+                // --parent-window=<hwnd>; the bare form takes the
+                // handle as the NEXT argument — consume it, but
+                // only when it looks like a handle, so a following
+                // real flag is never eaten.
+                if arg == "--parent-window" {
+                    if let Some(next) = it.peek() {
+                        if next.as_ref().chars().all(|c| c.is_ascii_digit()) {
+                            it.next();
+                        }
+                    }
+                }
             }
-            other => {
-                eprintln!("Unknown argument: {other}");
-                print_usage();
-                std::process::exit(2);
-            }
+            other => return Err(format!("Unknown argument: {other}")),
         }
     }
+    Ok(out)
+}
 
-    let db_path = resolve_db_path(db_flag);
+/// True for the arguments a browser adds when it spawns a native
+/// host (BUG-043): the caller's extension origin and the
+/// --parent-window handle. Anything else unknown is still an
+/// error — see parse_host_args.
+fn is_browser_launch_arg(arg: &str) -> bool {
+    arg.starts_with("chrome-extension://")
+        || arg.starts_with("moz-extension://")
+        || arg == "--parent-window"
+        || arg.starts_with("--parent-window=")
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    let parsed = match parse_host_args(std::env::args().skip(1)) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("{e}");
+            print_usage();
+            std::process::exit(2);
+        }
+    };
+    if parsed.help {
+        print_usage();
+        return;
+    }
+
+    let db_path = resolve_db_path(parsed.db_path);
     let store = match Store::open(&db_path) {
         Ok(s) => Arc::new(s),
         Err(e) => {
@@ -212,5 +274,70 @@ async fn main() {
             break; // stdout closed: the browser is gone
         }
         let _ = output.flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Chrome's exact launch arguments for the host (proven by the
+    // VPS spawn log, BUG-043): the extension origin, then
+    // --parent-window=<hwnd> (a real HWND for a windowed spawn,
+    // 0 in headless).
+    const CHROME_ARGV: &[&str] = &[
+        "chrome-extension://mioamdgogndabpcjbdekggcnlkkfpmbj/",
+        "--parent-window=1966140",
+    ];
+
+    #[test]
+    fn chrome_launch_args_are_ignored() {
+        let a = parse_host_args(CHROME_ARGV.iter().copied()).unwrap();
+        assert!(a.db_path.is_none());
+        assert!(!a.help);
+        // Reversed order and a headless (0) parent window.
+        let a = parse_host_args(
+            [
+                "--parent-window=0",
+                "chrome-extension://mioamdgogndabpcjbdekggcnlkkfpmbj/",
+            ]
+            .iter()
+            .copied(),
+        )
+        .unwrap();
+        assert!(a.db_path.is_none());
+        // Mixed with our own flags, bare --parent-window form.
+        let a = parse_host_args(
+            [
+                "chrome-extension://mioamdgogndabpcjbdekggcnlkkfpmbj/",
+                "--parent-window",
+                "12345",
+                "--db-path",
+                r"C:\x\app.db",
+            ]
+            .iter()
+            .copied(),
+        )
+        .unwrap();
+        assert_eq!(a.db_path, Some(PathBuf::from(r"C:\x\app.db")));
+        // Firefox passes its origin the same way.
+        let a = parse_host_args(
+            ["moz-extension://01234567-89ab-cdef-0123-456789abcdef/"]
+                .iter()
+                .copied(),
+        )
+        .unwrap();
+        assert!(a.db_path.is_none());
+    }
+
+    #[test]
+    fn unknown_args_still_rejected() {
+        assert!(parse_host_args(["--bogus"].iter().copied()).is_err());
+        assert!(parse_host_args(["--db-path"].iter().copied()).is_err());
+        // A bare --parent-window followed by a non-numeric arg must
+        // NOT eat that arg — it is still parsed as a flag.
+        let a = parse_host_args(["--parent-window", "--db-path", "x.db"].iter().copied())
+            .unwrap();
+        assert_eq!(a.db_path, Some(PathBuf::from("x.db")));
     }
 }

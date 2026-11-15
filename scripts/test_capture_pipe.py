@@ -70,6 +70,36 @@ def send(obj):
     os.write(4, json.dumps(obj).encode("utf-8") + b"\\0")
 
 
+if scenario == "session":
+    # Echo every command, carrying the sessionId back when the
+    # request had one (Chrome's reply shape for flattened
+    # sessions) — lets the client prove session-scoped calls.
+    while True:
+        cmd = read_msg()
+        if cmd is None:
+            break
+        reply = {"id": cmd.get("id"), "result": {"method": cmd.get("method")}}
+        if "sessionId" in cmd:
+            reply["sessionId"] = cmd["sessionId"]
+        send(reply)
+    sys.exit(0)
+
+if scenario == "session_mismatch":
+    # First reply carries the right id but the WRONG sessionId:
+    # the client must skip it and take the second, matching one.
+    cmd = read_msg()
+    if cmd is not None:
+        send({"id": cmd.get("id"), "sessionId": "WRONG",
+              "result": {"method": "wrong"}})
+        send({"id": cmd.get("id"), "sessionId": cmd.get("sessionId"),
+              "result": {"method": cmd.get("method")}})
+    try:
+        while read_msg() is not None:
+            pass
+    except OSError:
+        pass
+    sys.exit(0)
+
 if scenario == "exit_early":
     sys.exit(0)
 
@@ -270,6 +300,40 @@ class PosixPeerTests(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 pipe.call("Browser.getVersion", timeout=10)
             self.assertIn("boom", str(ctx.exception))
+        finally:
+            pipe.close()
+
+    def test_session_scoped_call(self):
+        # Round 38: the popup check runs over a flattened target
+        # session — call(session_id=...) must send sessionId and
+        # accept the reply carrying it back; a plain browser-level
+        # call on the same pipe still works.
+        pipe = self._make_pipe("session")
+        try:
+            result = pipe.call(
+                "Runtime.evaluate",
+                {"expression": "1+1", "returnByValue": True},
+                session_id="SESS-1",
+                timeout=10,
+            )
+            self.assertEqual(result.get("method"), "Runtime.evaluate")
+            result = pipe.call("Browser.getVersion", timeout=10)
+            self.assertEqual(result.get("method"), "Browser.getVersion")
+        finally:
+            pipe.close()
+
+    def test_session_mismatch_reply_skipped(self):
+        # A reply with the right id but the WRONG sessionId must
+        # be skipped, not returned.
+        pipe = self._make_pipe("session_mismatch")
+        try:
+            result = pipe.call(
+                "Runtime.evaluate",
+                {"expression": "1+1", "returnByValue": True},
+                session_id="SESS-1",
+                timeout=10,
+            )
+            self.assertEqual(result.get("method"), "Runtime.evaluate")
         finally:
             pipe.close()
 
