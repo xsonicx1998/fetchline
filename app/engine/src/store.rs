@@ -173,7 +173,7 @@ impl Default for Settings {
             max_connections: 8,
             speed_limit_kbps: None,
             language: "en".to_string(),
-            theme: "light".to_string(),
+            theme: "dark".to_string(),
             browser_integration: true,
             browser_start_drained: true,
             show_progress_window: true,

@@ -2713,3 +2713,47 @@ itself, runner-only). Packaging only — no engine change, no licence work.
 - This run also finally exercises the BUG-045 popup-string fix —
   Phase 2 previously died before the popup handshake, so the popup
   check is unproven until this run.
+- **Verdict (run #12, 43770074030, head de396268 — 2026-11-16):
+  FULLY GREEN.** build-windows SUCCESS, smoke-test SUCCESS,
+  extension-capture-test SUCCESS; installer 15,863,208 bytes
+  (~15.9 MB). The capture job passing proves BUG-046 and BUG-045
+  together — Phase 2's strict popup check ("Connected to the Sonic
+  Manager desktop app") was reached and passed. (The report.txt text
+  itself was not read from this session — artifact download returns
+  401 — but the job's success verdict is the proof, since the
+  script fails the job on any phase failure.) Run #12's smoke
+  screenshot still shows the LIGHT theme — dark by default is
+  Round 43.
+
+## Round 43 — dark theme by default + header logo — 2026-11-16
+
+- User feedback on the run #11 smoke screenshot: it does not look
+  like his dark reference picture, the background is missing, and
+  the header shows no logo (only the tiny OS window icon). Cause:
+  the app opens in LIGHT theme by default and `background.css`
+  applies the backdrop only under `[data-theme="dark"]`; the header
+  is just the "Sonic Manager" text h1. He approved dark as the
+  default theme.
+- Change (this push): dark by default — `App.tsx` initial theme
+  state `'light'` → `'dark'` and `Settings::default` in `store.rs`
+  theme `"light"` → `"dark"` (fresh installs / fresh DBs start
+  dark; the stored setting still wins for existing users, and the
+  moon/sun toggle still switches to light). The
+  settings-defaults test now expects `"dark"`. Header logo:
+  `<img>` 32 px next to the title, importing
+  `./assets/logo.jpg` (the user's logo, already in the repo;
+  copied into the local tree for the build — binary, not pushed
+  via the connector). New `app/src/vite-env.d.ts` with
+  `/// <reference types="vite/client" />` — required because
+  `npm run build` runs `tsc -b` first and TypeScript rejects a
+  `.jpg` import without it. The progress window got no logo: its
+  header is the download filename, so a mark there would compete
+  with it; it applies the stored theme on mount, so it follows
+  the dark default automatically.
+- Verified on Linux: full engine suite **416/416 pass, 0 failed**;
+  `cargo check --tests` 0 warnings; `npm run build` passes and
+  emits both assets in dist/assets (background-*.jpg and
+  logo-*.jpg); App root carries no `bg-bg` class, so the backdrop
+  still shows through in dark mode. The run this push triggers is
+  the proof — its smoke screenshot should show the dark theme
+  with the background and the header logo.

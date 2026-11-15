@@ -40,6 +40,7 @@ import { SettingsDialog } from './components/SettingsDialog'
 import { SiteGrabberDialog } from './components/SiteGrabberDialog'
 import { UpdateDialog } from './components/UpdateDialog'
 import { VideoGrabberDialog } from './components/VideoGrabberDialog'
+import logoUrl from './assets/logo.jpg'
 
 /** S01 — main window. Header, toolbar, categories + queues sidebar,
  *  download table, status bar. The list is refreshed once a second
@@ -70,7 +71,7 @@ export default function App() {
   const [showScheduler, setShowScheduler] = useState(false)
   const [schedulerQueueId, setSchedulerQueueId] = useState<string | null>(null)
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
-  const [theme, setTheme] = useState<'light' | 'dark'>('light')
+  const [theme, setTheme] = useState<'light' | 'dark'>('dark')
   const [error, setError] = useState<string | null>(null)
   const [settings, setSettings] = useState<Settings | null>(null)
   /** Download quota (S12): live usage, shown in the status bar
@@ -338,7 +339,10 @@ export default function App() {
   return (
     <div className="flex h-full flex-col text-text">
       <header className="flex h-12 shrink-0 items-center justify-between border-b border-border bg-surface px-4">
-        <h1 className="text-lg font-bold">Sonic Manager</h1>
+        <div className="flex items-center gap-2">
+          <img src={logoUrl} alt="Sonic Manager logo" className="h-8 w-8 rounded-md object-cover" />
+          <h1 className="text-lg font-bold">Sonic Manager</h1>
+        </div>
         <div className="flex items-center gap-2">
           <span className="text-sm text-text-muted">
             {runningCount > 0 ? `${runningCount} downloading · ${formatSpeed(totalSpeed)}` : 'Idle'}

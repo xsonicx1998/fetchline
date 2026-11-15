@@ -1553,7 +1553,7 @@ async fn settings_defaults_and_round_trip() {
     let defaults = store.get_settings().unwrap();
     assert_eq!(defaults.max_connections, 8);
     assert_eq!(defaults.speed_limit_kbps, None);
-    assert_eq!(defaults.theme, "light");
+    assert_eq!(defaults.theme, "dark");
     assert_eq!(defaults.connection_timeout_secs, 30);
     assert_eq!(defaults.max_retries, 5);
     assert_eq!(defaults.default_action, "start_now");

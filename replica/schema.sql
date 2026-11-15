@@ -183,7 +183,7 @@ CREATE TABLE IF NOT EXISTS settings (
   max_connections INTEGER NOT NULL DEFAULT 8 CHECK (max_connections BETWEEN 1 AND 32),
   speed_limit_kbps INTEGER,           -- NULL = unlimited
   language TEXT NOT NULL DEFAULT 'en',
-  theme TEXT NOT NULL DEFAULT 'light' CHECK (theme IN ('light','dark')),
+  theme TEXT NOT NULL DEFAULT 'dark' CHECK (theme IN ('light','dark')),
   browser_integration INTEGER NOT NULL DEFAULT 1,
   browser_start_drained INTEGER NOT NULL DEFAULT 1, -- Milestone 2 (S13 finish):
     -- 1 = a drained browser link starts downloading at once;
