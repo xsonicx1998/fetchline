@@ -3059,3 +3059,60 @@ deleted buttons or functions; dark only.
   should show the stronger glow, the clearer waves, the 32 px
   icons, the gradient Add a link button and the glowing panels,
   with all 11 toolbar buttons still fitting at 1024 px.
+
+## Round 48 — all icons bright and glowing, not just Add URL and Options — 2026-11-16
+- The user looked at the run #21 screenshot and said the rest of
+  the icons look faded ("باقي الأيقونات باهته"): Add URL and the
+  Options gear glow strongly, while the other toolbar icons and
+  the sidebar icons read as dim next to them. Two causes, both
+  fixed here. First, seven of the nine plain toolbar buttons are
+  disabled in the empty state, and `disabled:opacity-45` washed
+  them to 45% — grey and washed-out by construction. Second, the
+  icon glow was only two modest layers (5 px / 14 px), far weaker
+  than the Options halo (18 / 36 / 60 px box-shadow plus a radial
+  gradient disc) and the Add URL button's three-layer glow.
+- **Stronger glow, everywhere:** `.icon-glow-{cyan,pink,purple,
+  white}` in `app/src/index.css` are now three layers at the
+  Options halo's strength (core 8 px at .85–.90, mid 20 px at
+  .50–.55, wide 36 px at .25–.30; hover brightens to 10 / 24 /
+  44 px). Every toolbar icon — Resume, Stop, Stop All, Delete,
+  Delete Completed, Scheduler, Start Queue, Stop Queue, Grabber —
+  uses the same treatment in its own colour, and the Options gear
+  gets stronger with it. The matching `icon-glow-*` values are
+  recorded in `replica/design/tokens.json` so the two stay in sync.
+- **Disabled buttons stay bright:** `ToolbarButton` disabled
+  opacity 45% → 75%. At 75% the icons still read as clearly
+  dimmer than enabled buttons (and hover gives nothing), while
+  no icon reads as grey or washed-out any more. The generic
+  `Button.tsx` and the table context-menu item keep 45% — only
+  the toolbar was flagged.
+- **Thicker, clearer strokes:** all 18 pack SVGs in
+  `app/src/assets/icons/` went from stroke-width 1.8 → 2.0
+  (verified: 18/18 carry 2.0, 0 remain at 1.8), so the line icons
+  read clearly at 32 px. The change is in the repo's icon copies,
+  not the user's pack.
+- **Sidebar icons glow too:** category folders, Unfinished,
+  Finished and queue rows use `icon-glow-purple`, grabber project
+  rows `icon-glow-cyan`, so the tree doesn't read dim next to the
+  toolbar. Colours are unchanged (the icons keep inheriting the
+  row's white text — the active purple row keeps a white icon).
+- **Sizes unchanged, fit holds:** toolbar icons stay 32 px,
+  sidebar icons 20 px, toolbar 92 px. Re-checked with real font
+  metrics (DejaVu Sans Bold as the upper bound, same script as
+  Round 47): toolbar content **949.4 px vs 1008 px available**,
+  sidebar row 258.1 px vs 280 px — all 11 buttons fit at 1024 px
+  with no scrollbar and "Delete Completed" stays on one line.
+- **Contrast (WCAG AA):** the changed pairs pass — disabled label
+  white at 75% on the toolbar surface 10.15, icon cyan 8.90,
+  pink 4.96, purple 3.12 (UI threshold 3.0). The only failures in
+  the full check are the two pre-existing `dark-accent` pairs
+  (3.38 / 3.12), the small-purple-text issue flagged in Round 47
+  — unchanged by this round, still awaiting a palette decision.
+- No engine changes, no new features, no renamed/deleted buttons
+  or functions. Dark only (light theme stays deleted). Palette,
+  background, borders, spacing and all Round 47 work untouched.
+- Verified on Linux: full engine suite **417/417 pass, 0 failed**;
+  `cargo check --tests` 0 warnings; `npm run build` passes. The
+  run this push triggers is the proof — its smoke screenshot
+  should show every toolbar and sidebar icon bright and glowing
+  at 1024 px, with all 11 toolbar buttons still fitting.

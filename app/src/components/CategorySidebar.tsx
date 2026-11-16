@@ -96,7 +96,10 @@ export function CategorySidebar({
    *  text — not the old soft tint. The count inside it is white
    *  at 80% so it stays readable on the purple. Round 47: the
    *  active row glows, and rows are 36 px with 20 px icons (was
-   *  32 px / 16 px) to match the reference's proportions. */
+   *  32 px / 16 px) to match the reference's proportions.
+   *  Round 48: the sidebar icons glow in their colours (purple
+   *  folders / Unfinished / Finished / queues, cyan grabber) so
+   *  the tree doesn't read dim next to the toolbar. */
   const rowClass = (active: boolean, key: string) =>
     `flex h-9 items-center gap-2 rounded-md px-2 text-left text-base ${
       active ? 'bg-accent font-semibold text-on-accent shadow-[0_0_12px_rgba(139,32,255,0.45)]' : 'text-text hover:bg-surface-2'
@@ -133,7 +136,7 @@ export function CategorySidebar({
         aria-current={allActive || undefined}
         className={rowClass(allActive, 'all')}
       >
-        <PackIcon name="category-folder" className="h-5 w-5" />
+        <PackIcon name="category-folder" className="h-5 w-5 icon-glow-purple" />
         <span className="flex-1 truncate">All downloads</span>
         <span className={countClass(allActive)}>{countFor(null)}</span>
       </button>
@@ -149,7 +152,7 @@ export function CategorySidebar({
             aria-current={selectedCategory === c.id || undefined}
             className={`${rowClass(selectedCategory === c.id, `cat:${c.id}`)} flex-1`}
           >
-            <PackIcon name="category-folder" className="h-5 w-5" />
+            <PackIcon name="category-folder" className="h-5 w-5 icon-glow-purple" />
             <span className="flex-1 truncate">{c.name}</span>
             <span className={countClass(selectedCategory === c.id, true)}>{countFor(c.id)}</span>
           </button>
@@ -182,7 +185,7 @@ export function CategorySidebar({
         aria-current={selectedFilter === 'unfinished' || undefined}
         className={rowClass(selectedFilter === 'unfinished', 'unfinished')}
       >
-        <PackIcon name="unfinished" className="h-5 w-5" />
+        <PackIcon name="unfinished" className="h-5 w-5 icon-glow-purple" />
         <span className="flex-1 truncate">Unfinished</span>
         <span className={countClass(selectedFilter === 'unfinished')}>{unfinishedCount}</span>
       </button>
@@ -192,7 +195,7 @@ export function CategorySidebar({
         aria-current={selectedFilter === 'finished' || undefined}
         className={rowClass(selectedFilter === 'finished', 'finished')}
       >
-        <PackIcon name="finished" className="h-5 w-5" />
+        <PackIcon name="finished" className="h-5 w-5 icon-glow-purple" />
         <span className="flex-1 truncate">Finished</span>
         <span className={countClass(selectedFilter === 'finished')}>{finishedCount}</span>
       </button>
@@ -210,7 +213,7 @@ export function CategorySidebar({
               title={`${p.name} — ${p.files_downloaded} downloaded, ${p.files_matched} matched`}
               className={`${rowClass(active, `grabber:${p.id}`)} flex-1`}
             >
-              <PackIcon name="grabber" className="h-5 w-5" />
+              <PackIcon name="grabber" className="h-5 w-5 icon-glow-cyan" />
               <span className="flex-1 truncate">{p.name}</span>
               <span className={countClass(active, true)}>
                 {p.files_downloaded} file{p.files_downloaded === 1 ? '' : 's'}
@@ -259,7 +262,7 @@ export function CategorySidebar({
             title={`${q.name} — double-click to open the scheduler`}
             className={`${rowClass(selectedQueue === q.id, `queue:${q.id}`)} flex-1`}
           >
-            <PackIcon name="queue" className="h-5 w-5" />
+            <PackIcon name="queue" className="h-5 w-5 icon-glow-purple" />
             <span className="flex-1 truncate">{q.name}</span>
             <span className={countClass(selectedQueue === q.id, true)}>
               {q.file_count} file{q.file_count === 1 ? '' : 's'}

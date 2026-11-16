@@ -18,10 +18,12 @@ import stopSvg from '../assets/icons/stop.svg?raw'
 import unfinishedSvg from '../assets/icons/unfinished.svg?raw'
 
 /** The user's asset pack (Round 45): 18 SVG line icons, 24×24,
- *  stroke 1.8, `currentColor` — so the wrapping element's text
- *  colour IS the icon colour. They are inlined (not <img>): as an
- *  image, `currentColor` would fall back to black and the pack's
- *  per-action colours (cyan resume, pink stop…) would be lost.
+ *  stroke 2.0 (was 1.8 — thickened Round 48 so the lines read
+ *  clearly at 32 px instead of looking faded), `currentColor` — so
+ *  the wrapping element's text colour IS the icon colour. They are
+ *  inlined (not <img>): as an image, `currentColor` would fall
+ *  back to black and the pack's per-action colours (cyan resume,
+ *  pink stop…) would be lost.
  *  The SVGs carry width/height 256 attributes; the `.pack-icon`
  *  rule in index.css sizes the inner <svg> to its wrapper. The
  *  strings are static local assets, so innerHTML is safe here. */

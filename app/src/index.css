@@ -69,19 +69,22 @@ body {
   height: 100%;
 }
 
-/* Neon icon glow (Round 47): the reference's toolbar icons glow
-   constantly — cyan for go/add, pink for stop/delete, purple for
-   the gear, soft white for plain icons. drop-shadow (not
-   box-shadow) follows the SVG strokes. The button carries `group`,
-   so hovering it brightens the glow. */
-.icon-glow-cyan { filter: drop-shadow(0 0 5px rgba(0, 200, 255, .65)) drop-shadow(0 0 14px rgba(0, 200, 255, .30)); }
-.icon-glow-pink { filter: drop-shadow(0 0 5px rgba(240, 45, 205, .60)) drop-shadow(0 0 14px rgba(240, 45, 205, .28)); }
-.icon-glow-purple { filter: drop-shadow(0 0 5px rgba(139, 32, 255, .70)) drop-shadow(0 0 14px rgba(139, 32, 255, .35)); }
-.icon-glow-white { filter: drop-shadow(0 0 6px rgba(255, 255, 255, .45)) drop-shadow(0 0 16px rgba(255, 255, 255, .20)); }
-.group:hover .icon-glow-cyan { filter: drop-shadow(0 0 8px rgba(0, 200, 255, .90)) drop-shadow(0 0 20px rgba(0, 200, 255, .45)); }
-.group:hover .icon-glow-pink { filter: drop-shadow(0 0 8px rgba(240, 45, 205, .85)) drop-shadow(0 0 20px rgba(240, 45, 205, .40)); }
-.group:hover .icon-glow-purple { filter: drop-shadow(0 0 8px rgba(139, 32, 255, .90)) drop-shadow(0 0 20px rgba(139, 32, 255, .50)); }
-.group:hover .icon-glow-white { filter: drop-shadow(0 0 8px rgba(255, 255, 255, .60)) drop-shadow(0 0 20px rgba(255, 255, 255, .30)); }
+/* Neon icon glow (Round 47, strengthened Round 48): the
+ *  reference's toolbar icons glow constantly — cyan for go/add,
+ *  pink for stop/delete, purple for the gear, soft white for plain
+ *  icons. drop-shadow (not box-shadow) follows the SVG strokes.
+ *  Round 48: three layers at the Options halo's strength, because
+ *  the two-layer version still read as faded next to the glowing
+ *  Add URL button and Options gear. The button carries `group`,
+ *  so hovering it brightens the glow further. */
+.icon-glow-cyan { filter: drop-shadow(0 0 8px rgba(0, 200, 255, .85)) drop-shadow(0 0 20px rgba(0, 200, 255, .50)) drop-shadow(0 0 36px rgba(0, 200, 255, .25)); }
+.icon-glow-pink { filter: drop-shadow(0 0 8px rgba(240, 45, 205, .85)) drop-shadow(0 0 20px rgba(240, 45, 205, .50)) drop-shadow(0 0 36px rgba(240, 45, 205, .25)); }
+.icon-glow-purple { filter: drop-shadow(0 0 8px rgba(139, 32, 255, .90)) drop-shadow(0 0 20px rgba(139, 32, 255, .55)) drop-shadow(0 0 36px rgba(139, 32, 255, .30)); }
+.icon-glow-white { filter: drop-shadow(0 0 8px rgba(255, 255, 255, .70)) drop-shadow(0 0 20px rgba(255, 255, 255, .35)) drop-shadow(0 0 36px rgba(255, 255, 255, .18)); }
+.group:hover .icon-glow-cyan { filter: drop-shadow(0 0 10px rgba(0, 200, 255, .95)) drop-shadow(0 0 24px rgba(0, 200, 255, .60)) drop-shadow(0 0 44px rgba(0, 200, 255, .30)); }
+.group:hover .icon-glow-pink { filter: drop-shadow(0 0 10px rgba(240, 45, 205, .95)) drop-shadow(0 0 24px rgba(240, 45, 205, .60)) drop-shadow(0 0 44px rgba(240, 45, 205, .30)); }
+.group:hover .icon-glow-purple { filter: drop-shadow(0 0 10px rgba(139, 32, 255, .95)) drop-shadow(0 0 24px rgba(139, 32, 255, .65)) drop-shadow(0 0 44px rgba(139, 32, 255, .35)); }
+.group:hover .icon-glow-white { filter: drop-shadow(0 0 10px rgba(255, 255, 255, .80)) drop-shadow(0 0 24px rgba(255, 255, 255, .45)) drop-shadow(0 0 44px rgba(255, 255, 255, .22)); }
 
 /* Visible keyboard focus everywhere (components.md). */
 :focus-visible {

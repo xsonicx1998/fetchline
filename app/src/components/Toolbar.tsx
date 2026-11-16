@@ -46,8 +46,13 @@ function ToolbarButton({
   icon: PackIconName
   label: string
   color: string
-  /** Neon glow matching the icon colour (Round 47) — the
-   *  reference's icons glow constantly, brighter on hover. */
+  /** Neon glow matching the icon colour (Round 47, strengthened
+   *  Round 48) — the reference's icons glow constantly, brighter
+   *  on hover. Disabled buttons stay at 75% opacity (was 45%):
+   *  at 45% the icons read as grey and washed-out next to the
+   *  glowing Add URL button and Options gear, which is what the
+   *  user flagged; at 75% they stay visibly dimmer than enabled
+   *  buttons while still reading as bright and neon. */
   glow: 'cyan' | 'pink' | 'white' | 'purple'
   disabled?: boolean
   onClick: () => void
@@ -60,7 +65,7 @@ function ToolbarButton({
       onClick={onClick}
       aria-label={ariaLabel ?? label}
       title={ariaLabel ?? label}
-      className="group flex min-w-fit flex-auto flex-col items-center justify-center gap-1 rounded-md px-1 py-1.5 hover:bg-surface-2 disabled:opacity-45"
+      className="group flex min-w-fit flex-auto flex-col items-center justify-center gap-1 rounded-md px-1 py-1.5 hover:bg-surface-2 disabled:opacity-75"
     >
       <PackIcon name={icon} className={`h-8 w-8 ${color} icon-glow-${glow}`} />
       <span className="max-w-full whitespace-nowrap text-xs font-medium leading-tight text-text">
