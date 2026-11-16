@@ -1,0 +1,137 @@
+# Real end-to-end GUI tests for Sonic Manager on Windows, via
+# tauri-driver + WebdriverIO (scripts/e2e/e2e-test.mjs).
+#
+# This is the check the earlier rounds never had: it drives the REAL
+# built app (WebView2 frontend + Rust engine + SQLite) on a real
+# Windows runner — clicks the actual buttons, watches a real download
+# move, pauses/resumes/deletes it, opens the sidebar and the Settings
+# dialog — and screenshots every step into test-screenshots/ (uploaded
+# as an artifact). It exists because the user's own-PC test of run #29
+# found 4 bugs (stale drained links auto-starting, no progress window
+# for them, Stop not working, Settings empty) that no engine test,
+# smoke test or capture test could see: those scenarios are what this
+# suite asserts, and a failure here is a product FINDING, not a
+# reason to weaken the test.
+#
+# Triggers on every push to main and manually (Actions > Run workflow).
+# No secrets are required.
+#
+# Notes:
+# - The app is built DEBUG with --no-bundle (fast, no installers):
+#   the suite drives app/src-tauri/target/debug/fetchline.exe. The
+#   native-messaging host is still built (release) because the suite
+#   seeds a stale pending link through the real host binary.
+# - tauri-driver is a WebDriver proxy: the test talks to it on
+#   127.0.0.1:4444 and it forwards to msedgedriver.exe, which must
+#   EXACTLY match the installed Edge build or the session hangs
+#   forever at startup. msedgedriver-tool downloads the matching
+#   driver; the Edge version is printed first for diagnosis.
+# - The suite CANNOT run on the Linux dev VM (no WebView2) — CI is
+#   its first real run, by design.
+# - The fixture download is a local slow HTTP server (the test starts
+#   it): a 20 MiB file at ~32 KiB/s per connection, so the download
+#   is still running through every pause/resume/delete step. A fast
+#   fixture would finish before Pause lands (the BUG-048 trap).
+
+name: E2E GUI tests (tauri-driver)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  e2e-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Set up Rust (stable, MSVC)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            app/src-tauri
+            app/host
+
+      - name: Install frontend dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Generate app icons
+        run: |
+          python -m pip install pillow
+          python scripts/generate-icons.py
+          npx --yes @tauri-apps/cli@2 icon app/src-tauri/icons/icon.png
+
+      # The E2E suite seeds a stale pending link through the REAL
+      # host binary (see scripts/e2e/e2e-test.mjs), so the host must
+      # be built exactly as in build-windows.yml.
+      - name: Build fetchline-host (external binary)
+        working-directory: app/host
+        shell: pwsh
+        run: |
+          cargo build --release -p fetchline-host
+          Get-ChildItem target\release\fetchline-host.exe
+
+      # Debug build, no installers: fast, and the suite drives the
+      # raw exe (app/src-tauri/target/debug/fetchline.exe).
+      - name: Build debug app (no bundle)
+        working-directory: app
+        run: npx --yes @tauri-apps/cli@2 build --debug --no-bundle
+
+      - name: Install tauri-driver
+        run: cargo install tauri-driver --locked
+
+      # msedgedriver must match the installed Edge build exactly, or
+      # the WebDriver session hangs forever at startup. The tool
+      # detects Edge and downloads the matching driver into the
+      # current directory; that directory goes on PATH so
+      # tauri-driver finds it.
+      - name: Install matching msedgedriver
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $edge = 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
+          if (Test-Path $edge) {
+            Write-Host "Edge version: $((Get-Item $edge).VersionInfo.FileVersion)"
+          } else {
+            Write-Host "Edge not found at $edge (msedgedriver-tool will report)"
+          }
+          cargo install --git https://github.com/chippers/msedgedriver-tool
+          New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\driver-bin" | Out-Null
+          Set-Location "$env:GITHUB_WORKSPACE\driver-bin"
+          & "$env:USERPROFILE\.cargo\bin\msedgedriver-tool.exe"
+          Get-ChildItem msedgedriver.exe
+          "$env:GITHUB_WORKSPACE\driver-bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          Write-Host "msedgedriver on PATH"
+
+      - name: Install E2E test dependencies
+        working-directory: scripts/e2e
+        run: npm ci
+
+      - name: Run E2E GUI tests
+        shell: pwsh
+        env:
+          E2E_APP_EXE: ${{ github.workspace }}\app\src-tauri\target\debug\fetchline.exe
+          E2E_HOST_EXE: ${{ github.workspace }}\app\host\target\release\fetchline-host.exe
+        run: node scripts/e2e/e2e-test.mjs
+
+      - name: Upload E2E evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fetchline-e2e-screenshots
+          path: test-screenshots/
+          if-no-files-found: warn
