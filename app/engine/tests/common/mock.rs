@@ -65,6 +65,13 @@ pub struct MockServer {
     /// body, so the client sees a dropped connection, not an HTTP
     /// error. HEAD still works.
     drop_get: Arc<AtomicBool>,
+    /// When set, GET requests send their headers and then nothing
+    /// for two minutes (Round 55): the body never comes, so the
+    /// client's stream waits forever. HEAD still works, so the
+    /// probe succeeds and the stall lands in the download itself —
+    /// the segment stall watchdog must fail the attempt instead
+    /// of hanging.
+    stall_get: Arc<AtomicBool>,
     /// When set, GET requests ignore Range and answer 200 with the
     /// whole file (a server that dropped resume support).
     ignore_range: Arc<AtomicBool>,
@@ -93,6 +100,7 @@ impl MockServer {
         let etag_version = Arc::new(AtomicU64::new(1));
         let fail_get = Arc::new(AtomicBool::new(false));
         let drop_get = Arc::new(AtomicBool::new(false));
+        let stall_get = Arc::new(AtomicBool::new(false));
         let ignore_range = Arc::new(AtomicBool::new(false));
         let gone = Arc::new(AtomicBool::new(false));
         let get_requests = Arc::new(AtomicUsize::new(0));
@@ -107,6 +115,7 @@ impl MockServer {
         let so = Arc::clone(&size_override);
         let fg = Arc::clone(&fail_get);
         let dg0 = Arc::clone(&drop_get);
+        let sg0 = Arc::clone(&stall_get);
         let ir = Arc::clone(&ignore_range);
         let g = Arc::clone(&gone);
         let gr = Arc::clone(&get_requests);
@@ -124,6 +133,7 @@ impl MockServer {
                         let oo = Arc::clone(&so);
                         let ff = Arc::clone(&fg);
                         let dg = Arc::clone(&dg0);
+                        let sg = Arc::clone(&sg0);
                         let ii = Arc::clone(&ir);
                         let gg = Arc::clone(&g);
                         let grr = Arc::clone(&gr);
@@ -139,6 +149,7 @@ impl MockServer {
                                 oo.load(Ordering::SeqCst),
                                 ff.load(Ordering::SeqCst),
                                 Arc::clone(&dg),
+                                Arc::clone(&sg),
                                 ii.load(Ordering::SeqCst),
                                 gg.load(Ordering::SeqCst),
                                 grr,
@@ -156,6 +167,7 @@ impl MockServer {
             etag_version,
             fail_get,
             drop_get,
+            stall_get,
             ignore_range,
             gone,
             get_requests,
@@ -214,6 +226,14 @@ impl MockServer {
         self.drop_get.store(drop, Ordering::SeqCst);
     }
 
+    /// Stall GET responses from now on (Round 55): a GET that
+    /// arrives while this is set gets its headers and then nothing
+    /// for two minutes — the body never comes. The download's
+    /// segment must fail on the stall watchdog instead of hanging.
+    pub fn set_stall_get(&self, stall: bool) {
+        self.stall_get.store(stall, Ordering::SeqCst);
+    }
+
     /// Make GET requests ignore Range and answer 200 with the whole file.
     pub fn set_ignore_range(&self, ignore: bool) {
         self.ignore_range.store(ignore, Ordering::SeqCst);
@@ -251,6 +271,7 @@ pub fn handle(
     size_override: usize,
     fail_get: bool,
     drop_get: Arc<AtomicBool>,
+    stall_get: Arc<AtomicBool>,
     ignore_range: bool,
     gone: bool,
     get_requests: Arc<AtomicUsize>,
@@ -268,9 +289,8 @@ pub fn handle(
             500 => "Internal Server Error",
             _ => "Error",
         };
-        let head = format!(
-            "HTTP/1.1 {code} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-        );
+        let head =
+            format!("HTTP/1.1 {code} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         let _ = stream.write_all(head.as_bytes());
         return;
     }
@@ -301,13 +321,15 @@ pub fn handle(
     let last_modified = format!("Wed, 01 Jan 2025 00:00:{lm_version:02} GMT");
     // HEAD refused: the probe must fall back to a ranged GET.
     if method == "HEAD" && config.head_405 {
-        let head = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let head =
+            "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         let _ = stream.write_all(head.as_bytes());
         return;
     }
     // GET failures (probe HEAD still works, so adds succeed).
     if method == "GET" && fail_get {
-        let head = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let head =
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         let _ = stream.write_all(head.as_bytes());
         return;
     }
@@ -345,14 +367,17 @@ pub fn handle(
         // hyper writes them lowercase, so match without case).
         // When ignore_range is set the server answers 200 with the
         // whole file instead — a server that dropped resume support.
-        let range = req.lines().find_map(|l| {
-            let (name, value) = l.split_once(':')?;
-            if name.trim().eq_ignore_ascii_case("range") {
-                Some(value.trim().to_string())
-            } else {
-                None
-            }
-        }).filter(|_| !ignore_range);
+        let range = req
+            .lines()
+            .find_map(|l| {
+                let (name, value) = l.split_once(':')?;
+                if name.trim().eq_ignore_ascii_case("range") {
+                    Some(value.trim().to_string())
+                } else {
+                    None
+                }
+            })
+            .filter(|_| !ignore_range);
         if let Some(range) = range {
             if let Some(spec) = range.strip_prefix("bytes=") {
                 let mut it = spec.split('-');
@@ -394,6 +419,13 @@ pub fn handle(
         return;
     }
     if method == "HEAD" || body.is_empty() {
+        return;
+    }
+    // Stalled GET (Round 55): headers arrived, the body never
+    // does — the client's stream waits, so the segment stall
+    // watchdog must fail the attempt instead of hanging forever.
+    if method == "GET" && stall_get.load(Ordering::SeqCst) {
+        thread::sleep(Duration::from_secs(120));
         return;
     }
     for chunk in body.chunks(config.chunk) {
@@ -442,7 +474,11 @@ impl PageServer {
                 }
             }
         });
-        Self { base, page_url, stop }
+        Self {
+            base,
+            page_url,
+            stop,
+        }
     }
 }
 
@@ -580,7 +616,13 @@ impl HttpProxyServer {
                 }
             }
         });
-        Self { url: format!("http://127.0.0.1:{port}"), port, hits, saw_auth, stop }
+        Self {
+            url: format!("http://127.0.0.1:{port}"),
+            port,
+            hits,
+            saw_auth,
+            stop,
+        }
     }
 }
 
@@ -591,12 +633,24 @@ pub fn basic_auth_value(user: &str, pass: &str) -> String {
     let data = format!("{user}:{pass}").into_bytes();
     let mut out = String::new();
     for chunk in data.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         out.push(ALPHABET[(n >> 18) as usize & 63] as char);
         out.push(ALPHABET[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { ALPHABET[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { ALPHABET[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     format!("Basic {out}")
 }
@@ -633,14 +687,18 @@ fn handle_http_proxy(
     saw_auth: Arc<AtomicBool>,
     expected_auth: Arc<Option<String>>,
 ) {
-    let Some(raw) = read_headers(&mut stream) else { return };
+    let Some(raw) = read_headers(&mut stream) else {
+        return;
+    };
     let req = String::from_utf8_lossy(&raw).into_owned();
     let first = req.lines().next().unwrap_or("").to_string();
     let mut parts = first.split_whitespace();
     let method = parts.next().unwrap_or("").to_string();
     let target = parts.next().unwrap_or("").to_string();
     if method.eq_ignore_ascii_case("CONNECT") {
-        let _ = stream.write_all(b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let _ = stream.write_all(
+            b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
         return;
     }
     if req.to_ascii_lowercase().contains("proxy-authorization:") {
@@ -668,7 +726,9 @@ fn handle_http_proxy(
     let mut upstream = match TcpStream::connect(authority) {
         Ok(s) => s,
         Err(_) => {
-            let _ = stream.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let _ = stream.write_all(
+                b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
             return;
         }
     };
@@ -738,7 +798,13 @@ impl Socks5Server {
                 }
             }
         });
-        Self { url: format!("socks5://127.0.0.1:{port}"), port, hits, saw_auth, stop }
+        Self {
+            url: format!("socks5://127.0.0.1:{port}"),
+            port,
+            hits,
+            saw_auth,
+            stop,
+        }
     }
 }
 
@@ -843,7 +909,11 @@ fn handle_socks5(
             if stream.read_exact(&mut port).is_err() {
                 return;
             }
-            format!("{}:{}", String::from_utf8_lossy(&name), u16::from_be_bytes(port))
+            format!(
+                "{}:{}",
+                String::from_utf8_lossy(&name),
+                u16::from_be_bytes(port)
+            )
         }
         _ => {
             let _ = stream.write_all(&[5, 8, 0, 1, 0, 0, 0, 0, 0, 0]);
@@ -918,7 +988,12 @@ impl GrabberSite {
                 }
             }
         });
-        Self { base, page_url, login_url, stop }
+        Self {
+            base,
+            page_url,
+            login_url,
+            stop,
+        }
     }
 }
 
@@ -944,24 +1019,32 @@ fn grabber_files() -> Vec<(&'static str, &'static str, usize)> {
 
 fn grabber_page(path: &str) -> Option<String> {
     let html = match path {
-        "/index.html" => "<html><body>\
+        "/index.html" => {
+            "<html><body>\
              <a href=\"page2.html\">p2</a><a href=\"/page3.html\">p3</a>\
              <a href=\"pic.png\">pic</a><a href=\"doc.pdf\">doc</a>\
              <a href=\"video.mp4\">video</a>\
              <a href=\"http://localhost:9/evil.png\">off-site</a>\
-             </body></html>",
-        "/page2.html" => "<html><body>\
+             </body></html>"
+        }
+        "/page2.html" => {
+            "<html><body>\
              <a href=\"deep.html\">deep</a>\
              <a href=\"song.mp3\">song</a><a href=\"pic.png\">pic again</a>\
-             </body></html>",
-        "/page3.html" => "<html><body>\
+             </body></html>"
+        }
+        "/page3.html" => {
+            "<html><body>\
              <a href=\"setup.exe\">exe</a><a href=\"notes.txt\">notes</a>\
              <a href=\"dead.pdf\">dead</a>\
-             </body></html>",
-        "/deep.html" => "<html><body>\
+             </body></html>"
+        }
+        "/deep.html" => {
+            "<html><body>\
              <a href=\"deeper.html\">deeper</a>\
              <a href=\"archive.zip\">archive</a>\
-             </body></html>",
+             </body></html>"
+        }
         "/deeper.html" => "<html><body><a href=\"secret.pdf\">secret</a></body></html>",
         // Milestone 4: a page whose only matched file is dead, so a
         // download run can finish with zero downloads (the
@@ -983,7 +1066,9 @@ fn handle_grabber(mut stream: TcpStream, _base: &str, robots: RobotsMode) {
     if path == "/robots.txt" {
         match robots {
             RobotsMode::None => {
-                let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                let _ = stream.write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
             }
             RobotsMode::BlockAll => {
                 let body = b"User-agent: *\nDisallow: /\n";
@@ -1000,7 +1085,9 @@ fn handle_grabber(mut stream: TcpStream, _base: &str, robots: RobotsMode) {
         return;
     }
     if path == "/login.html" {
-        let _ = stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let _ = stream.write_all(
+            b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
         return;
     }
     if let Some(html) = grabber_page(path) {
@@ -1028,7 +1115,8 @@ fn handle_grabber(mut stream: TcpStream, _base: &str, robots: RobotsMode) {
     }
     // /dead.pdf (and anything else): 404 for HEAD and GET alike, so
     // the probe fails and the grabber must give up after 2 attempts.
-    let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    let _ = stream
+        .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
 }
 
 pub fn tmpdir() -> std::path::PathBuf {
@@ -1076,4 +1164,3 @@ pub async fn wait_for_status(mgr: &DownloadManager, id: &str, want: &str, secs: 
     }
     false
 }
-

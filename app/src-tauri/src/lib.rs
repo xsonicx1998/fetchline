@@ -112,10 +112,25 @@ fn build_manager(app: &AppHandle) -> Result<Arc<DownloadManager>, String> {
         }
     };
     log_startup(log, "store opened");
+    // Round 55 (defects 1 + 4): rows left `downloading` by a
+    // previous run are zombies — no run exists for them in this
+    // process, so they could never finish and Resume would refuse
+    // them as "already running". Reset them to `paused` (bytes
+    // kept) so they can be resumed instead of sitting at 0%
+    // forever.
+    let store = Arc::new(store);
+    match store.reconcile_stuck_downloads() {
+        Ok(0) => {}
+        Ok(n) => log_startup(
+            log,
+            &format!("reconciled {n} download(s) stuck in 'downloading' to 'paused'"),
+        ),
+        Err(e) => log_startup(log, &format!("reconcile stuck downloads failed: {e}")),
+    }
     // 8 connections is the schema default; the stored settings are
     // applied in `setup` (apply_settings), which also wires the
     // saved proxy, speed limit and retry count.
-    Ok(DownloadManager::new(Arc::new(store), 8))
+    Ok(DownloadManager::new(store, 8))
 }
 
 #[tauri::command]
@@ -202,16 +217,19 @@ async fn open_folder(state: State<'_, AppState>, id: String) -> Result<(), Strin
 // Download progress window (S03, 2026-11-15). One separate OS window
 // per download, titled "<percent>% <filename>" — the IDM-style
 // dialog, with Fetchline's own look. The window is created here, in
-// Rust, not from the frontend: this app ships no Tauri capability
-// files, so the frontend `plugin:webview|create_webview_window`
-// command is denied by the ACL (BUG-044) while app commands like
-// these run ungated (local origin, no app ACL manifest — see
-// `tauri::webview::on_message` in vendored tauri 2.12.5). The
-// window's own title is likewise updated from Rust, in the
-// progress-event forwarder below — the frontend `set_title`
-// command is denied for the same reason. Closing the window never
-// cancels the download: the engine keeps running and the window
-// is only a view of it; double-clicking the row reopens it.
+// Rust, not from the frontend: the frontend has no capability grant
+// for the webview/window plugin commands, and creating it here also
+// sets the title and size at creation. The window's own title is
+// likewise updated from Rust, in the progress-event forwarder below.
+// (BUG-044, fixed in Round 40: the frontend event listener never
+// fired because this app shipped no Tauri capability files;
+// `capabilities/default.json` now grants
+// `core:event:allow-listen/unlisten` to the main window, so the
+// main window's listeners work — the progress window keeps polling
+// `get_progress_snapshot` by design, and the dead
+// `download-progress` listener stays removed.) Closing the window
+// never cancels the download: the engine keeps running and the
+// window is only a view of it; double-clicking the row reopens it.
 // ---------------------------------------------------------------------------
 
 /// Window label for one download's progress window.
@@ -242,6 +260,14 @@ fn open_progress_window(
     state: State<'_, AppState>,
     download_id: String,
 ) -> Result<(), String> {
+    // Round 55 (defect 2, diagnostics): the window opened with the
+    // right title but rendered blank white, and the code path looks
+    // correct — log the creation (and any failure) to the startup
+    // log, so the next live test can say whether the window was
+    // even created. Devtools are enabled on this window only, so
+    // its console errors can be captured in the test build.
+    let log = startup_log_path_from_app(&app);
+    let log = log.as_deref();
     let row = state
         .manager
         .get_download(&download_id)
@@ -251,10 +277,11 @@ fn open_progress_window(
     if let Some(window) = app.get_webview_window(&label) {
         // Already open — bring it forward instead of a second copy.
         window.set_focus().map_err(|e| e.to_string())?;
+        log_startup(log, &format!("progress window {label} already open — focused"));
         return Ok(());
     }
     let url = WebviewUrl::App(format!("index.html#progress={download_id}").into());
-    WebviewWindowBuilder::new(&app, &label, url)
+    match WebviewWindowBuilder::new(&app, &label, url)
         .title(progress_window_title(
             row.downloaded_bytes as u64,
             row.size_bytes.map(|s| s as u64),
@@ -264,9 +291,21 @@ fn open_progress_window(
         .min_inner_size(520.0, 320.0)
         .resizable(true)
         .center()
+        .devtools(true)
         .build()
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    {
+        Ok(_) => {
+            log_startup(
+                log,
+                &format!("progress window {label} created: index.html#progress={download_id}"),
+            );
+            Ok(())
+        }
+        Err(e) => {
+            log_startup(log, &format!("progress window {label} FAILED to create: {e}"));
+            Err(e.to_string())
+        }
+    }
 }
 
 /// Resize a progress window between its full view (speed graph,

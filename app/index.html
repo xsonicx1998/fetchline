@@ -6,7 +6,18 @@
     <title>Fetchline</title>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <!-- Static loading shell (Round 55, defect 2): first paint
+           before the JS bundle runs, so a window whose React never
+           mounts is never blank white — it shows this instead, until
+           React mounts and clears it, or main.tsx replaces it with
+           a plain-DOM error after 2 s. Inline styles only: no CSS
+           is loaded yet. -->
+      <div id="boot-shell" style="display:flex;min-height:100vh;flex-direction:column;align-items:center;justify-content:center;gap:8px;background:#0B0F24;color:#8b93b8;font-family:system-ui,sans-serif;">
+        <div style="font-size:18px;font-weight:600;color:#e6e9f5;">Sonic Manager</div>
+        <div style="font-size:13px;">Loading…</div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

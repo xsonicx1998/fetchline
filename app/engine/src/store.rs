@@ -2370,6 +2370,25 @@ impl Store {
         Ok(())
     }
 
+    /// Round 55 (defect 1/4): startup reconciliation. A row left
+    /// in `downloading` by a previous run — a crash, a killed
+    /// process, a wedged run — is a zombie: no run exists for it
+    /// in this process, so it could never finish, and Resume
+    /// would refuse it as "already running". Reset such rows to
+    /// `paused` with a message, keeping their bytes so the user
+    /// can resume. Called once at startup (the Tauri shell's
+    /// `build_manager`); returns the number of rows reset.
+    pub fn reconcile_stuck_downloads(&self) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE downloads SET status = 'paused', \
+             error_message = 'Interrupted — resume to continue', \
+             updated_at = datetime('now') WHERE status = 'downloading'",
+            [],
+        )?;
+        Ok(n)
+    }
+
     pub fn mark_complete(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(

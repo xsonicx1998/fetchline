@@ -327,16 +327,61 @@ impl ProxyConfig {
 /// settings, and the active proxy when one is configured. Every
 /// request the engine makes (probe, segment, page fetch) goes
 /// through this client, so a configured proxy really is used.
+///
+/// Round 55 — total timeout: a request that must finish on its own
+/// (probe, page fetch, update check) gets a 60 s total timeout, so
+/// a stalled server can no longer block the Add dialog for minutes
+/// (defect 3b: the 1 GB add hung silently). Segment body streams
+/// do NOT use this client — a slow download legitimately takes
+/// longer than 60 s, so segments use `build_segment_client`
+/// (connect timeout only) plus a per-chunk stall watchdog
+/// (`SEGMENT_STALL_TIMEOUT` in manager.rs) instead.
+pub const CLIENT_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
+
 pub fn build_client(proxy: Option<&ProxyConfig>, timeout_secs: u64) -> Result<Client> {
-    let mut builder = Client::builder()
+    build_client_with_total_timeout(proxy, timeout_secs, CLIENT_TOTAL_TIMEOUT)
+}
+
+/// `build_client` with an explicit total timeout: the production
+/// path passes `CLIENT_TOTAL_TIMEOUT`; tests pass a short timeout
+/// so a stalling server fails in seconds instead of a minute.
+pub fn build_client_with_total_timeout(
+    proxy: Option<&ProxyConfig>,
+    timeout_secs: u64,
+    total_timeout: Duration,
+) -> Result<Client> {
+    let builder = Client::builder()
+        .user_agent("Fetchline/0.1")
+        .connect_timeout(Duration::from_secs(timeout_secs.max(1)))
+        .timeout(total_timeout);
+    Ok(build_with_proxy(builder, proxy)?.build()?)
+}
+
+/// The client segment downloads use: connect timeout only, no
+/// total timeout — a segment's body legitimately streams for
+/// longer than any total budget on a slow connection (the test
+/// fixture serves 20 MiB at 32 KiB/s, ~10 minutes). Stalls are
+/// caught per chunk (`SEGMENT_STALL_TIMEOUT` in manager.rs) and
+/// by the run watchdog instead of a total budget.
+pub fn build_segment_client(proxy: Option<&ProxyConfig>, timeout_secs: u64) -> Result<Client> {
+    let builder = Client::builder()
         .user_agent("Fetchline/0.1")
         .connect_timeout(Duration::from_secs(timeout_secs.max(1)));
+    Ok(build_with_proxy(builder, proxy)?.build()?)
+}
+
+/// Apply the active proxy to a client builder (shared by the
+/// total-timeout client and the segment client).
+fn build_with_proxy(
+    mut builder: reqwest::ClientBuilder,
+    proxy: Option<&ProxyConfig>,
+) -> Result<reqwest::ClientBuilder> {
     if let Some(cfg) = proxy {
         if let Some(p) = cfg.to_reqwest_proxy()? {
             builder = builder.proxy(p);
         }
     }
-    Ok(builder.build()?)
+    Ok(builder)
 }
 
 /// Validate the fields the UI sends before anything is stored.

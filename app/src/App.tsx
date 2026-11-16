@@ -93,6 +93,17 @@ export default function App() {
   const [schedulerQueueId, setSchedulerQueueId] = useState<string | null>(null)
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
   const [error, setError] = useState<string | null>(null)
+  /** Round 55 (defect 4): action errors are STICKY — the 1 s poll
+   *  clears `error` on every successful refresh, so a Resume /
+   *  Pause failure used to flash for under a second and vanish,
+   *  looking like a silent no-op. `bannerError` is only cleared by
+   *  the dismiss button or by a later successful action, never by
+   *  the poll. The banner shows it first, else the transient poll
+   *  error. */
+  const [bannerError, setBannerError] = useState<string | null>(null)
+  function actionError(e: unknown) {
+    setBannerError(e instanceof Error ? e.message : String(e))
+  }
   const [settings, setSettings] = useState<Settings | null>(null)
   /** Download quota (S12): live usage, shown in the status bar
    *  when a quota is enabled; refreshed with the settings. */
@@ -312,9 +323,13 @@ export default function App() {
   async function run(action: () => Promise<void>) {
     try {
       await action()
+      // A successful action clears a previous sticky error (the
+      // thing it complained about worked now); the 1 s poll never
+      // touches it (see `bannerError` above).
+      setBannerError(null)
       await refreshAll()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      actionError(e)
     }
   }
 
@@ -358,7 +373,7 @@ export default function App() {
       }
       await refreshAll()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      actionError(e)
     }
   }
 
@@ -373,7 +388,7 @@ export default function App() {
       }
       await refreshAll()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      actionError(e)
     }
   }
 
@@ -388,7 +403,7 @@ export default function App() {
       setSelectedId(null)
       await refreshAll()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      actionError(e)
     }
   }
 
@@ -401,7 +416,7 @@ export default function App() {
     try {
       await openProgressWindow(id)
     } catch (e) {
-      if (!quiet) setError(e instanceof Error ? e.message : String(e))
+      if (!quiet) actionError(e)
     }
   }
 
@@ -462,14 +477,27 @@ export default function App() {
         hasComplete={hasComplete}
       />
 
-      {error ? (
-        <div role="alert" className="flex shrink-0 items-center justify-between gap-2 border-b border-border bg-danger-soft px-4 py-2 text-sm text-danger">
-          <span>{error}</span>
-          <button type="button" onClick={() => setError(null)} aria-label="Dismiss error" className="rounded-md p-1 hover:bg-surface-2">
-            <X className="h-4 w-4" aria-hidden="true" />
-          </button>
-        </div>
-      ) : null}
+      {(() => {
+        // Round 55: the sticky action error wins over the transient
+        // poll error; dismissing clears both.
+        const banner = bannerError ?? error
+        return banner ? (
+          <div role="alert" className="flex shrink-0 items-center justify-between gap-2 border-b border-border bg-danger-soft px-4 py-2 text-sm text-danger">
+            <span>{banner}</span>
+            <button
+              type="button"
+              onClick={() => {
+                setBannerError(null)
+                setError(null)
+              }}
+              aria-label="Dismiss error"
+              className="rounded-md p-1 hover:bg-surface-2"
+            >
+              <X className="h-4 w-4" aria-hidden="true" />
+            </button>
+          </div>
+        ) : null
+      })()}
 
       <div className="flex min-h-0 flex-1 gap-2 p-2">
         <CategorySidebar
@@ -510,7 +538,7 @@ export default function App() {
                 selectFilter('all')
                 void refreshAll()
               }}
-              onError={setError}
+              onError={(message) => setBannerError(message)}
             />
           ) : (
             <DownloadTable
@@ -568,7 +596,17 @@ export default function App() {
           setShowAdd(false)
           setPickedVideoUrl('')
         }}
-        onAdded={() => void refreshAll()}
+        onAdded={(id) => {
+          // Round 55 (defect 3a): the new row must be visible — a
+          // download auto-assigned to another category used to be
+          // hidden by the sidebar filter and look like a silent
+          // failure. Go to "All downloads" and select the row, so
+          // it is in view and the toolbar acts on it.
+          selectFilter('all')
+          setSelectedId(id)
+          void refreshAll()
+        }}
+        onLateError={(message) => setBannerError(message)}
       />
       <RefreshAddressDialog
         open={refreshTarget !== null}
@@ -586,7 +624,7 @@ export default function App() {
             const url = clipboardOffer.url
             void addDownload({ url })
               .then(() => void refreshAll())
-              .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
+              .catch((e: unknown) => actionError(e))
             setClipboardOffer(null)
           }}
           onDismiss={() => {

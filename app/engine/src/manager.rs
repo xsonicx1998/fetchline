@@ -13,10 +13,14 @@
 //! 3. Bytes are written to a `.part` file at exact offsets. The file is
 //!    pre-allocated when the size is known and renamed atomically on
 //!    completion, so a crash can never leave a "complete" partial file.
-//! 4. Segment progress is checkpointed to SQLite every ~2 s and on
-//!    pause, so resume continues from the last persisted byte. On resume
-//!    the server is re-probed; if the size or `ETag` changed, the
-//!    download restarts from zero instead of stitching a wrong file.
+//! 4. Segment progress is checkpointed to SQLite every ~1 s and on
+//!    pause, so resume continues from the last persisted byte, and
+//!    the main window's 1 s poll always sees live progress — a
+//!    download that finishes in ~1 s still reports at least once
+//!    (Round 55: the 2 s interval used to hide whole fast
+//!    downloads). On resume the server is re-probed; if the size
+//!    or `ETag` changed, the download restarts from zero instead
+//!    of stitching a wrong file.
 //! 5. Each segment retries with exponential backoff (1 s, 2 s, 4 s, 8 s,
 //!    16 s); after 5 attempts the download goes to `error` with the
 //!    server's message.
@@ -51,9 +55,9 @@ use crate::options::{
 use crate::native_host::{cookies_from_json, cookies_to_header};
 use crate::probe::{probe_with_cookies, probe_with_proxy, ProbeInfo};
 use crate::proxy::{
-    basic_proxy_auth_header, build_client, offered_proxy_auth_schemes, proxy_auth_order,
-    resolve_proxy_auth, ProxyAuthScheme, ProxyConfig, ProxyConfigInput, ProxyConfigRow,
-    PROXY_AUTH_BASIC,
+    basic_proxy_auth_header, build_client, build_segment_client, offered_proxy_auth_schemes,
+    proxy_auth_order, resolve_proxy_auth, ProxyAuthScheme, ProxyConfig, ProxyConfigInput,
+    ProxyConfigRow, PROXY_AUTH_BASIC,
 };
 use crate::queue::PendingAction;
 use crate::quota::{window_end_unix, window_expired, QuotaGate, QuotaStatus, QUOTA_MB_BYTES};
@@ -63,8 +67,24 @@ use crate::update::{
     fetch_manifest, result_from_manifest, weekly_check_due, UpdateCheckResult,
 };
 
-const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(2);
+const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(1);
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
+/// Round 55 (defect 1): a body stream that delivers no chunk for
+/// this long is stalled, not slow — the segment fails and retries
+/// instead of hanging forever. 30 s is far above any healthy
+/// trickle (chunks arrive continuously even at a few KB/s) and far
+/// below the minutes a wedged download used to sit at 0%.
+const SEGMENT_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// Round 55 (defect 1): backstop for a run hung anywhere the
+/// per-chunk watchdog cannot see (FTP / Kerberos / NTLM reads, a
+/// task stuck outside its stream loop) — a run that makes no
+/// progress at all for this long fails with a clear message
+/// instead of leaving status `downloading` forever. 180 s covers
+/// the slowest legitimate case (a 1 KB/s cap on a 64 KiB chunk
+/// takes ~64 s between writes, plus connect time) with margin,
+/// and the check is suppressed while a segment waits out its
+/// retry backoff, so backoffs never trip it.
+const RUN_STALL_TIMEOUT: Duration = Duration::from_secs(180);
 const MIN_SPLIT_REMAINING: u64 = 256 * 1024;
 const INITIAL_SEGMENTS: usize = 4;
 const MIN_SIZE_TO_SEGMENT: u64 = 1024 * 1024;
@@ -298,7 +318,17 @@ pub struct DownloadManager {
     /// The HTTP client. Rebuilt (behind the lock) whenever the proxy
     /// or the connection timeout changes, so a settings save takes
     /// effect without restarting the app — or any download.
+    /// Round 55: this is the short-request client (probe, page
+    /// fetch, update check) built by `build_client` — it carries
+    /// the 60 s total timeout. Segment body streams use
+    /// `segment_client` below instead: a slow download
+    /// legitimately outlives any total budget.
     client: RwLock<Arc<Client>>,
+    /// The segment client (Round 55): connect timeout only, no
+    /// total timeout. Stalls are caught per chunk
+    /// (`SEGMENT_STALL_TIMEOUT`) and by the run watchdog
+    /// (`RUN_STALL_TIMEOUT`) instead of a total budget.
+    segment_client: RwLock<Arc<Client>>,
     store: Arc<Store>,
     /// Connections per download (settings.max_connections, 1–16).
     /// Atomic so a settings save changes the segment count of the
@@ -389,8 +419,19 @@ impl DownloadManager {
                     .build()
                     .expect("reqwest client builds")
             });
+        // Round 55: the segment client has no total timeout (see
+        // `build_segment_client`); a fallback plain client is the
+        // same for both when the configured build fails.
+        let segment_client = build_segment_client(None, Settings::default().connection_timeout_secs as u64)
+            .unwrap_or_else(|_| {
+                Client::builder()
+                    .user_agent("Fetchline/0.1")
+                    .build()
+                    .expect("reqwest client builds")
+            });
         Arc::new(Self {
             client: RwLock::new(Arc::new(client)),
+            segment_client: RwLock::new(Arc::new(segment_client)),
             store,
             max_connections: AtomicUsize::new(max_connections.max(1)),
             max_retries: AtomicU32::new(Settings::default().max_retries as u32),
@@ -416,6 +457,13 @@ impl DownloadManager {
     /// The client current downloads and probes use.
     fn client(&self) -> Arc<Client> {
         Arc::clone(&self.client.read().unwrap())
+    }
+
+    /// The client segment body streams use (Round 55): connect
+    /// timeout only, no total timeout — a slow download must never
+    /// be cut off by a total budget.
+    fn segment_client(&self) -> Arc<Client> {
+        Arc::clone(&self.segment_client.read().unwrap())
     }
 
     /// Connections per download, as last applied from settings.
@@ -449,6 +497,9 @@ impl DownloadManager {
         let proxy = self.store.get_active_proxy()?;
         let client = build_client(proxy.as_ref(), settings.connection_timeout_secs as u64)?;
         *self.client.write().unwrap() = Arc::new(client);
+        let segment_client =
+            build_segment_client(proxy.as_ref(), settings.connection_timeout_secs as u64)?;
+        *self.segment_client.write().unwrap() = Arc::new(segment_client);
         Ok(())
     }
 
@@ -3790,7 +3841,25 @@ impl DownloadManager {
             .get_download(id)?
             .ok_or_else(|| EngineError::NotFound(id.to_string()))?;
         if row.status == "downloading" {
-            return Err(EngineError::InvalidState("This download is already running".to_string()));
+            // Round 55 (defect 4): a row can say `downloading`
+            // while no run exists for it — a wedged run, or a crash
+            // before startup reconciliation ran. That is a stale
+            // status, not a running download: reset it and resume
+            // instead of refusing with "already running" (which is
+            // what made Resume a silent no-op on wedged rows).
+            // A genuinely running download still refuses.
+            let running = self.running.lock().await;
+            if running.contains_key(id) {
+                return Err(EngineError::InvalidState(
+                    "This download is already running".to_string(),
+                ));
+            }
+            drop(running);
+            let _ = self.store.set_status(
+                id,
+                "paused",
+                Some("Interrupted — resuming from the bytes already downloaded"),
+            );
         }
         if row.status == "complete" {
             return Err(EngineError::InvalidState("This download is already complete".to_string()));
@@ -4145,7 +4214,10 @@ impl DownloadManager {
             drop(st);
             if done < total {
                 tasks.spawn(run_segment(
-                    self.client(),
+                    // Round 55: segments use the no-total-timeout
+                    // client — a slow download must never be cut
+                    // off by a total budget.
+                    self.segment_client(),
                     Arc::clone(&self.limiter),
                     Arc::clone(per_download_limiter),
                     quota_gate.clone(),
@@ -4162,11 +4234,19 @@ impl DownloadManager {
             }
         }
 
-        let mut last_checkpoint = Instant::now();
+        // Round 55: checkpoint on the first progress tick, not
+        // after a full interval — a download that finishes in ~1 s
+        // used to report nothing at all. Pre-age the clock so the
+        // first tick checkpoints at once.
+        let mut last_checkpoint = Instant::now() - CHECKPOINT_INTERVAL;
         let mut last_emit = Instant::now();
         let mut prev_total = total_done(&states);
         let mut prev_instant = Instant::now();
         let mut speed_bps: u64 = 0;
+        // Round 55 (run watchdog): when the run last made any
+        // progress. A run that makes no progress at all for
+        // RUN_STALL_TIMEOUT is wedged — see the tick branch below.
+        let mut last_byte_at = Instant::now();
 
         loop {
             if pause.load(Ordering::SeqCst) {
@@ -4226,6 +4306,9 @@ impl DownloadManager {
                 _ = tokio::time::sleep(PROGRESS_INTERVAL) => {
                     let now = Instant::now();
                     let total = total_done(&states);
+                    if total > prev_total {
+                        last_byte_at = now;
+                    }
                     let dt = now.duration_since(prev_instant).as_secs_f64();
                     if dt > 0.0 {
                         speed_bps = ((total.saturating_sub(prev_total)) as f64 / dt) as u64;
@@ -4239,6 +4322,30 @@ impl DownloadManager {
                     if last_emit.elapsed() >= PROGRESS_INTERVAL {
                         self.emit(id, &row, &states, speed_bps, "downloading", Some(retry)).await;
                         last_emit = Instant::now();
+                    }
+                    // Run watchdog (Round 55, defects 1 + 4): a run
+                    // that makes no progress at all for
+                    // RUN_STALL_TIMEOUT is wedged — a hung segment
+                    // task, or a stalled FTP / Kerberos / NTLM read
+                    // the per-chunk watchdog cannot see. Fail it
+                    // with a clear message instead of leaving
+                    // status `downloading` forever (which also made
+                    // Resume refuse it as "already running" and
+                    // Pause a no-op). Suppressed while a segment
+                    // waits out its retry backoff: a waiting segment
+                    // is not a wedged run.
+                    if !tasks.is_empty()
+                        && retry.info().is_none()
+                        && last_byte_at.elapsed() >= RUN_STALL_TIMEOUT
+                    {
+                        tasks.abort_all();
+                        while tasks.join_next().await.is_some() {}
+                        self.checkpoint(id, &states, 0).await;
+                        retry.clear_wait();
+                        return Err(EngineError::InvalidState(format!(
+                            "No data arrived for {} seconds — the connection appears to have stalled",
+                            RUN_STALL_TIMEOUT.as_secs()
+                        )));
                     }
                 }
             }
@@ -4322,10 +4429,20 @@ impl DownloadManager {
         if tasks.len() >= self.max_connections() {
             return;
         }
-        // Largest remaining segment.
+        // Largest remaining segment. Round 55: an open-ended
+        // segment (unknown size, `end` is `None`) is never split —
+        // its length reads as `u64::MAX`, so the midpoint lands
+        // near 2^63 and the split was only ever refused by the
+        // schema CHECKs (a latent corruption risk: a mid that
+        // wraps into a valid-looking range would have created a
+        // bogus segment). The DB CHECK stays as the safety net;
+        // the guard here is the application-level one.
         let mut best: Option<(usize, u64)> = None;
         for (i, s) in states.iter().enumerate() {
             let st = s.lock().unwrap();
+            if st.end.is_none() {
+                continue;
+            }
             let remaining = segment_len_of(&st).saturating_sub(st.done);
             if remaining > MIN_SPLIT_REMAINING && best.map(|(_, r)| remaining > r).unwrap_or(true) {
                 best = Some((i, remaining));
@@ -4336,7 +4453,15 @@ impl DownloadManager {
         let (mid, new_row) = {
             let mut st = state.lock().unwrap();
             let start = st.row.start_byte as u64;
+            // The split point must lie strictly inside the remaining
+            // range: after the bytes already downloaded, at or before
+            // the segment's end. Anything else is a bug, not a split
+            // — refuse it here instead of letting the store fail it.
+            let Some(end) = st.end else { return };
             let mid = start + st.done + remaining / 2;
+            if mid <= start + st.done || mid > end {
+                return;
+            }
             // Shorten the running segment first (DB trigger forbids overlap).
             match self.store.split_segment(&st.row, mid as i64) {
                 Ok(new_row) => {
@@ -4354,7 +4479,8 @@ impl DownloadManager {
             end: new_end,
         }));
         tasks.spawn(run_segment(
-            self.client(),
+            // Round 55: segments use the no-total-timeout client.
+            self.segment_client(),
             Arc::clone(&self.limiter),
             Arc::clone(per_download_limiter),
             quota_gate.clone(),
@@ -4583,6 +4709,17 @@ async fn run_segment(
     }
 }
 
+/// Round 55 (defect 1): the error a stalled request fails with.
+/// The segment retries with backoff, and after the attempts are
+/// exhausted the download goes to `error` with this message —
+/// instead of hanging forever at 0% with status `downloading`.
+fn stall_error() -> EngineError {
+    EngineError::InvalidState(format!(
+        "No data arrived for {} seconds — the connection appears to have stalled",
+        SEGMENT_STALL_TIMEOUT.as_secs()
+    ))
+}
+
 async fn download_segment_once(
     client: &Client,
     limiter: &RateLimiter,
@@ -4646,7 +4783,17 @@ async fn download_segment_once(
         }
         req
     };
-    let mut resp = build_req(None).send().await?;
+    // Round 55: the headers must arrive within the stall
+    // timeout — a connection that stalls after connect (TLS
+    // handshake, a server that never responds) used to block the
+    // segment — and the probe, through the same client — for
+    // minutes with no error at all.
+    let mut resp = match tokio::time::timeout(SEGMENT_STALL_TIMEOUT, build_req(None).send()).await
+    {
+        Ok(Ok(resp)) => resp,
+        Ok(Err(e)) => return Err(e.into()),
+        Err(_) => return Err(stall_error()),
+    };
     let mut status = resp.status();
     if status.as_u16() == 407 {
         // The proxy refused the request: walk the proxy-auth
@@ -4737,7 +4884,16 @@ async fn download_segment_once(
                                         .to_string(),
                                 ));
                             };
-                            resp = build_req(Some((user, pass))).send().await?;
+                            resp = match tokio::time::timeout(
+                                SEGMENT_STALL_TIMEOUT,
+                                build_req(Some((user, pass))).send(),
+                            )
+                            .await
+                            {
+                                Ok(Ok(resp)) => resp,
+                                Ok(Err(e)) => return Err(e.into()),
+                                Err(_) => return Err(stall_error()),
+                            };
                             status = resp.status();
                             retried_with_basic = true;
                             break;
@@ -4769,7 +4925,17 @@ async fn download_segment_once(
         return Err(EngineError::Status(status.as_u16(), format!("{status}")));
     }
     let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
+    // Round 55: each chunk must arrive within the stall timeout —
+    // a body stream that goes quiet forever used to hang the whole
+    // run at 0% with no error. A timeout fails this attempt; the
+    // retry backoff (run_segment) tries again, and after the
+    // attempts are exhausted the download goes to `error`.
+    loop {
+        let chunk = match tokio::time::timeout(SEGMENT_STALL_TIMEOUT, stream.next()).await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(_) => return Err(stall_error()),
+        };
         if pause.load(Ordering::SeqCst) {
             return Err(EngineError::InvalidState("paused".to_string()));
         }

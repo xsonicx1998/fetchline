@@ -112,6 +112,11 @@ function ScanStatus({ scan }: { scan: ScanResult | null }) {
 export function ProgressWindow({ downloadId }: { downloadId: string }) {
   const [download, setDownload] = useState<DownloadRow | null>(null)
   const [loaded, setLoaded] = useState(false)
+  /** Round 55 (defect 2, diagnostics): the last poll failure, if
+   *  any — a bridge failure is not "Download removed", and the
+   *  window should say so instead of showing the wrong empty
+   *  state. Cleared by the next successful poll. */
+  const [pollError, setPollError] = useState<string | null>(null)
   const [live, setLive] = useState<ProgressEvent | null>(null)
   const [samples, setSamples] = useState<SpeedSample[]>([])
   const [compact, setCompact] = useState(false)
@@ -204,14 +209,18 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
         const row = rows.find((d) => d.id === downloadId) ?? null
         setDownload(row)
         setLoaded(true)
+        setPollError(null)
         if (row) {
           const snap = await getProgressSnapshot(downloadId)
           if (stopped) return
           if (snap && snap.id === downloadId) setLive(snap)
         }
-      } catch {
-        // Outside the desktop app the bridge throws; the window
-        // simply shows its empty state.
+      } catch (e) {
+        // Round 55: outside the desktop app the bridge throws, and
+        // in the app a failing invoke means the window cannot reach
+        // the engine — either way the empty state below must say
+        // so instead of claiming the download was removed.
+        setPollError(e instanceof Error ? e.message : String(e))
         setLoaded(true)
       }
     }
@@ -434,9 +443,13 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
   if (!download) {
     return (
       <div className="flex h-full flex-col p-6 text-text">
-        <h1 className="text-lg font-semibold">Download removed</h1>
+        <h1 className="text-lg font-semibold">
+          {pollError ? 'Could not load this download' : 'Download removed'}
+        </h1>
         <p className="mt-2 text-sm text-text-muted">
-          This download is no longer in the list — it was removed from the main window.
+          {pollError
+            ? `The window could not reach the app: ${pollError} The download itself is not affected.`
+            : 'This download is no longer in the list — it was removed from the main window.'}
         </p>
         <div className="mt-6 flex justify-end">
           <Button variant="primary" onClick={() => window.close()}>

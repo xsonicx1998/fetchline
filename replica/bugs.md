@@ -4578,6 +4578,171 @@ xsonicx1998, then the run it triggers is watched to completion and
 its screenshots artifact is fetched and inspected. CI verdict:
 PENDING the browser upload (record here when it lands).
 
+**CI verdict — E2E run #1 FAILED before any test ran (run
+43892347330, head 0ccfb124, 2026-11-16 ~17:09 EET, 6 min):**
+step 9 "Build debug app (no bundle)" (`npx --yes
+@tauri-apps/cli@2 build --debug --no-bundle`) failed after 2m46s;
+steps 10–13 (tauri-driver, msedgedriver, E2E deps, Run E2E GUI
+tests) were SKIPPED — the suite never ran, so steps 01–11 have NO
+result and there are NO screenshots (the evidence artifact uploaded
+empty under if-no-files-found: warn). Job logs are unreadable from
+here (Actions API returns 403 "Must have admin rights" and is
+rate-limited for the shared egress IP) — the log was NOT read.
+- **Likely cause (harness/workflow setup, NOT a product bug):**
+  the e2e workflow's host step builds fetchline-host.exe but never
+  copies it into `app/src-tauri/binaries/` — build-windows.yml does
+  (`Copy-Item target\release\fetchline-host.exe
+  ..\src-tauri\binaries\fetchline-host-x86_64-pc-windows-msvc.exe`)
+  because tauri.conf.json declares `bundle.externalBin:
+  ["binaries/fetchline-host"]` and `tauri build` fails when that
+  file is missing. The debug build is otherwise identical to the
+  proven release build (same beforeBuildCommand, same shell code —
+  no debug-gated code except the windows_subsystem attr).
+  Confidence: high but NOT log-proven.
+- **Fix prepared (harness-only, local file only):** the copy lines
+  were added to the local `.github/workflows/e2e-windows.yml` host
+  step, mirroring build-windows.yml exactly. The file must be
+  re-uploaded via the GitHub web UI (xsonicx1998) — the connector
+  cannot write workflow files — then the workflow re-run is the
+  proof. No product code changed.
+- **CI verdict — E2E run #2 FAILED (run 43894346292, head 9df2324,
+  2026-11-16 ~17:23 EET, ~8 min):** the host-copy fix WORKED —
+  step 9 "Build debug app (no bundle)" now SUCCEEDED (3m13s) and
+  steps 1–12 all passed, but step 13 "Run E2E GUI tests" FAILED
+  after ~1 s (`node scripts/e2e/e2e-test.mjs` exited almost
+  instantly). The suite never ran: NO per-scenario results, NO
+  screenshots, NO artifact at all (`fetchline-e2e-screenshots`
+  missing — the upload step found nothing). Diagnosis: the script
+  died before `main()` ran — `main()` first does
+  `mkdirSync(test-screenshots)` + writes `results.json`, so a run
+  that reached `main()` would have left an artifact. Most likely
+  a load-time crash (module resolution in CI), but NOT proven:
+  both imports resolve fine locally (`webdriverio` remote is a
+  function; fixture-server imports fine; `node --check` passes;
+  lockfile contains node_modules/webdriverio). The job log is the
+  decisive evidence and it is UNREADABLE via the API (logs
+  endpoint: 403 "Must have admin rights to Repository" —
+  unauthenticated access cannot download job logs, confirmed
+  3×; plus the shared-egress rate limit keeps 403ing on rotating
+  IPs). Next step: read the run #2 job log via the signed-in
+  browser (xsonicx1998 — user explicitly authorised this), fix
+  the exact error, then run #3. Do NOT re-run blind. No product
+  code changed; no product finding can be drawn from run #2.
+- **Run #2 cause FOUND, log-proven (parent read the job log via
+  the signed-in browser, 2026-11-16 ~17:57 EET):** step 13 died
+  on `TypeError: Cannot read properties of undefined (reading
+  'bind')` at
+  `node_modules/webdriver/node_modules/undici/lib/interceptor/decompress.js:78`
+  — `zstd: createZstdDecompress.bind(null, { params: {
+  [constants.ZSTD_d_windowLogMax]: 23 } })` — on Node v20.20.2.
+  Requiring `webdriver` loads its bundled undici, and undici's
+  decompress interceptor needs Node's zlib zstd API
+  (`createZstdDecompress`), which does not exist in Node 20 (it
+  exists in Node 22+). The log also warned Node 20 is deprecated.
+  Harness-dependency failure, NOT an app failure, NOT a test
+  failure — the suite still never ran anywhere.
+- **Fix (harness-only):** `.github/workflows/e2e-windows.yml`
+  now sets up Node 22 (`node-version: "20"` → `"22"`, step
+  renamed "Set up Node.js 22", comment records why). No
+  `engines` field in scripts/e2e/package.json (nothing to
+  change there); webdriverio/undici versions unchanged.
+  Locally proven mechanism: the same undici line 78 exists in
+  the local tree; on this VM's Node v24.22.1
+  `createZstdDecompress` is a function and
+  `import('webdriverio')` succeeds (`remote` is a function).
+  No local Node 22 binary exists, so run #3 on CI is the
+  verification of the exact Node 22 setup — not claimed as
+  locally proven. `build-windows.yml` untouched (still Node 20,
+  out of scope). The workflow file must be re-uploaded via the
+  GitHub web UI (connector cannot write workflow files), then
+  run #3 is the proof. No product code changed.
+- **CI verdict — E2E run #3 FAILED (run 43902745102, head
+  d3ee9a0, 2026-11-16 ~18:08 EET, ~7m46s):** steps 1–12 ALL
+  passed, including "Set up Node.js 22" and "Build debug app"
+  (2m33s) — but step 13 "Run E2E GUI tests" FAILED,
+  16:07:15 → 16:08:26 UTC (1m11s). Progress vs run #2: the
+  Node 22 fix WORKED — the undici import crash is gone; the
+  script got past module loading and ran for 71 seconds instead
+  of dying in ~1 s. **An artifact EXISTS this time:**
+  `fetchline-e2e-screenshots`, created 16:08:27Z, **1,720
+  bytes** — far too small for 11 screenshots, so it most
+  likely holds only results.json/results.md (or a subset).
+  Contents NOT inspected yet: the artifact download and the
+  job log are parent browser jobs (API logs: 403 "Must have
+  admin rights"; artifact download via API: 401/403; this
+  coordinator has no browser route). Per-scenario results
+  (steps 01–11) are UNKNOWN until the artifact is read — NO
+  product finding can be drawn from run #3 yet. Next step:
+  parent reads the job log + fetches the artifact via the
+  signed-in browser (xsonicx1998), unzips, views the
+  screenshots, reads results.json/results.md; then the failing
+  step and any product findings are identified, the exact
+  error is fixed, and run #4 follows. Do NOT re-run blind.
+  No product code changed.
+
+## Round 55 — Fix round for the 4 run #29 live defects (frozen progress, blank progress window, Add silent failure / 1 GB hang, Resume no-op) — 2026-11-16
+
+  The run #29 VPS test (2026-11-16 evening) found the engine
+  downloading but the UI frozen at 0%, the progress window blank
+  white, Add URL sometimes failing silently, and a 1 GB add
+  hanging for minutes. The investigation pinned the causes in
+  code; this round fixes them. Approved by the user 22:34 EET
+  ("نفذ الخطة") on the plan presented 21:48 EET.
+
+  - **Frozen progress (defect 1):** the store row was checkpointed
+    only every 2 s while a 10 MB download finishes in ~1.3 s, so
+    the store never learned mid-download progress — and a stalled
+    body stream waited forever, because the reqwest client had
+    only a connect timeout. Fixed with a 1 s checkpoint interval
+    plus a checkpoint on the first progress tick; a 60 s total
+    timeout on the short-request client (`build_client`); a
+    separate no-total-timeout segment client; a 30 s per-chunk
+    stall watchdog on every segment request; and a 180 s run
+    watchdog (suppressed during retry backoff) that fails a
+    wedged run with a clear "stalled" message instead of leaving
+    status `downloading` forever.
+  - **Resume no-op (defect 4):** a wedged run left status
+    `downloading`, and Resume refused it as "already running"
+    while Pause set a flag no run ever read. Resume now recovers
+    a stale `downloading` row (no run in the `running` map) and a
+    genuinely running download still refuses. Resume/Pause
+    errors are now sticky in the banner: the 1 s poll used to
+    clear the error on every successful refresh, so a failure
+    flashed for under a second and looked like a silent no-op.
+  - **Add silent failure / 1 GB hang (defects 3a/3b):** the new
+    row was hidden by the sidebar category filter; Escape /
+    backdrop closed the dialog mid-submit so the probe error
+    landed on an unmounted component; and the probe had no total
+    timeout, so the 1 GB add stalled for minutes. Fixed: the
+    table switches to "All downloads" and selects the new row;
+    no close while busy; a 60 s submit timeout with a clear
+    error; the submit promise outlives the dialog and reports
+    late failures in the main banner.
+  - **Blank progress window (defect 2):** root cause UNPROVEN —
+    the code path is correct on inspection, so this round adds
+    diagnostics only, no blind render change: creation/failure
+    logging to startup.log, devtools on the progress window,
+    a static loading shell in `index.html` (first paint never
+    depends on JS), a plain-DOM fallback in `main.tsx` if React
+    fails to mount within 2 s, and a poll-failure state in the
+    progress window instead of the wrong "Download removed".
+    The next live test (VPS, devtools + startup.log) must prove
+    the cause before any render fix.
+  - **Latent hazards fixed along the way:** `try_split` never
+    splits an open-ended segment (its midpoint landed near 2^63
+    and only the schema CHECKs refused it) and validates the
+    midpoint before splitting; `Store::reconcile_stuck_downloads`
+    resets rows left `downloading` by a previous run to `paused`
+    (bytes kept), called once at startup.
+  - **Also fixed:** the stale BUG-044 comment in `lib.rs`
+    claiming no Tauri capability files ship —
+    `capabilities/default.json` exists since Round 40.
+  - **Tests:** 8 new engine tests (round55_tests.rs), suite
+    453/453 on Linux; `npm run build` passes. The Tauri shell
+    never compiles on this VM, so `lib.rs` is verified by reading
+    only — CI is its first compile. The progress window's root
+    cause and the whole round still need the VPS retest.
+
 ## Known limitations, not bugs (round-24 additions)
 
 - The Tauri shell never compiles or runs on this VM, so a

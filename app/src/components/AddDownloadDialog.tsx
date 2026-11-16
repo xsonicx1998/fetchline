@@ -13,7 +13,13 @@ interface AddDownloadDialogProps {
    *  video's link). Empty by default — the dialog clears on open. */
   initialUrl?: string
   onClose: () => void
-  onAdded: () => void
+  /** Round 55 (defect 3a): the created download's id, so the
+   *  caller can switch to "All downloads" and select the row. */
+  onAdded: (id: string) => void
+  /** Round 55 (defect 3a/3b): a submit that finishes after the
+   *  dialog timed out or closed reports its failure here, so it
+   *  lands in the main error banner instead of vanishing. */
+  onLateError: (message: string) => void
 }
 
 /** S02 — add a new download (components.md: Dialog, TextInput, Dropdown).
@@ -26,6 +32,7 @@ export function AddDownloadDialog({
   initialUrl = '',
   onClose,
   onAdded,
+  onLateError,
 }: AddDownloadDialogProps) {
   const [url, setUrl] = useState('')
   const [filename, setFilename] = useState('')
@@ -36,6 +43,12 @@ export function AddDownloadDialog({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const urlRef = useRef<HTMLInputElement>(null)
+  /** Round 55: a submit that already succeeded (any attempt) —
+   *  a stale attempt's later failure is noise then, not an error
+   *  to report. And the sequence of submits, so a retry supersedes
+   *  the attempt before it. */
+  const anySucceeded = useRef(false)
+  const submitSeq = useRef(0)
 
   useEffect(() => {
     if (open) {
@@ -53,11 +66,14 @@ export function AddDownloadDialog({
   useEffect(() => {
     if (!open) return
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      // Round 55 (defect 3a): Escape must not close the dialog
+      // while a submit is in flight — the probe error would land
+      // on an unmounted component and vanish.
+      if (e.key === 'Escape' && !busy) onClose()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [open, onClose])
+  }, [open, onClose, busy])
 
   if (!open) return null
 
@@ -70,7 +86,8 @@ export function AddDownloadDialog({
     }
     setBusy(true)
     setError(null)
-    try {
+    const runId = ++submitSeq.current
+    const work: Promise<string> = (async () => {
       const [id] = await addDownload({
         url: url.trim(),
         filename: filename.trim() || null,
@@ -88,12 +105,65 @@ export function AddDownloadDialog({
       if (startNow) {
         await startDownload(id)
       }
-      onAdded()
+      return id
+    })()
+    // Round 55 (defect 3a/3b): the submit promise outlives the
+    // dialog — a late outcome (after a timeout, or after the dialog
+    // was closed) still reaches the main window: a late success adds
+    // the row, a late failure shows in the main error banner instead
+    // of dying on an unmounted component. `consumed` marks an
+    // outcome this submit already handled itself, so it is never
+    // reported twice; a failure after some submit already succeeded
+    // is not reported — the download exists, the stale attempt is
+    // noise.
+    let consumed = false
+    void work.then(
+      (id) => {
+        if (!consumed) onAdded(id)
+      },
+      (e: unknown) => {
+        if (!consumed && !anySucceeded.current) {
+          onLateError(e instanceof Error ? e.message : String(e))
+        }
+      },
+    )
+    // Round 55 (defect 3b): the submit must not hang silently —
+    // the probe used to stall for minutes with no error. 60 s
+    // matches the engine's total timeout on the probe client.
+    // On timeout the dialog stays open with the error and the user
+    // can retry or close; the first attempt keeps running and its
+    // late outcome is reported by the handler above.
+    let timedOut = false
+    const timeout = new Promise<never>((_, reject) => {
+      window.setTimeout(() => {
+        timedOut = true
+        reject(
+          new Error(
+            'The server took too long to respond (over 60 seconds) — check the link and try again',
+          ),
+        )
+      }, 60_000)
+    })
+    try {
+      const id = await Promise.race([work, timeout])
+      // Superseded by a retry: leave the outcome unclaimed, so the
+      // detached handler above still reports this attempt's late
+      // success (its row exists and should be shown).
+      if (submitSeq.current !== runId) return
+      consumed = true
+      anySucceeded.current = true
+      setBusy(false)
+      onAdded(id)
       onClose()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
+      // A work failure (not a timeout) is already claimed by the
+      // detached handler above — mark it consumed so it is not
+      // reported twice. A timeout leaves it unclaimed: the attempt
+      // is still running and its late outcome will be reported.
+      if (!timedOut) consumed = true
+      if (submitSeq.current !== runId) return
       setBusy(false)
+      setError(e instanceof Error ? e.message : String(e))
     }
   }
 
@@ -104,7 +174,9 @@ export function AddDownloadDialog({
       aria-labelledby="add-download-title"
       className="fixed inset-0 z-10 flex items-center justify-center bg-black/50 p-4"
       onClick={(e) => {
-        if (e.target === e.currentTarget) onClose()
+        // Round 55 (defect 3a): a backdrop click must not close the
+        // dialog while a submit is in flight.
+        if (e.target === e.currentTarget && !busy) onClose()
       }}
     >
       <div className="w-full max-w-lg rounded-lg border border-border bg-surface-raised p-6 shadow-pop">
@@ -115,8 +187,9 @@ export function AddDownloadDialog({
           <button
             type="button"
             onClick={onClose}
+            disabled={busy}
             aria-label="Close"
-            className="rounded-md p-1 text-text-muted hover:bg-surface-2"
+            className="rounded-md p-1 text-text-muted hover:bg-surface-2 disabled:opacity-45"
           >
             <X className="h-5 w-5" aria-hidden="true" />
           </button>
@@ -213,7 +286,7 @@ export function AddDownloadDialog({
         </div>
 
         <div className="mt-6 flex justify-end gap-2">
-          <Button variant="ghost" onClick={onClose}>
+          <Button variant="ghost" onClick={onClose} disabled={busy}>
             Cancel
           </Button>
           <Button
