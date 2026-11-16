@@ -181,6 +181,34 @@ pub struct DrainSummary {
     pub start_failed: Vec<(String, String)>,
 }
 
+/// Outcome of `refresh_download_address` (Round 51): either the
+/// row now points at the new address and the download was started
+/// again, or the new address serves a different file and nothing
+/// was changed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum RefreshAddressResult {
+    /// The new address was verified as the same file (or the user
+    /// confirmed a different file): the row points at it and the
+    /// download is running again. `kept_bytes` is the progress
+    /// carried over — 0 when a confirmed different file restarted
+    /// from zero.
+    Switched {
+        kept_bytes: i64,
+        size_bytes: Option<i64>,
+    },
+    /// The new address serves a different file: nothing was
+    /// changed — the old address, the downloaded bytes and the
+    /// segments are all still there. The dialog shows the new
+    /// file's facts and only switches on an explicit confirm
+    /// (which restarts from zero).
+    Mismatch {
+        size_bytes: Option<i64>,
+        etag: Option<String>,
+        filename: Option<String>,
+    },
+}
+
 /// Mutable per-segment state shared between its task and the supervisor.
 struct SegState {
     row: SegmentRow,
@@ -3731,6 +3759,144 @@ impl DownloadManager {
             self.store.create_segments(id, &ranges)?;
         }
         self.start_download(id).await
+    }
+
+    /// Refresh the address of a paused or failed download (Round
+    /// 51): an expired link can be replaced without losing
+    /// progress. The new URL is re-probed FIRST through the same
+    /// probe path `add_download` uses (the saved site login for
+    /// the new host, the active proxy, the download's browser
+    /// cookies when they belong to the same host):
+    /// - the probe fails → error, and the old URL and all progress
+    ///   are kept untouched;
+    /// - the probe shows the SAME file (size and ETag — the same
+    ///   rule `resume_download` uses) → the row is pointed at the
+    ///   new address and the download starts again from the bytes
+    ///   already downloaded;
+    /// - the probe shows a DIFFERENT file → `Mismatch` is returned
+    ///   and nothing is changed; only an explicit confirm
+    ///   (`force = true`) switches, and then the download restarts
+    ///   from zero — never stitching old bytes onto new content.
+    /// Only a paused or failed download can be refreshed; a running
+    /// or finished one is refused. The quota gate is checked before
+    /// anything is switched, so a refresh never leaves a switched
+    /// row that cannot start.
+    pub async fn refresh_download_address(
+        self: &Arc<Self>,
+        id: &str,
+        new_url: &str,
+        force: bool,
+    ) -> Result<RefreshAddressResult> {
+        let row = self
+            .store
+            .get_download(id)?
+            .ok_or_else(|| EngineError::NotFound(id.to_string()))?;
+        if row.status != "paused" && row.status != "error" {
+            return Err(EngineError::InvalidState(format!(
+                "Only a paused or failed download can get a new address (this one is {})",
+                row.status
+            )));
+        }
+        let new_url = new_url.trim();
+        if new_url.is_empty() {
+            return Err(EngineError::InvalidUrl("Enter a new link".to_string()));
+        }
+        // BUG-011: an excluded site is refused before any network
+        // request, like `add_download`.
+        if let Some(host) = url_host(new_url) {
+            let settings = self.store.get_settings().unwrap_or_default();
+            if crate::store::site_is_excluded(&host, &settings.excluded_sites) {
+                return Err(EngineError::InvalidState(format!(
+                    "This site is excluded in Settings (excluded sites): {host}"
+                )));
+            }
+        }
+        // The run task removes itself from `running` just after it
+        // records the pause; a refresh landing in that gap would
+        // switch the URL and then fail to start — wait it out
+        // (bounded) instead of erroring on a race the user did not
+        // cause.
+        for _ in 0..20 {
+            if !self.running.lock().await.contains_key(id) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if self.running.lock().await.contains_key(id) {
+            return Err(EngineError::InvalidState(
+                "This download is still stopping — try again in a moment".to_string(),
+            ));
+        }
+        // The quota gate first: a refresh that switches the row and
+        // then cannot start would strand the new address on a paused
+        // download — refuse up front instead.
+        let now = now_unix();
+        let _ = self.maybe_rollover_quota_at(now);
+        if self.quota_reached_at(now)? {
+            let status = self.get_quota_status_at(now)?;
+            let resume = status
+                .window_end_unix
+                .map(unix_to_iso)
+                .unwrap_or_else(|| "when the quota window ends".to_string());
+            return Err(EngineError::InvalidState(format!(
+                "The download quota is reached ({} MB every {} hours) — downloads resume at {resume}",
+                status.limit_mb.unwrap_or(0),
+                status.window_hours.unwrap_or(0),
+            )));
+        }
+        // Browser cookies (S13 finish): a paused cookie download
+        // carries its session to the new address — but only when
+        // the new address is on the SAME host; another host must
+        // never receive this site's cookies.
+        let cookies = self.cookies.lock().unwrap().get(id).cloned();
+        let same_host = url_host(new_url) == url_host(&row.url);
+        let cookies = if same_host { cookies } else { None };
+        let info = self
+            .probe_url_with_cookies(new_url, cookies.as_deref())
+            .await?;
+        let changed = info.size.map(|s| s as i64) != row.size_bytes
+            || (info.etag.is_some() && row.etag.is_some() && info.etag != row.etag);
+        if changed && !force {
+            return Ok(RefreshAddressResult::Mismatch {
+                size_bytes: info.size.map(|s| s as i64),
+                etag: info.etag,
+                filename: info
+                    .filename
+                    .or_else(|| filename_from_url(&info.final_url)),
+            });
+        }
+        if changed {
+            // Confirmed different file: never stitch old bytes onto
+            // new content — the same restart `resume_download`
+            // does when the remote file changes: drop the partial
+            // file and the old segments, reset the row, and lay out
+            // fresh segments for the new file.
+            let part = part_path(&row.save_path);
+            let _ = std::fs::remove_file(&part);
+            self.store.delete_segments(id)?;
+            self.store.reset_download(
+                id,
+                info.size.map(|s| s as i64),
+                info.etag.as_deref(),
+                info.last_modified.as_deref(),
+            )?;
+            let ranges = initial_ranges(&info, self.max_connections());
+            self.store.create_segments(id, &ranges)?;
+        }
+        self.store.update_download_address(
+            id,
+            new_url,
+            Some(&info.final_url),
+            info.size.map(|s| s as i64),
+            info.etag.as_deref(),
+            info.last_modified.as_deref(),
+            info.accept_ranges,
+        )?;
+        self.start_download(id).await?;
+        Ok(RefreshAddressResult::Switched {
+            kept_bytes: if changed { 0 } else { row.downloaded_bytes },
+            size_bytes: info.size.map(|s| s as i64),
+        })
     }
 
     /// Stop a download and mark it deleted; the partial file is removed.

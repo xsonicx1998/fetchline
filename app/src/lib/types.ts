@@ -22,6 +22,11 @@ export interface DownloadRow {
   status: DownloadStatus
   speed_bps: number
   eta_seconds: number | null
+  /** ETag validator from the probe, when the server sent one —
+   *  used on resume (and on a refresh) to detect a changed file. */
+  etag: string | null
+  /** Last-Modified validator from the probe, when present. */
+  last_modified: string | null
   error_message: string | null
   created_at: string
   completed_at: string | null
@@ -115,6 +120,17 @@ export interface ProbeInfo {
   filename: string | null
   final_url: string
 }
+
+/** Round 51 — refresh download address: the engine's answer to a
+ *  new link for a paused/failed download. `switched` means the row
+ *  now points at the new link and the download is running again
+ *  (`kept_bytes` is the progress carried over — 0 when a confirmed
+ *  different file restarted from zero). `mismatch` means the new
+ *  link serves a different file and NOTHING was changed — the dialog
+ *  shows the new file's facts and only switches on confirm. */
+export type RefreshAddressResult =
+  | { outcome: 'switched'; kept_bytes: number; size_bytes: number | null }
+  | { outcome: 'mismatch'; size_bytes: number | null; etag: string | null; filename: string | null }
 
 /** Mirrors engine QueueRow. `type` is always "queue" for now; the
  *  scheduler fields are UTC ISO strings or null when unset. */

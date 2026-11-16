@@ -91,6 +91,7 @@ stdin/stdout). One command per flow:
 | --- | --- | --- | --- | --- |
 | `add_download(url, filename?, folder?, category?)` | Probe URL (HEAD), create download + segments | URL | download id + S02 prefill | F01, F02 |
 | `start_download(id)` / `pause_download(id)` / `resume_download(id)` / `cancel_download(id)` | Engine control | id | status | F01, F02, F03 |
+| `refresh_download_address(id, url, force)` | Round 51: re-probe a new link for a paused/failed download; same file → switch URL and resume from downloaded bytes, different file → mismatch (switch only on confirm, restarts from zero), probe failure → error, old URL kept | id + new URL + confirm flag | Switched (kept bytes) or Mismatch (new size/ETag) | F01 |
 | `delete_download(id, delete_file?)` | Remove row (+ file) | id | ok | S01 |
 | `list_downloads(category?, queue?, status?)` | Main table | filters | rows + totals | S01 |
 | `create_queue(name)` / `update_queue(id, schedule)` / `start_queue(id)` | Queue + scheduler | queue fields | queue | F04 |

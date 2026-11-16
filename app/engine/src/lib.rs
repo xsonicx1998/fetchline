@@ -49,8 +49,8 @@ pub use kerberos::{
 pub use limiter::RateLimiter;
 pub use links::{classify_kind, extract_links, filename_from_link_url, LinkKind, PageLink};
 pub use manager::{
-    BatchResult, DownloadManager, DrainSummary, InvalidLine, ProgressEvent, RetryInfo,
-    SegmentProgress, SyncFileResult, SyncResult,
+    BatchResult, DownloadManager, DrainSummary, InvalidLine, ProgressEvent, RefreshAddressResult,
+    RetryInfo, SegmentProgress, SyncFileResult, SyncResult,
 };
 pub use native_host::{HostMessage, HostReply};
 pub use ntlm::{ntlm_head, ntlm_request, NtlmBodyReader};

@@ -2511,6 +2511,37 @@ impl Store {
         Ok(())
     }
 
+    /// Point a download at a new address (Round 51, refresh
+    /// download address): the URL and what the new probe learned
+    /// about the file, without touching the downloaded bytes, the
+    /// segments or the status. The caller decides whether the
+    /// bytes stay valid (same file) or must be dropped first (a
+    /// changed file, via `reset_download`). The old error is
+    /// cleared — the new address is a fresh start, not a
+    /// continuation of the failure.
+    pub fn update_download_address(
+        &self,
+        id: &str,
+        url: &str,
+        final_url: Option<&str>,
+        size: Option<i64>,
+        etag: Option<&str>,
+        last_modified: Option<&str>,
+        accept_ranges: bool,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE downloads SET url = ?1, final_url = ?2, size_bytes = ?3, \
+             etag = ?4, last_modified = ?5, accept_ranges = ?6, error_message = NULL, \
+             updated_at = datetime('now') WHERE id = ?7",
+            params![url, final_url, size, etag, last_modified, accept_ranges as i64, id],
+        )?;
+        if changed == 0 {
+            return Err(EngineError::NotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
     /// Record a finished sync run on its queue: when it ran and how
     /// many files landed in each outcome. The UI reads these back
     /// through `list_queues` / `get_queue` as the queue's

@@ -19,6 +19,7 @@ import type {
   QueueRow,
   QueueUpdate,
   QuotaStatus,
+  RefreshAddressResult,
   ScanResult,
   Settings,
   SiteLoginInput,
@@ -73,6 +74,20 @@ export async function pauseDownload(id: string): Promise<void> {
 
 export async function resumeDownload(id: string): Promise<void> {
   return invoke('resume_download', { id })
+}
+
+/** Round 51 — refresh download address: point a paused/failed
+ *  download at a new link. The engine re-probes the link first:
+ *  same file → the row switches and resumes from the downloaded
+ *  bytes; different file → a mismatch result and nothing changes
+ *  (pass force=true only after the user confirms, which restarts
+ *  from zero); probe failure → an error, old link kept. */
+export async function refreshDownloadAddress(
+  id: string,
+  url: string,
+  force: boolean,
+): Promise<RefreshAddressResult> {
+  return invoke<RefreshAddressResult>('refresh_download_address', { id, url, force })
 }
 
 export async function cancelDownload(id: string): Promise<void> {

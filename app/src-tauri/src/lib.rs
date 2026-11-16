@@ -15,8 +15,8 @@ use std::time::Duration;
 use fetchline_engine::{
     BatchResult, CategoryRow, DetectedVideo, DownloadManager, DownloadRow, DrainSummary,
     GrabberProjectRow, PageLink, PendingAction, ProbeInfo, ProxyConfigInput, ProxyConfigRow,
-    QueueRow, QuotaStatus, ScanResult, Settings, SiteLoginInput, SiteLoginRow, SoundSetting,
-    SoundSettingInput, Store, SyncResult, UpdateCheckResult,
+    QueueRow, QuotaStatus, RefreshAddressResult, ScanResult, Settings, SiteLoginInput,
+    SiteLoginRow, SoundSetting, SoundSettingInput, Store, SyncResult, UpdateCheckResult,
 };
 use tauri::{AppHandle, Emitter, LogicalSize, Manager, Size, State, WebviewUrl, WebviewWindowBuilder};
 
@@ -146,6 +146,25 @@ async fn pause_download(state: State<'_, AppState>, id: String) -> Result<(), St
 #[tauri::command]
 async fn resume_download(state: State<'_, AppState>, id: String) -> Result<(), String> {
     state.manager.resume_download(&id).await.map_err(|e| e.to_string())
+}
+
+/// Refresh the address of a paused or failed download (Round 51):
+/// the engine re-probes the new link first and only switches when
+/// it serves the same file — or when the user confirms a different
+/// file, in which case the download restarts from zero. A probe
+/// failure is an error and keeps the old address and progress.
+#[tauri::command]
+async fn refresh_download_address(
+    state: State<'_, AppState>,
+    id: String,
+    url: String,
+    force: bool,
+) -> Result<RefreshAddressResult, String> {
+    state
+        .manager
+        .refresh_download_address(&id, &url, force)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -965,6 +984,7 @@ pub fn run() {
             start_download,
             pause_download,
             resume_download,
+            refresh_download_address,
             cancel_download,
             retry_now,
             open_folder,

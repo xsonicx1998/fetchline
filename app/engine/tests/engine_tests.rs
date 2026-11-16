@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use mock::*;
 
-use fetchline_engine::{probe, DownloadManager, Store};
+use fetchline_engine::{probe, DownloadManager, RefreshAddressResult, Store};
 
 #[tokio::test]
 async fn probe_returns_size_ranges_and_etag() {
@@ -148,6 +148,186 @@ async fn resume_restarts_when_remote_file_changes() {
     let row = mgr.get_download(&id).unwrap().unwrap();
     assert_eq!(row.size_bytes, Some(513 * 1024));
     assert_eq!(std::fs::read(&row.save_path).unwrap(), payload(513 * 1024));
+}
+
+// -- Round 51: refresh download address -----------------------------------
+// Two mock servers serve the IDENTICAL file (same size, same ETag
+// "v1") — the second one is the "new link" for the first one's
+// expired address. A `bump_version` makes the second one serve a
+// different file instead.
+
+fn throttled() -> MockConfig {
+    MockConfig {
+        chunk: 8192,
+        delay: Duration::from_millis(100),
+        hide_length: false,
+        ..Default::default()
+    }
+}
+
+async fn paused_midway(mgr: &Arc<DownloadManager>, url: &str, dir: &std::path::Path) -> (String, i64) {
+    let (id, _) = mgr
+        .add_download(url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .await
+        .unwrap();
+    mgr.start_download(&id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    mgr.pause_download(&id).await.unwrap();
+    assert!(wait_for_status(mgr, &id, "paused", 10).await);
+    let mid = mgr.get_download(&id).unwrap().unwrap();
+    assert!(mid.downloaded_bytes > 0, "pause must land mid-download");
+    assert!(mid.downloaded_bytes < mid.size_bytes.unwrap());
+    (id, mid.downloaded_bytes)
+}
+
+#[tokio::test]
+async fn refresh_address_same_file_resumes_from_downloaded_bytes() {
+    let old_server = MockServer::start(throttled());
+    let new_server = MockServer::start(throttled());
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let mgr = DownloadManager::new(Arc::clone(&store), 4);
+    let (id, mid_bytes) = paused_midway(&mgr, &old_server.url, &dir).await;
+    // The old link "expired": the same file lives at a new address now.
+    let result = mgr
+        .refresh_download_address(&id, &new_server.url, false)
+        .await
+        .unwrap();
+    match result {
+        RefreshAddressResult::Switched { kept_bytes, size_bytes } => {
+            assert_eq!(kept_bytes, mid_bytes, "progress is carried over");
+            assert_eq!(size_bytes, Some(512 * 1024));
+        }
+        RefreshAddressResult::Mismatch { .. } => panic!("same file must switch, not mismatch"),
+    }
+    let row = mgr.get_download(&id).unwrap().unwrap();
+    assert_eq!(row.url, new_server.url);
+    assert!(
+        row.downloaded_bytes >= mid_bytes,
+        "progress never goes backwards: {} < {}",
+        row.downloaded_bytes,
+        mid_bytes
+    );
+    assert!(wait_for_status(&mgr, &id, "complete", 30).await);
+    let row = mgr.get_download(&id).unwrap().unwrap();
+    assert_eq!(std::fs::read(&row.save_path).unwrap(), payload(512 * 1024));
+}
+
+#[tokio::test]
+async fn refresh_address_probe_failure_keeps_old_url_and_progress() {
+    let server = MockServer::start(throttled());
+    // Every request answers 404: the new link is dead.
+    let dead = MockServer::start(MockConfig {
+        fail_status: Some(404),
+        ..Default::default()
+    });
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let mgr = DownloadManager::new(Arc::clone(&store), 4);
+    let (id, mid_bytes) = paused_midway(&mgr, &server.url, &dir).await;
+    let err = mgr
+        .refresh_download_address(&id, &dead.url, false)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("404"), "probe failure: {err}");
+    let row = mgr.get_download(&id).unwrap().unwrap();
+    assert_eq!(row.url, server.url, "old URL kept");
+    assert_eq!(row.downloaded_bytes, mid_bytes, "progress kept");
+    assert_eq!(row.status, "paused");
+}
+
+#[tokio::test]
+async fn refresh_address_changed_file_reports_mismatch_without_switching() {
+    let old_server = MockServer::start(throttled());
+    let new_server = MockServer::start(throttled());
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let mgr = DownloadManager::new(Arc::clone(&store), 4);
+    let (id, mid_bytes) = paused_midway(&mgr, &old_server.url, &dir).await;
+    // The new link serves a different file now (new size + new ETag).
+    new_server.bump_version();
+    let result = mgr
+        .refresh_download_address(&id, &new_server.url, false)
+        .await
+        .unwrap();
+    match result {
+        RefreshAddressResult::Mismatch { size_bytes, etag, .. } => {
+            assert_eq!(size_bytes, Some(513 * 1024));
+            assert_eq!(etag.as_deref(), Some("\"v2\""));
+        }
+        RefreshAddressResult::Switched { .. } => panic!("changed file must mismatch, not switch"),
+    }
+    let row = mgr.get_download(&id).unwrap().unwrap();
+    assert_eq!(row.url, old_server.url, "old URL kept");
+    assert_eq!(row.downloaded_bytes, mid_bytes, "progress kept");
+    assert_eq!(row.status, "paused");
+}
+
+#[tokio::test]
+async fn refresh_address_confirmed_mismatch_restarts_from_zero() {
+    let old_server = MockServer::start(throttled());
+    let new_server = MockServer::start(throttled());
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let mgr = DownloadManager::new(Arc::clone(&store), 4);
+    let (id, _mid_bytes) = paused_midway(&mgr, &old_server.url, &dir).await;
+    new_server.bump_version();
+    // The user confirms the switch knowing the file is different.
+    let result = mgr
+        .refresh_download_address(&id, &new_server.url, true)
+        .await
+        .unwrap();
+    match result {
+        RefreshAddressResult::Switched { kept_bytes, size_bytes } => {
+            assert_eq!(kept_bytes, 0, "confirmed switch restarts from zero");
+            assert_eq!(size_bytes, Some(513 * 1024));
+        }
+        RefreshAddressResult::Mismatch { .. } => panic!("confirmed switch must not mismatch"),
+    }
+    let row = mgr.get_download(&id).unwrap().unwrap();
+    assert_eq!(row.url, new_server.url);
+    assert_eq!(row.downloaded_bytes, 0, "downloaded bytes were reset");
+    assert!(wait_for_status(&mgr, &id, "complete", 30).await);
+    let row = mgr.get_download(&id).unwrap().unwrap();
+    assert_eq!(std::fs::read(&row.save_path).unwrap(), payload(513 * 1024));
+}
+
+#[tokio::test]
+async fn refresh_address_refuses_running_and_complete_downloads() {
+    let server = MockServer::start(throttled());
+    let other = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: false,
+        ..Default::default()
+    });
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let mgr = DownloadManager::new(Arc::clone(&store), 4);
+    let (id, _) = mgr
+        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .await
+        .unwrap();
+    mgr.start_download(&id).await.unwrap();
+    // Still running (or just started): refuse.
+    let err = mgr
+        .refresh_download_address(&id, &other.url, false)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("Only a paused or failed download"),
+        "running: {err}"
+    );
+    assert!(wait_for_status(&mgr, &id, "complete", 30).await);
+    // Finished: refuse too.
+    let err = mgr
+        .refresh_download_address(&id, &other.url, false)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("Only a paused or failed download"),
+        "complete: {err}"
+    );
 }
 
 #[tokio::test]

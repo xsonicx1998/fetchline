@@ -17,6 +17,9 @@ interface DownloadTableProps {
   onOpenFolder: (id: string) => void
   /** Right-click menu: move the selected download to a category. */
   onMoveToCategory: (id: string, categoryId: string) => void
+  /** Right-click menu: refresh the address of a paused/failed
+   *  download (Round 51) — opens the dialog with the new link. */
+  onRefreshAddress: (download: DownloadRow) => void
 }
 
 /** What the Description column shows. Errors first (the row's own
@@ -43,7 +46,7 @@ function descriptionFor(d: DownloadRow): string {
  *  Right-click opens the row menu (Round 45): Open folder and
  *  Move to category used to live in the menu bar's File and
  *  Downloads menus — the menu bar is gone, so they live here. */
-export function DownloadTable({ downloads, queues, categories, selectedId, onSelect, onOpenProgress, onAdd, onOpenFolder, onMoveToCategory }: DownloadTableProps) {
+export function DownloadTable({ downloads, queues, categories, selectedId, onSelect, onOpenProgress, onAdd, onOpenFolder, onMoveToCategory, onRefreshAddress }: DownloadTableProps) {
   const queueName = (id: string | null) => (id === null ? '—' : (queues.find((q) => q.id === id)?.name ?? '—'))
   const [menu, setMenu] = useState<{ x: number; y: number; download: DownloadRow } | null>(null)
   const menuRef = useRef<HTMLDivElement | null>(null)
@@ -202,6 +205,20 @@ export function DownloadTable({ downloads, queues, categories, selectedId, onSel
             className="flex w-full items-center rounded px-3 py-1.5 text-left text-sm text-text hover:bg-surface-2 disabled:opacity-45"
           >
             Open folder
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            disabled={menu.download.status !== 'paused' && menu.download.status !== 'error'}
+            title={
+              menu.download.status === 'paused' || menu.download.status === 'error'
+                ? 'Replace an expired link and resume from the downloaded bytes'
+                : 'Only a paused or failed download can get a new address'
+            }
+            onClick={closeMenu(() => onRefreshAddress(menu.download))}
+            className="flex w-full items-center rounded px-3 py-1.5 text-left text-sm text-text hover:bg-surface-2 disabled:opacity-45"
+          >
+            Refresh download address
           </button>
           <div role="separator" className="my-1 h-px bg-border" aria-hidden="true" />
           <p className="px-3 pb-1 pt-2 text-xs font-semibold uppercase text-text-muted">Move to category</p>

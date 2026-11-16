@@ -37,6 +37,7 @@ import { CategorySidebar, type SidebarFilter } from './components/CategorySideba
 import { DownloadAllDialog } from './components/DownloadAllDialog'
 import { DownloadTable } from './components/DownloadTable'
 import { QueueActionDialog } from './components/QueueActionDialog'
+import { RefreshAddressDialog } from './components/RefreshAddressDialog'
 import { SchedulerDialog } from './components/SchedulerDialog'
 import { SettingsDialog } from './components/SettingsDialog'
 import { SiteGrabberDialog } from './components/SiteGrabberDialog'
@@ -92,6 +93,9 @@ export default function App() {
   const [quotaStatus, setQuotaStatus] = useState<QuotaStatus | null>(null)
   const [showSettings, setShowSettings] = useState(false)
   const [confirmRemove, setConfirmRemove] = useState<DownloadRow | null>(null)
+  /** Round 51 — refresh download address: the row whose expired
+   *  link is being replaced; null when the dialog is closed. */
+  const [refreshTarget, setRefreshTarget] = useState<DownloadRow | null>(null)
   /** Update check (S09): Help > Check for updates, and the weekly
    *  check's `update-available` event, both land here. */
   const [updateResult, setUpdateResult] = useState<UpdateCheckResult | null>(null)
@@ -489,6 +493,7 @@ export default function App() {
             onAdd={() => setShowAdd(true)}
             onOpenFolder={(id) => void run(() => openFolder(id))}
             onMoveToCategory={(id, categoryId) => void run(() => moveToCategory(id, categoryId))}
+            onRefreshAddress={(download) => setRefreshTarget(download)}
           />
         </main>
       </div>
@@ -533,6 +538,15 @@ export default function App() {
           setPickedVideoUrl('')
         }}
         onAdded={() => void refreshAll()}
+      />
+      <RefreshAddressDialog
+        open={refreshTarget !== null}
+        download={refreshTarget}
+        onClose={() => setRefreshTarget(null)}
+        onRefreshed={() => {
+          setRefreshTarget(null)
+          void refreshAll()
+        }}
       />
       <VideoGrabberDialog
         open={showVideoGrabber}

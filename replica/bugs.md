@@ -4274,6 +4274,82 @@ The progress window still has never been seen opening in the
 running app (session 0 has no GUI), and the user's own-PC
 confirmation is still outstanding.
 
+CI verdict (run #26, 43804413258, head 266968a7, 2026-11-16) —
+FULLY GREEN: build-windows success, smoke-test success,
+extension-capture-test success (Phase 4 passed in CI: a real
+browser download of the slow fixture mp4 was intercepted —
+cancelled + erased, pending row landed). Installer 15,516,734
+bytes (~14.8 MB); smoke artifact 375,151 bytes; capture artifact
+3,796 bytes.
+
+## Round 51 — Refresh download address (step 2 of the user's agreed sequence) — 2026-11-16
+
+The user approved executing the sequence step by step (build →
+test → next step): after the halo (Round 49) and the watcher fix
+(Round 50), this round adds "Refresh download address" — a paused
+or failed download can get a new link without losing progress.
+The plan was presented to him on 2026-11-16 and he approved it
+("نفذ وبعدين اختبر تمام نفذ إلي بعده وهكذا").
+
+How it works (product, engine + UI):
+- Right-click a paused or failed download → "Refresh download
+  address" (the menu entry is disabled for any other status) →
+  dialog shows the file, the progress so far and the current link,
+  with a field for the new link.
+- The engine (`DownloadManager::refresh_download_address`, new
+  Tauri command `refresh_download_address(id, url, force)`)
+  re-probes the NEW link FIRST through the same probe path
+  `add_download` uses (saved site login for the new host, active
+  proxy, the download's browser cookies only when the new link is
+  on the same host — another host never receives this site's
+  cookies; excluded sites refused before any request, BUG-011):
+  - probe fails → error, and the old URL and all progress are kept
+    untouched;
+  - same file (size and ETag — the same rule `resume_download`
+    uses) → the row is pointed at the new address (new store
+    method `update_download_address`: URL, final URL, size, ETag,
+    Last-Modified, range support; old error cleared) and the
+    download starts again from the downloaded bytes;
+  - different file → a `Mismatch` result (new size, ETag,
+    filename) and NOTHING is changed; the dialog warns and only
+    switches when the user confirms, and then the download restarts
+    from zero — never stitching old bytes onto new content.
+- Guards: only paused/failed rows can be refreshed (running or
+  finished refused); the quota gate is checked before anything is
+  switched, so a refresh never strands a switched row that cannot
+  start; a bounded wait covers the gap between the row flipping to
+  paused and the run task leaving the running map.
+- The refreshed download auto-starts, so its progress window
+  auto-opens like any resumed download (the main window's
+  1 s poll shows the new state).
+
+Tests (5 new, in `engine_tests.rs`, two mock servers serving the
+identical file — the second one is the "new link"):
+- same file switches and resumes from the downloaded bytes, then
+  completes byte-identical;
+- probe failure (404 server) keeps the old URL, the progress and
+  the paused status;
+- changed file (bumped version) reports a mismatch with the new
+  size/ETag and changes nothing;
+- confirmed mismatch switches and restarts from zero, then
+  completes with the NEW file's bytes;
+- running and complete downloads are refused.
+- Caught during verification: the forced-restart path deleted the
+  segments and reset the row but never recreated segments, so the
+  restarted download never completed (the first run of the new
+  test failed on the 30 s wait). Fixed by laying out fresh
+  segments from the new probe (`initial_ranges`) after the reset
+  — the same step `resume_download` takes when the remote file
+  changes. All 5 tests pass after the fix.
+
+Status: implemented as described. Verified on Linux: full engine
+suite **422/422 pass, 0 failed** (417 + 5 new); `cargo check
+--tests` 0 warnings; `npm run build` passes. The run this push
+triggers is the proof — it must go green. Honest limit: the smoke
+screenshot shows the main window only; the dialog itself needs
+the user's own PC test to be seen in action (like the progress
+window, it has never opened in the running desktop app).
+
 ## Known limitations, not bugs (round-24 additions)
 
 - The Tauri shell never compiles or runs on this VM, so a
