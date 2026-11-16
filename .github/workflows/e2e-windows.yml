@@ -48,10 +48,15 @@ jobs:
       - name: Check out
         uses: actions/checkout@v4
 
-      - name: Set up Node.js 20
+      # Node 22, not 20: webdriverio's bundled undici calls
+      # zlib.createZstdDecompress at import time (decompress.js:78)
+      # and that API exists only in Node 22+ — run #2 proved it:
+      # on Node 20.20.2 the import died in ~1 s with "Cannot read
+      # properties of undefined (reading 'bind')" before any test ran.
+      - name: Set up Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: app/package-lock.json
 
