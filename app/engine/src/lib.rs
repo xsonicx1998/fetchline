@@ -14,6 +14,7 @@
 //! - `secret`  — password protection (DPAPI on Windows).
 
 pub mod antivirus;
+pub mod clipboard;
 pub mod error;
 pub mod ftp;
 pub mod grabber;
@@ -39,6 +40,7 @@ pub use antivirus::{
     MAX_SCAN_TIMEOUT_SECS, MIN_SCAN_TIMEOUT_SECS, SCAN_CLEAN, SCAN_FAILED, SCAN_INFECTED,
     SCAN_NOT_CONFIGURED, SCAN_SCANNING, SCAN_STATUSES, SCAN_TIMED_OUT,
 };
+pub use clipboard::ClipboardOffer;
 pub use error::EngineError;
 pub use grabber::{GrabberFilters, GrabberProjectRow, MatchedFile};
 pub use kerberos::{

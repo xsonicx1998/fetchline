@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex as AsyncMutex};
 use tokio::task::JoinSet;
 
+use crate::clipboard::{extract_download_link, ClipboardMonitor, ClipboardOffer};
 use crate::error::{EngineError, Result};
 use crate::antivirus::{run_scan, test_scanner, ScanResult, SCAN_INFECTED};
 use crate::grabber::{
@@ -357,6 +358,11 @@ pub struct DownloadManager {
     /// cancelled — a pause keeps it, so pause/resume in one
     /// session keeps working.
     cookies: StdMutex<HashMap<String, String>>,
+    /// Clipboard monitoring (Round 52): the hash of the last text
+    /// seen and the URLs already offered or dismissed, so the same
+    /// link is never offered twice. Pure logic — no clipboard
+    /// access; the shell hands the text in.
+    clipboard: StdMutex<ClipboardMonitor>,
     /// Update check (S09 / should-have): true while a weekly
     /// check spawned from the scheduler tick is in flight, so a
     /// later tick never starts a second one; and the channel the
@@ -400,6 +406,7 @@ impl DownloadManager {
             action_events,
             sound_events: Arc::new(StdMutex::new(Vec::new())),
             cookies: StdMutex::new(HashMap::new()),
+            clipboard: StdMutex::new(ClipboardMonitor::new()),
             update_check_running: AtomicBool::new(false),
             update_events,
             scanning: StdMutex::new(HashSet::new()),
@@ -3899,6 +3906,51 @@ impl DownloadManager {
         })
     }
 
+    /// Clipboard monitoring (Round 52): check clipboard text for a
+    /// fresh download link and, when there is one, return the offer
+    /// the shell shows ("Download this link?"). Copying a link never
+    /// downloads anything — the user must accept the offer. Returns
+    /// `None` when monitoring is off, the text is not a file link,
+    /// the same text was already seen, the URL was already offered
+    /// or dismissed, the host is excluded, or the URL is already
+    /// downloading/downloaded. An offered URL is remembered, so a
+    /// second call with the same text (or a re-copy of the same
+    /// link) offers nothing.
+    pub fn check_clipboard_offer(&self, text: &str) -> Result<Option<ClipboardOffer>> {
+        let settings = self.store.get_settings().unwrap_or_default();
+        if !settings.clipboard_monitoring {
+            return Ok(None);
+        }
+        let Some(offer) = extract_download_link(text) else {
+            return Ok(None);
+        };
+        let mut monitor = self.clipboard.lock().unwrap();
+        let hash = ClipboardMonitor::hash_text(text.trim());
+        if hash == monitor.last_text_hash {
+            return Ok(None);
+        }
+        monitor.last_text_hash = hash;
+        if monitor.seen.iter().any(|u| u == &offer.url) {
+            return Ok(None);
+        }
+        let host = url_host(&offer.url).unwrap_or_default();
+        if crate::store::site_is_excluded(&host, &settings.excluded_sites) {
+            return Ok(None);
+        }
+        if self.store.url_exists(&offer.url)? {
+            return Ok(None);
+        }
+        monitor.remember(&offer.url);
+        Ok(Some(offer))
+    }
+
+    /// Clipboard monitoring (Round 52): record a URL as dismissed
+    /// (or already handled), so it is never offered again this
+    /// session. Infallible and idempotent.
+    pub fn dismiss_clipboard_offer(&self, url: &str) {
+        self.clipboard.lock().unwrap().remember(url);
+    }
+
     /// Stop a download and mark it deleted; the partial file is removed.
     pub async fn cancel_download(&self, id: &str) -> Result<()> {
         let row = self
@@ -5034,13 +5086,13 @@ fn sanitize_filename(name: String) -> String {
 
 /// The host part of a URL, lowercased, or `None` when it does not
 /// parse. Used for the excluded-sites check (BUG-011).
-fn url_host(url: &str) -> Option<String> {
+pub(crate) fn url_host(url: &str) -> Option<String> {
     reqwest::Url::parse(url)
         .ok()
         .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
 }
 
-fn filename_from_url(url: &str) -> Option<String> {
+pub(crate) fn filename_from_url(url: &str) -> Option<String> {
     let parsed = reqwest::Url::parse(url).ok()?;
     let last = parsed.path_segments()?.next_back()?;
     let decoded = percent_decode(last);

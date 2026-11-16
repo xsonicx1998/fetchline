@@ -167,6 +167,16 @@ async fn refresh_download_address(
         .map_err(|e| e.to_string())
 }
 
+/// Clipboard monitoring (Round 52): the user dismissed the
+/// "Download this link?" offer for this URL — the engine will
+/// not offer it again. The engine method is infallible and
+/// idempotent (it just records the URL in session state).
+#[tauri::command]
+fn dismiss_clipboard_offer(state: State<'_, AppState>, url: String) -> Result<(), String> {
+    state.manager.dismiss_clipboard_offer(&url);
+    Ok(())
+}
+
 #[tauri::command]
 async fn cancel_download(state: State<'_, AppState>, id: String) -> Result<(), String> {
     state.manager.cancel_download(&id).await.map_err(|e| e.to_string())
@@ -974,6 +984,41 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 let _ = startup_manager.start_startup_queues().await;
             });
+            // Clipboard monitoring (Round 52): poll the system
+            // clipboard once a second and offer a copied download
+            // link. The engine decides whether the text is a new
+            // downloadable link (it dedupes against dismissed
+            // offers and existing downloads) and honours the
+            // `clipboard_monitoring` setting; the shell only reads
+            // the clipboard and forwards offers. The check is sync
+            // and cheap (store lock + tiny work) — nothing is held
+            // across an await. A clipboard that cannot be opened
+            // disables monitoring for the session, never panics.
+            let clipboard_handle = app.handle().clone();
+            let clipboard_manager = Arc::clone(&manager);
+            let clipboard_log = startup_log_path_from_app(app.handle());
+            tauri::async_runtime::spawn(async move {
+                let mut clipboard = match arboard::Clipboard::new() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        log_startup(
+                            clipboard_log.as_deref(),
+                            &format!("clipboard unavailable: {e} — monitoring disabled"),
+                        );
+                        return;
+                    }
+                };
+                let mut interval = tokio::time::interval(Duration::from_secs(1));
+                loop {
+                    interval.tick().await;
+                    let Ok(text) = clipboard.get_text() else {
+                        continue;
+                    };
+                    if let Ok(Some(offer)) = clipboard_manager.check_clipboard_offer(&text) {
+                        let _ = clipboard_handle.emit("clipboard-link-found", offer);
+                    }
+                }
+            });
             log_startup(log, "spawns done");
             app.manage(AppState { manager });
             log_startup(log, "setup ok");
@@ -985,6 +1030,7 @@ pub fn run() {
             pause_download,
             resume_download,
             refresh_download_address,
+            dismiss_clipboard_offer,
             cancel_download,
             retry_now,
             open_folder,

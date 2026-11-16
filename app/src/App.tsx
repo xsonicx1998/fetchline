@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { X } from 'lucide-react'
 import {
+  addDownload,
   addToQueue,
   checkForUpdates,
   deleteCategory,
   deleteDownload,
+  dismissClipboardOffer,
   executeQueueAction,
   getCategories,
   getPendingAction,
@@ -15,6 +17,7 @@ import {
   listGrabberProjects,
   listQueues,
   moveToCategory,
+  onClipboardLink,
   onQueueAction,
   onUpdateAvailable,
   openFolder,
@@ -27,13 +30,14 @@ import {
   syncQueueNow,
 } from './lib/api'
 import { formatSpeed } from './lib/format'
-import type { CategoryRow, DownloadRow, GrabberProjectRow, PendingAction, QueueRow, QuotaStatus, Settings, UpdateCheckResult } from './lib/types'
+import type { CategoryRow, ClipboardOffer, DownloadRow, GrabberProjectRow, PendingAction, QueueRow, QuotaStatus, Settings, UpdateCheckResult } from './lib/types'
 import { AddCategoryDialog } from './components/AddCategoryDialog'
 import { AddDownloadDialog } from './components/AddDownloadDialog'
 import { AddQueueDialog } from './components/AddQueueDialog'
 import { BatchDialog } from './components/BatchDialog'
 import { Button } from './components/Button'
 import { CategorySidebar, type SidebarFilter } from './components/CategorySidebar'
+import { ClipboardOfferDialog } from './components/ClipboardOfferDialog'
 import { DownloadAllDialog } from './components/DownloadAllDialog'
 import { DownloadTable } from './components/DownloadTable'
 import { QueueActionDialog } from './components/QueueActionDialog'
@@ -96,6 +100,9 @@ export default function App() {
   /** Round 51 — refresh download address: the row whose expired
    *  link is being replaced; null when the dialog is closed. */
   const [refreshTarget, setRefreshTarget] = useState<DownloadRow | null>(null)
+  /** Round 52 — clipboard monitoring: the copied link currently
+   *  offered to the user; null when no offer is showing. */
+  const [clipboardOffer, setClipboardOffer] = useState<ClipboardOffer | null>(null)
   /** Update check (S09): Help > Check for updates, and the weekly
    *  check's `update-available` event, both land here. */
   const [updateResult, setUpdateResult] = useState<UpdateCheckResult | null>(null)
@@ -175,6 +182,7 @@ export default function App() {
     const timer = window.setInterval(() => void refreshAll(), 1000)
     let unlistenAction: (() => void) | undefined
     let unlistenUpdate: (() => void) | undefined
+    let unlistenClipboard: (() => void) | undefined
     // NOTE (BUG-044, fixed in Round 40): there used to be a
     // `download-progress` listener here that patched rows live
     // between polls. It never fired in the built app — this app
@@ -209,6 +217,14 @@ export default function App() {
     }).then((fn) => {
       unlistenUpdate = fn
     })
+    // Round 52 — clipboard monitoring: a download link was copied.
+    // While an offer is already showing, new events are ignored —
+    // offers never stack on top of each other.
+    void onClipboardLink((offer) => {
+      setClipboardOffer((current) => current ?? offer)
+    }).then((fn) => {
+      unlistenClipboard = fn
+    })
     // A completion action can be left waiting from a run that ended
     // before the window opened: surface its countdown now.
     void listQueues()
@@ -226,6 +242,7 @@ export default function App() {
       window.clearInterval(timer)
       unlistenAction?.()
       unlistenUpdate?.()
+      unlistenClipboard?.()
     }
   }, [refresh, refreshAll, refreshCategories, refreshQueues, refreshGrabberProjects, refreshSettings])
 
@@ -548,6 +565,23 @@ export default function App() {
           void refreshAll()
         }}
       />
+      {clipboardOffer ? (
+        <ClipboardOfferDialog
+          offer={clipboardOffer}
+          onDownload={() => {
+            const url = clipboardOffer.url
+            void addDownload({ url })
+              .then(() => void refreshAll())
+              .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
+            setClipboardOffer(null)
+          }}
+          onDismiss={() => {
+            const url = clipboardOffer.url
+            void dismissClipboardOffer(url).catch(() => undefined)
+            setClipboardOffer(null)
+          }}
+        />
+      ) : null}
       <VideoGrabberDialog
         open={showVideoGrabber}
         queues={queues}

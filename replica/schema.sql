@@ -185,6 +185,10 @@ CREATE TABLE IF NOT EXISTS settings (
   language TEXT NOT NULL DEFAULT 'en',
   theme TEXT NOT NULL DEFAULT 'dark' CHECK (theme IN ('light','dark')),
   browser_integration INTEGER NOT NULL DEFAULT 1,
+  -- Clipboard monitoring (Round 52, 2026-11-16): 1 = copying a
+  -- download link offers to download it (default); 0 = the
+  -- clipboard is never looked at.
+  clipboard_monitoring INTEGER NOT NULL DEFAULT 1,
   browser_start_drained INTEGER NOT NULL DEFAULT 1, -- Milestone 2 (S13 finish):
     -- 1 = a drained browser link starts downloading at once;
     -- 0 = it stays queued, the old behaviour

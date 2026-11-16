@@ -113,6 +113,10 @@ pub struct Settings {
     pub language: String,
     pub theme: String,
     pub browser_integration: bool,
+    /// Clipboard monitoring (Round 52): when on, copying a download
+    /// link offers to download it (default on). Off means the
+    /// clipboard is never even looked at.
+    pub clipboard_monitoring: bool,
     pub browser_start_drained: bool,
     /// Progress window (S03, 2026-11-15): when a download starts,
     /// a separate progress window opens for it (default on). Off
@@ -175,6 +179,7 @@ impl Default for Settings {
             language: "en".to_string(),
             theme: "dark".to_string(),
             browser_integration: true,
+            clipboard_monitoring: true,
             browser_start_drained: true,
             show_progress_window: true,
             antivirus_command: None,
@@ -578,6 +583,13 @@ impl Store {
         for (table, column, ddl) in [
             ("settings", "start_on_startup", "INTEGER NOT NULL DEFAULT 0"),
             ("settings", "browser_start_drained", "INTEGER NOT NULL DEFAULT 1"),
+            // Clipboard monitoring (Round 52): the on/off switch,
+            // default on.
+            (
+                "settings",
+                "clipboard_monitoring",
+                "INTEGER NOT NULL DEFAULT 1",
+            ),
             // Progress window (S03, 2026-11-15): the auto-open
             // switch, default on.
             (
@@ -1215,7 +1227,8 @@ impl Store {
              dialup_hangup_after_completion, dialup_redial_attempts, \
              update_url, last_update_check_at, \
              quota_enabled, quota_mb, quota_hours, \
-             antivirus_enabled, antivirus_timeout_secs, show_progress_window \
+             antivirus_enabled, antivirus_timeout_secs, show_progress_window, \
+             clipboard_monitoring \
              FROM settings WHERE id = 1",
             [],
             |r| {
@@ -1262,6 +1275,7 @@ impl Store {
                         crate::antivirus::DEFAULT_SCAN_TIMEOUT_SECS,
                     ),
                     show_progress_window: r.get::<_, i64>(28)? != 0,
+                    clipboard_monitoring: r.get::<_, i64>(29)? != 0,
                 })
             },
         );
@@ -1393,7 +1407,7 @@ impl Store {
              update_url = ?22, last_update_check_at = ?23, \
              quota_enabled = ?24, quota_mb = ?25, quota_hours = ?26, \
              antivirus_enabled = ?27, antivirus_timeout_secs = ?28, \
-             show_progress_window = ?29, \
+             show_progress_window = ?29, clipboard_monitoring = ?30, \
              updated_at = datetime('now') WHERE id = 1",
             params![
                 s.default_download_folder.trim(),
@@ -1428,6 +1442,7 @@ impl Store {
                 if s.antivirus_enabled { 1 } else { 0 },
                 s.antivirus_timeout_secs,
                 if s.show_progress_window { 1 } else { 0 },
+                if s.clipboard_monitoring { 1 } else { 0 },
             ],
         )?;
         drop(conn);

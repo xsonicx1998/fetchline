@@ -4344,11 +4344,80 @@ identical file — the second one is the "new link"):
 
 Status: implemented as described. Verified on Linux: full engine
 suite **422/422 pass, 0 failed** (417 + 5 new); `cargo check
+--tests` 0 warnings; `npm run build` passes.
+
+CI verdict (run #27, 43811435149, head 2d770731, 2026-11-16) —
+FULLY GREEN: build-windows success, smoke-test success,
+extension-capture-test success. Installer 15,561,674 bytes
+(~14.8 MB); smoke artifact 375,982 bytes; capture artifact 3,799
+bytes. The parent fetches the screenshot from the smoke artifact.
+Honest limit: the smoke screenshot shows the main window only;
+the dialog itself needs the user's own PC test to be seen in
+action (like the progress window, it has never opened in the
+running desktop app).
+
+## Round 52 — Clipboard monitoring (step 3 of the user's agreed sequence) — 2026-11-16
+
+The user approved the plan presented to him ("تمام، نفّذ مراقبة
+الحافظة"): copying a download link shows a small offer instead
+of downloading silently.
+
+How it works (product, engine + shell + UI):
+- The shell polls the system clipboard once a second (arboard,
+  new dependency in `app/src-tauri/Cargo.toml`) and hands the
+  text to the engine; the engine decides (new
+  `app/engine/src/clipboard.rs` +
+  `DownloadManager::check_clipboard_offer`):
+  - the text must be a single link: trimmed, no whitespace (a
+    multi-line paste is not one link), at most 2048 chars,
+    scheme http/https/ftp, non-empty host, and the last path
+    segment must carry an extension from the capture list (the
+    same 27 extensions as `DEFAULT_CATCH_EXTENSIONS` in
+    `app/extension/background.js` — the two lists must stay in
+    sync);
+  - the offer fires once per link: the engine remembers offered
+    and dismissed URLs for the session (capped at 64) and ignores
+    unchanged clipboard text;
+  - excluded sites are never offered (BUG-011 rule); a link
+    already in the downloads table (downloading or finished) is
+    never offered;
+  - the Settings toggle `clipboard_monitoring` (default on) gates
+    everything — off means no offer, ever.
+- The offer reaches the UI as a `clipboard-link-found` event (the
+  capabilities file already grants `core:event:allow-listen` to
+  the main window); App.tsx shows `ClipboardOfferDialog`
+  (filename, URL, Download / Dismiss) and never stacks offers —
+  a new event is ignored while one prompt is open. Download adds
+  the link through the existing `add_download` path; Dismiss
+  calls the new `dismiss_clipboard_offer` command, and the engine
+  never offers that URL again.
+- The clipboard is never stored: the engine keeps only a hash of
+  the last seen text plus the offered/dismissed URL list for the
+  session; a clipboard that cannot be opened disables monitoring
+  for the session with one startup-log line, never a panic.
+
+Tests (15 new, in `app/engine/tests/clipboard_tests.rs`,
+modelled on the Round 51 refresh tests):
+- detection: .mp4/.zip links offered with the right filename
+  (percent-decoded); plain text, non-file URLs, multi-line
+  pastes and over-long text refused; ftp + file extension
+  offered; uppercase extension offered;
+- dedupe: same text twice offers once; same URL re-copied after
+  other text offers nothing; dismiss → never offered again;
+  dismiss idempotent;
+- exclusion: excluded site and subdomain refused; toggle off →
+  no offer; already-downloaded URL refused.
+- Settings default-on and round-trip through `update_settings`
+  covered.
+
+Status: implemented as described. Verified on Linux: full engine
+suite **437/437 pass, 0 failed** (422 + 15 new); `cargo check
 --tests` 0 warnings; `npm run build` passes. The run this push
-triggers is the proof — it must go green. Honest limit: the smoke
-screenshot shows the main window only; the dialog itself needs
-the user's own PC test to be seen in action (like the progress
-window, it has never opened in the running desktop app).
+triggers is the proof — it must go green. Honest limit: the
+smoke screenshot shows the main window only; the offer dialog
+itself needs the user's own PC test to be seen in action (like
+the progress window, it has never opened in the running desktop
+app).
 
 ## Known limitations, not bugs (round-24 additions)
 

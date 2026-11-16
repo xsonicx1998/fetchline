@@ -530,6 +530,20 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
               <label className="flex items-center gap-2 text-base">
                 <input
                   type="checkbox"
+                  checked={settings.clipboard_monitoring}
+                  onChange={(e) => set('clipboard_monitoring', e.target.checked)}
+                  className="h-4 w-4 accent-accent"
+                />
+                Watch the clipboard for download links
+              </label>
+              <p className={hintCls}>
+                On (the default), copying a download link shows a small &ldquo;Download this
+                link?&rdquo; offer. One click adds it, dismiss ignores it — nothing is ever
+                downloaded without you, and a dismissed link is never offered again.
+              </p>
+              <label className="flex items-center gap-2 text-base">
+                <input
+                  type="checkbox"
                   checked={settings.show_progress_window}
                   onChange={(e) => set('show_progress_window', e.target.checked)}
                   className="h-4 w-4 accent-accent"

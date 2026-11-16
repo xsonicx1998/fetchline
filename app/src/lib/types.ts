@@ -132,6 +132,14 @@ export type RefreshAddressResult =
   | { outcome: 'switched'; kept_bytes: number; size_bytes: number | null }
   | { outcome: 'mismatch'; size_bytes: number | null; etag: string | null; filename: string | null }
 
+/** Round 52 — clipboard monitoring: the engine's offer for a
+ *  download link copied to the clipboard. Mirrors the engine's
+ *  `ClipboardOffer` (url + the filename the probe derived). */
+export interface ClipboardOffer {
+  url: string
+  filename: string
+}
+
 /** Mirrors engine QueueRow. `type` is always "queue" for now; the
  *  scheduler fields are UTC ISO strings or null when unset. */
 export interface QueueRow {
@@ -361,6 +369,10 @@ export interface Settings {
    *  theming any more, and Settings no longer offers the choice. */
   theme: 'light' | 'dark'
   browser_integration: boolean
+  /** Clipboard monitoring (Round 52): watch the system clipboard
+   *  and offer a copied download link (default true). Off means
+   *  the poller still runs but the engine never offers a link. */
+  clipboard_monitoring: boolean
   /** Dial-Up tab (S09 finish): legacy settings. The connection
    *  name may be null (none set); auto-dial and redial are
    *  honoured only where a dial-up connection exists (Windows

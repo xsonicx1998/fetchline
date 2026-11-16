@@ -7,6 +7,7 @@ import { listen } from '@tauri-apps/api/event'
 import type {
   BatchResult,
   CategoryRow,
+  ClipboardOffer,
   DetectedVideo,
   DownloadRow,
   GrabberProjectRow,
@@ -457,4 +458,19 @@ export function onUpdateAvailable(
   cb: (result: UpdateCheckResult) => void,
 ): Promise<() => void> {
   return listen<UpdateCheckResult>('update-available', (e) => cb(e.payload))
+}
+
+/** Round 52 — clipboard monitoring: subscribe to
+ *  `clipboard-link-found` events. The shell polls the clipboard
+ *  once a second; the engine only emits when the copied text is
+ *  a new downloadable link. Nothing is downloaded without the
+ *  user — the UI shows the offer dialog for it. */
+export function onClipboardLink(cb: (offer: ClipboardOffer) => void): Promise<() => void> {
+  return listen<ClipboardOffer>('clipboard-link-found', (e) => cb(e.payload))
+}
+
+/** Round 52 — clipboard monitoring: the user dismissed the
+ *  offer for this URL — the engine will not offer it again. */
+export async function dismissClipboardOffer(url: string): Promise<void> {
+  return invoke('dismiss_clipboard_offer', { url })
 }
