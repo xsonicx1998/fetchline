@@ -94,10 +94,12 @@ export function CategorySidebar({
 
   /** The active row is the reference's filled purple row, white
    *  text — not the old soft tint. The count inside it is white
-   *  at 80% so it stays readable on the purple. */
+   *  at 80% so it stays readable on the purple. Round 47: the
+   *  active row glows, and rows are 36 px with 20 px icons (was
+   *  32 px / 16 px) to match the reference's proportions. */
   const rowClass = (active: boolean, key: string) =>
-    `flex h-8 items-center gap-2 rounded-md px-2 text-left text-base ${
-      active ? 'bg-accent font-semibold text-on-accent' : 'text-text hover:bg-surface-2'
+    `flex h-9 items-center gap-2 rounded-md px-2 text-left text-base ${
+      active ? 'bg-accent font-semibold text-on-accent shadow-[0_0_12px_rgba(139,32,255,0.45)]' : 'text-text hover:bg-surface-2'
     } ${dropTarget === key ? 'outline outline-2 outline-accent' : ''}`
   const countClass = (active: boolean, fadeOnHover = false) =>
     `text-xs transition-opacity ${active ? 'text-white/80' : 'text-text-muted'} ${
@@ -118,9 +120,9 @@ export function CategorySidebar({
   return (
     <nav
       aria-label="Categories and queues"
-      className="flex h-full w-sidebar shrink-0 flex-col gap-1 overflow-y-auto border-r border-border bg-surface p-2"
+      className="flex h-full w-sidebar shrink-0 flex-col gap-1 overflow-y-auto rounded-xl border border-border bg-surface p-2 shadow-panel"
     >
-      <p className="px-2 pb-1 pt-1 text-xs font-semibold uppercase text-text-muted">Categories</p>
+      <p className="px-2 pb-1 pt-1 text-xs font-semibold uppercase tracking-wider text-text-muted">Categories</p>
       <button
         type="button"
         onClick={() => {
@@ -131,7 +133,7 @@ export function CategorySidebar({
         aria-current={allActive || undefined}
         className={rowClass(allActive, 'all')}
       >
-        <PackIcon name="category-folder" className="h-4 w-4" />
+        <PackIcon name="category-folder" className="h-5 w-5" />
         <span className="flex-1 truncate">All downloads</span>
         <span className={countClass(allActive)}>{countFor(null)}</span>
       </button>
@@ -147,7 +149,7 @@ export function CategorySidebar({
             aria-current={selectedCategory === c.id || undefined}
             className={`${rowClass(selectedCategory === c.id, `cat:${c.id}`)} flex-1`}
           >
-            <PackIcon name="category-folder" className="h-4 w-4" />
+            <PackIcon name="category-folder" className="h-5 w-5" />
             <span className="flex-1 truncate">{c.name}</span>
             <span className={countClass(selectedCategory === c.id, true)}>{countFor(c.id)}</span>
           </button>
@@ -167,9 +169,9 @@ export function CategorySidebar({
       <button
         type="button"
         onClick={onAddCategory}
-        className="flex h-8 items-center gap-2 rounded-md px-2 text-left text-base text-text-muted hover:bg-surface-2"
+        className="flex h-9 items-center gap-2 rounded-md px-2 text-left text-base text-text-muted hover:bg-surface-2"
       >
-        <Plus className="h-4 w-4 shrink-0" aria-hidden="true" />
+        <Plus className="h-5 w-5 shrink-0" aria-hidden="true" />
         New category
       </button>
 
@@ -180,7 +182,7 @@ export function CategorySidebar({
         aria-current={selectedFilter === 'unfinished' || undefined}
         className={rowClass(selectedFilter === 'unfinished', 'unfinished')}
       >
-        <PackIcon name="unfinished" className="h-4 w-4" />
+        <PackIcon name="unfinished" className="h-5 w-5" />
         <span className="flex-1 truncate">Unfinished</span>
         <span className={countClass(selectedFilter === 'unfinished')}>{unfinishedCount}</span>
       </button>
@@ -190,12 +192,12 @@ export function CategorySidebar({
         aria-current={selectedFilter === 'finished' || undefined}
         className={rowClass(selectedFilter === 'finished', 'finished')}
       >
-        <PackIcon name="finished" className="h-4 w-4" />
+        <PackIcon name="finished" className="h-5 w-5" />
         <span className="flex-1 truncate">Finished</span>
         <span className={countClass(selectedFilter === 'finished')}>{finishedCount}</span>
       </button>
 
-      <p className="px-2 pb-1 pt-3 text-xs font-semibold uppercase text-text-muted">Grabber projects</p>
+      <p className="px-2 pb-1 pt-3 text-xs font-semibold uppercase tracking-wider text-text-muted">Grabber projects</p>
       {grabberProjects.map((p) => {
         const running = p.status === 'exploring' || p.status === 'downloading'
         const active = selectedFilter === 'grabber' && selectedGrabberId === p.id
@@ -208,7 +210,7 @@ export function CategorySidebar({
               title={`${p.name} — ${p.files_downloaded} downloaded, ${p.files_matched} matched`}
               className={`${rowClass(active, `grabber:${p.id}`)} flex-1`}
             >
-              <PackIcon name="grabber" className="h-4 w-4" />
+              <PackIcon name="grabber" className="h-5 w-5" />
               <span className="flex-1 truncate">{p.name}</span>
               <span className={countClass(active, true)}>
                 {p.files_downloaded} file{p.files_downloaded === 1 ? '' : 's'}
@@ -236,13 +238,13 @@ export function CategorySidebar({
       <button
         type="button"
         onClick={onNewGrabber}
-        className="flex h-8 items-center gap-2 rounded-md px-2 text-left text-base text-text-muted hover:bg-surface-2"
+        className="flex h-9 items-center gap-2 rounded-md px-2 text-left text-base text-text-muted hover:bg-surface-2"
       >
-        <Plus className="h-4 w-4 shrink-0" aria-hidden="true" />
+        <Plus className="h-5 w-5 shrink-0" aria-hidden="true" />
         New grabber project
       </button>
 
-      <p className="px-2 pb-1 pt-3 text-xs font-semibold uppercase text-text-muted">Queues</p>
+      <p className="px-2 pb-1 pt-3 text-xs font-semibold uppercase tracking-wider text-text-muted">Queues</p>
       {queues.map((q) => (
         <div key={q.id} className="group relative flex items-center gap-1" {...dropProps(`queue:${q.id}`, { kind: 'queue', id: q.id })}>
           <button
@@ -257,7 +259,7 @@ export function CategorySidebar({
             title={`${q.name} — double-click to open the scheduler`}
             className={`${rowClass(selectedQueue === q.id, `queue:${q.id}`)} flex-1`}
           >
-            <PackIcon name="queue" className="h-4 w-4" />
+            <PackIcon name="queue" className="h-5 w-5" />
             <span className="flex-1 truncate">{q.name}</span>
             <span className={countClass(selectedQueue === q.id, true)}>
               {q.file_count} file{q.file_count === 1 ? '' : 's'}
@@ -293,9 +295,9 @@ export function CategorySidebar({
       <button
         type="button"
         onClick={onAddQueue}
-        className="flex h-8 items-center gap-2 rounded-md px-2 text-left text-base text-text-muted hover:bg-surface-2"
+        className="flex h-9 items-center gap-2 rounded-md px-2 text-left text-base text-text-muted hover:bg-surface-2"
       >
-        <Plus className="h-4 w-4 shrink-0" aria-hidden="true" />
+        <Plus className="h-5 w-5 shrink-0" aria-hidden="true" />
         New queue
       </button>
     </nav>

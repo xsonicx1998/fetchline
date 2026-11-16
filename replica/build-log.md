@@ -2994,3 +2994,68 @@ as-is; dark only.
   smoke screenshot should show all 11 toolbar buttons with no
   scrollbar, "Main download queue 0 files" in full, and the white
   empty-state icon.
+
+## Round 47 — stronger neon, clearer waves, bigger icons, gradient Add a link, glowing panels — 2026-11-16
+
+The user approved the plan: the current design is good, refine it
+further toward the reference (the same design-reference image).
+Visual only — no engine changes, no new features, no renamed or
+deleted buttons or functions; dark only.
+
+- **Stronger neon glow:** the glow tokens went three-layer (hot
+  core + mid halo + wide wash) in `index.css` and
+  `replica/design/tokens.json` — purple
+  `0 0 12px rgba(139,32,255,.75), 0 0 28px rgba(139,32,255,.45),
+  0 0 48px rgba(139,32,255,.22)`, cyan the same shape. Toolbar
+  icons now glow constantly via new `.icon-glow-{cyan,pink,
+  purple,white}` classes (`drop-shadow`, which follows the SVG
+  strokes) and brighten on hover; the Add URL button uses the
+  stronger `shadow-glow`.
+- **Clearer gradient waves:** the neon-waves SVG strokes are
+  brighter and thicker (purple glow 28→34 px at .85 opacity,
+  cyan 34→40 px at .80, bottom wave .35→.50) and the backdrop
+  scrim lightened again, 0.45/0.60 → 0.30/0.45, so the waves read
+  clearly across the bottom.
+- **Options gear glows strongly blue + purple:** the halo is
+  48 → 56 px with a cyan-centred radial gradient and a
+  three-layer cyan + purple box-shadow
+  (`0 0 18px cyan .60, 0 0 36px purple .55, 0 0 60px purple .30`);
+  the gear itself is 32 → 36 px with the cyan icon glow.
+- **Bigger, clearer icons:** toolbar icons 28 → 32 px, labels
+  11 → 12 px, toolbar 84 → 92 px tall; sidebar icons 16 → 20 px
+  and rows 32 → 36 px. The Round 46 fit still holds: re-checked
+  with real font metrics (DejaVu Sans Bold as the upper bound),
+  toolbar content totals ~949 px against 1008 px available, and
+  the sidebar row totals ~258 px against 280 px — "Delete
+  Completed" stays on one line, "Main download queue 0 files"
+  stays in full.
+- **"Add a link" is a purple→blue gradient:** the empty-state
+  button is now `linear-gradient(90deg, #8b20ff, #2563eb)` with
+  the stronger glow, 44 px tall; the heading is 20 px bold and
+  the description 15 px.
+- **Glowing soft borders:** the sidebar and the main area are
+  now rounded panels (`rounded-xl`, new `shadow-panel` token:
+  a 1 px purple edge at .28 plus purple/cyan washes), inset 8 px
+  from the toolbar and footer; the main panel is translucent
+  (`bg-surface/40`) so the waves show through behind the table,
+  and the active sidebar row glows.
+- **Spacing / sizes / fonts:** toolbar 84 → 92 px, sidebar
+  section headers letter-spaced, empty-state gaps 12 → 16 px.
+  Font stays Inter with Segoe UI fallback (the pack has no font
+  files); `tokens.json` layout values updated (sidebar 280,
+  toolbar 92).
+- **Contrast (WCAG AA):** every changed pair passes — white on
+  the gradient ends 5.60 / 5.17, white / muted / faint on the
+  translucent main panel 18.36 / 8.87 / 5.43. Known pre-existing
+  issue, NOT introduced here: the accent purple #8b20ff as small
+  text scores ~2.8 on dark surfaces (dialog tabs, StatusBadge) —
+  the two `dark-accent` pairs in tokens.json score 3.38 / 3.12,
+  passing the 3.0 UI threshold but not the 4.5 text threshold.
+  Fixing it means a lighter text-purple token; left for a
+  palette decision, not this round.
+- Verified on Linux: full engine suite **417/417 pass, 0 failed**;
+  `cargo check --tests` 0 warnings; `npm run build` passes. The
+  run this push triggers is the proof — its smoke screenshot
+  should show the stronger glow, the clearer waves, the 32 px
+  icons, the gradient Add a link button and the glowing panels,
+  with all 11 toolbar buttons still fitting at 1024 px.

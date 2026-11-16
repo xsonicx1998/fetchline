@@ -38,6 +38,7 @@ function ToolbarButton({
   icon,
   label,
   color,
+  glow,
   disabled,
   onClick,
   ariaLabel,
@@ -45,6 +46,9 @@ function ToolbarButton({
   icon: PackIconName
   label: string
   color: string
+  /** Neon glow matching the icon colour (Round 47) — the
+   *  reference's icons glow constantly, brighter on hover. */
+  glow: 'cyan' | 'pink' | 'white' | 'purple'
   disabled?: boolean
   onClick: () => void
   ariaLabel?: string
@@ -56,10 +60,10 @@ function ToolbarButton({
       onClick={onClick}
       aria-label={ariaLabel ?? label}
       title={ariaLabel ?? label}
-      className="flex min-w-fit flex-auto flex-col items-center justify-center gap-1 rounded-md px-1 py-1.5 hover:bg-surface-2 disabled:opacity-45"
+      className="group flex min-w-fit flex-auto flex-col items-center justify-center gap-1 rounded-md px-1 py-1.5 hover:bg-surface-2 disabled:opacity-45"
     >
-      <PackIcon name={icon} className={`h-7 w-7 ${color}`} />
-      <span className="max-w-full whitespace-nowrap text-[11px] font-medium leading-tight text-text">
+      <PackIcon name={icon} className={`h-8 w-8 ${color} icon-glow-${glow}`} />
+      <span className="max-w-full whitespace-nowrap text-xs font-medium leading-tight text-text">
         {label}
       </span>
     </button>
@@ -97,7 +101,10 @@ function GrabberItem({
  *  with no scrollbar and "Delete Completed" stays on one line
  *  (Round 46: fixed 96 px columns overflowed at 1024 px, cutting
  *  off Stop Queue and Grabber behind a scrollbar). The container
- *  is overflow-hidden, so a scrollbar can never appear. The Grabber
+ *  is overflow-hidden, so a scrollbar can never appear. Round 47:
+ *  icons 28 → 32 px, labels 11 → 12 px, icons glow constantly
+ *  (drop-shadow per colour, brighter on hover) and the Options
+ *  halo is a stronger cyan + purple multi-layer glow. The Grabber
  *  dropdown already holds Video grabber, Site grabber, Download
  *  all links and Batch — the menu bar's Downloads actions live
  *  there now that the menu bar is gone. Disabled states match the
@@ -130,14 +137,14 @@ export function Toolbar({ actions, selected, queue, hasDownloading, hasComplete 
     <div
       role="toolbar"
       aria-label="Download actions"
-      className="flex h-[84px] shrink-0 items-stretch gap-0.5 overflow-hidden border-b border-border bg-surface px-2 py-1"
+      className="flex h-[92px] shrink-0 items-stretch gap-0.5 overflow-hidden border-b border-border bg-surface px-2 py-1 shadow-[0_1px_12px_rgba(139,32,255,0.12)]"
     >
       <button
         type="button"
         onClick={actions.add}
         aria-label="Add URL"
         title="Add URL"
-        className="mr-1 flex h-12 shrink-0 items-center gap-2 self-center rounded-xl bg-accent px-4 font-semibold text-on-accent shadow-glow hover:bg-accent-hover"
+        className="mr-1 flex h-12 shrink-0 items-center gap-2 self-center rounded-xl bg-accent px-5 text-[15px] font-semibold text-on-accent shadow-glow hover:bg-accent-hover"
       >
         <PackIcon name="add-url" className="h-6 w-6" />
         Add URL
@@ -147,6 +154,7 @@ export function Toolbar({ actions, selected, queue, hasDownloading, hasComplete 
         icon="resume"
         label="Resume"
         color="text-info"
+        glow="cyan"
         disabled={!canResume}
         onClick={actions.resume}
       />
@@ -154,6 +162,7 @@ export function Toolbar({ actions, selected, queue, hasDownloading, hasComplete 
         icon="stop"
         label="Stop"
         color="text-danger"
+        glow="pink"
         disabled={!canStop}
         onClick={actions.stop}
       />
@@ -161,6 +170,7 @@ export function Toolbar({ actions, selected, queue, hasDownloading, hasComplete 
         icon="stop-all"
         label="Stop All"
         color="text-danger"
+        glow="pink"
         disabled={!hasDownloading}
         onClick={actions.stopAll}
       />
@@ -169,6 +179,7 @@ export function Toolbar({ actions, selected, queue, hasDownloading, hasComplete 
         icon="delete"
         label="Delete"
         color="text-text"
+        glow="white"
         disabled={!selected}
         onClick={actions.deleteSelected}
       />
@@ -176,6 +187,7 @@ export function Toolbar({ actions, selected, queue, hasDownloading, hasComplete 
         icon="delete-completed"
         label="Delete Completed"
         color="text-danger"
+        glow="pink"
         disabled={!hasComplete}
         onClick={actions.deleteCompleted}
         ariaLabel="Delete Completed"
@@ -186,20 +198,25 @@ export function Toolbar({ actions, selected, queue, hasDownloading, hasComplete 
         onClick={actions.settings}
         aria-label="Options"
         title="Options"
-        className="flex min-w-fit flex-auto flex-col items-center justify-center gap-1 rounded-md px-1 py-1.5 hover:bg-surface-2"
+        className="group flex min-w-fit flex-auto flex-col items-center justify-center gap-1 rounded-md px-1 py-1.5 hover:bg-surface-2"
       >
         <span
-          className="flex h-12 w-12 items-center justify-center rounded-full shadow-glow"
-          style={{ background: 'radial-gradient(circle, rgba(139,32,255,.55), rgba(139,32,255,.10))' }}
+          className="flex h-14 w-14 items-center justify-center rounded-full"
+          style={{
+            background: 'radial-gradient(circle, rgba(139,32,255,.70), rgba(0,200,255,.25) 55%, rgba(139,32,255,.08))',
+            boxShadow:
+              '0 0 18px rgba(0,200,255,.60), 0 0 36px rgba(139,32,255,.55), 0 0 60px rgba(139,32,255,.30)',
+          }}
         >
-          <PackIcon name="options" className="h-8 w-8 text-info" />
+          <PackIcon name="options" className="h-9 w-9 text-info icon-glow-cyan" />
         </span>
-        <span className="whitespace-nowrap text-[11px] font-medium leading-tight text-text">Options</span>
+        <span className="whitespace-nowrap text-xs font-medium leading-tight text-text">Options</span>
       </button>
       <ToolbarButton
         icon="scheduler"
         label="Scheduler"
         color="text-danger"
+        glow="pink"
         onClick={actions.scheduler}
       />
       <ToolbarSeparator />
@@ -207,6 +224,7 @@ export function Toolbar({ actions, selected, queue, hasDownloading, hasComplete 
         icon="start-queue"
         label="Start Queue"
         color="text-info"
+        glow="cyan"
         disabled={!canStartQueue}
         onClick={actions.startQueue}
       />
@@ -214,6 +232,7 @@ export function Toolbar({ actions, selected, queue, hasDownloading, hasComplete 
         icon="stop-queue"
         label="Stop Queue"
         color="text-danger"
+        glow="pink"
         disabled={!canStopQueue}
         onClick={actions.stopQueue}
       />
@@ -224,10 +243,10 @@ export function Toolbar({ actions, selected, queue, hasDownloading, hasComplete 
           aria-haspopup="menu"
           aria-expanded={grabberOpen}
           onClick={() => setGrabberOpen((v) => !v)}
-          className="flex h-full w-full flex-col items-center justify-center gap-1 rounded-md px-1 py-1.5 hover:bg-surface-2"
+          className="group flex h-full w-full flex-col items-center justify-center gap-1 rounded-md px-1 py-1.5 hover:bg-surface-2"
         >
-          <PackIcon name="grabber" className="h-7 w-7 text-info" />
-          <span className="flex items-center gap-0.5 whitespace-nowrap text-[11px] font-medium leading-tight text-text">
+          <PackIcon name="grabber" className="h-8 w-8 text-info icon-glow-cyan" />
+          <span className="flex items-center gap-0.5 whitespace-nowrap text-xs font-medium leading-tight text-text">
             Grabber
             <ChevronDown className="h-3 w-3 text-text-muted" aria-hidden="true" />
           </span>

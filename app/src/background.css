@@ -6,7 +6,10 @@
    deleted in Round 45). A light scrim keeps labels readable while
    the waves stay visible at the bottom-right, as in the reference
    (Round 46 lightened it from 0.55/0.70: the reference's waves are
-   more prominent across the bottom).
+   more prominent across the bottom. Round 47 lightened it again
+   to 0.30/0.45 and brightened the wave strokes themselves, so the
+   gradient waves read clearly — the empty-state and table text
+   still sit on near-opaque dark surfaces, so contrast holds.)
    Imported after index.css in main.tsx, so it wins over the plain
    body background there.
    NOTE: this only shows because the app root divs (App.tsx,
@@ -14,7 +17,7 @@
    shows through them. Do not re-add bg-bg there. */
 body {
   background-image:
-    linear-gradient(rgba(11, 15, 36, 0.45), rgba(11, 15, 36, 0.60)),
+    linear-gradient(rgba(11, 15, 36, 0.30), rgba(11, 15, 36, 0.45)),
     url('./assets/backgrounds/sonic-neon-waves.svg');
   background-size: cover;
   background-position: center;

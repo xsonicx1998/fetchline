@@ -6,9 +6,12 @@
   <filter id="glow" x="-40%" y="-100%" width="180%" height="300%"><feGaussianBlur stdDeviation="18"/></filter>
  </defs>
  <rect width="1920" height="1080" fill="url(#base)"/>
- <path d="M-100 700 C250 560 420 850 730 900 S1180 980 1450 730 S1770 390 2020 430" fill="none" stroke="url(#purple)" stroke-width="28" opacity=".65" filter="url(#glow)"/>
- <path d="M-100 700 C250 560 420 850 730 900 S1180 980 1450 730 S1770 390 2020 430" fill="none" stroke="url(#purple)" stroke-width="5"/>
- <path d="M650 1120 C970 850 1200 1000 1470 820 S1750 620 2020 540" fill="none" stroke="url(#cyan)" stroke-width="34" opacity=".6" filter="url(#glow)"/>
- <path d="M650 1120 C970 850 1200 1000 1470 820 S1750 620 2020 540" fill="none" stroke="url(#cyan)" stroke-width="6"/>
- <path d="M-80 970 C280 820 450 1080 760 1030 S1120 880 1370 950" fill="none" stroke="#8B20FF" stroke-width="18" opacity=".35" filter="url(#glow)"/>
+ <!-- Round 47: the wave strokes are brighter and thicker than the
+      pack's originals, so the gradient waves read clearly behind
+      the panels — the glow layer and the bright core both went up. -->
+ <path d="M-100 700 C250 560 420 850 730 900 S1180 980 1450 730 S1770 390 2020 430" fill="none" stroke="url(#purple)" stroke-width="34" opacity=".85" filter="url(#glow)"/>
+ <path d="M-100 700 C250 560 420 850 730 900 S1180 980 1450 730 S1770 390 2020 430" fill="none" stroke="url(#purple)" stroke-width="6"/>
+ <path d="M650 1120 C970 850 1200 1000 1470 820 S1750 620 2020 540" fill="none" stroke="url(#cyan)" stroke-width="40" opacity=".8" filter="url(#glow)"/>
+ <path d="M650 1120 C970 850 1200 1000 1470 820 S1750 620 2020 540" fill="none" stroke="url(#cyan)" stroke-width="7"/>
+ <path d="M-80 970 C280 820 450 1080 760 1030 S1120 880 1370 950" fill="none" stroke="#8B20FF" stroke-width="22" opacity=".5" filter="url(#glow)"/>
 </svg>

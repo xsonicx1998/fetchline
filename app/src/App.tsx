@@ -448,7 +448,7 @@ export default function App() {
         </div>
       ) : null}
 
-      <div className="flex min-h-0 flex-1">
+      <div className="flex min-h-0 flex-1 gap-2 p-2">
         <CategorySidebar
           categories={categories}
           downloads={downloads}
@@ -472,7 +472,13 @@ export default function App() {
           onSyncQueue={(queueId) => void run(() => syncQueueNow(queueId).then(() => undefined))}
           onDropDownload={(downloadId, target) => void handleDropDownload(downloadId, target)}
         />
-        <main className="min-w-0 flex-1 overflow-auto">
+        {/* Round 47: the main area is a rounded panel with a thin
+            glowing border, as in the reference — inset from the
+            toolbar/footer by the row's gap/padding, like the
+            sidebar panel. The translucent surface lets the neon
+            waves show through behind the table while the rows stay
+            readable (the thead is opaque). */}
+        <main className="min-w-0 flex-1 overflow-auto rounded-xl border border-border bg-surface/40 shadow-panel">
           <DownloadTable
             downloads={visible}
             queues={queues}

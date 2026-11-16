@@ -39,8 +39,14 @@
 
   --shadow-card: 0 1px 2px rgba(0, 0, 0, .30);
   --shadow-pop: 0 12px 32px rgba(0, 0, 0, .50);
-  --shadow-glow: 0 0 10px rgba(139, 32, 255, .60), 0 0 24px rgba(139, 32, 255, .35);
-  --shadow-glow-cyan: 0 0 10px rgba(0, 200, 255, .55), 0 0 22px rgba(0, 200, 255, .30);
+  /* Neon glow (Round 47, stronger): three layers so the glow
+   * reads as neon, not blur — a tight hot core, a mid halo and a
+   * wide faint wash. */
+  --shadow-glow: 0 0 12px rgba(139, 32, 255, .75), 0 0 28px rgba(139, 32, 255, .45), 0 0 48px rgba(139, 32, 255, .22);
+  --shadow-glow-cyan: 0 0 12px rgba(0, 200, 255, .70), 0 0 28px rgba(0, 200, 255, .40), 0 0 48px rgba(0, 200, 255, .20);
+  /* Glowing soft panel border (Round 47): a thin luminous edge
+   * around the sidebar and main panels, as in the reference. */
+  --shadow-panel: 0 0 0 1px rgba(139, 32, 255, .28), 0 0 24px rgba(139, 32, 255, .14), 0 0 48px rgba(0, 200, 255, .06);
 
   --motion-fast: 120ms; --motion-base: 200ms; --motion-ease: cubic-bezier(.2, .8, .2, 1);
 }
@@ -62,6 +68,20 @@ body {
   width: 100%;
   height: 100%;
 }
+
+/* Neon icon glow (Round 47): the reference's toolbar icons glow
+   constantly — cyan for go/add, pink for stop/delete, purple for
+   the gear, soft white for plain icons. drop-shadow (not
+   box-shadow) follows the SVG strokes. The button carries `group`,
+   so hovering it brightens the glow. */
+.icon-glow-cyan { filter: drop-shadow(0 0 5px rgba(0, 200, 255, .65)) drop-shadow(0 0 14px rgba(0, 200, 255, .30)); }
+.icon-glow-pink { filter: drop-shadow(0 0 5px rgba(240, 45, 205, .60)) drop-shadow(0 0 14px rgba(240, 45, 205, .28)); }
+.icon-glow-purple { filter: drop-shadow(0 0 5px rgba(139, 32, 255, .70)) drop-shadow(0 0 14px rgba(139, 32, 255, .35)); }
+.icon-glow-white { filter: drop-shadow(0 0 6px rgba(255, 255, 255, .45)) drop-shadow(0 0 16px rgba(255, 255, 255, .20)); }
+.group:hover .icon-glow-cyan { filter: drop-shadow(0 0 8px rgba(0, 200, 255, .90)) drop-shadow(0 0 20px rgba(0, 200, 255, .45)); }
+.group:hover .icon-glow-pink { filter: drop-shadow(0 0 8px rgba(240, 45, 205, .85)) drop-shadow(0 0 20px rgba(240, 45, 205, .40)); }
+.group:hover .icon-glow-purple { filter: drop-shadow(0 0 8px rgba(139, 32, 255, .90)) drop-shadow(0 0 20px rgba(139, 32, 255, .50)); }
+.group:hover .icon-glow-white { filter: drop-shadow(0 0 8px rgba(255, 255, 255, .60)) drop-shadow(0 0 20px rgba(255, 255, 255, .30)); }
 
 /* Visible keyboard focus everywhere (components.md). */
 :focus-visible {

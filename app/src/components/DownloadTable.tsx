@@ -73,21 +73,21 @@ export function DownloadTable({ downloads, queues, categories, selectedId, onSel
 
   if (downloads.length === 0) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
+      <div className="flex h-full flex-col items-center justify-center gap-4 p-6 text-center">
         <PackIcon
           name="download"
-          className="h-16 w-16 text-white drop-shadow-[0_0_16px_rgba(255,255,255,0.35)]"
+          className="icon-glow-white h-16 w-16 text-white"
         />
-        <p className="text-lg font-semibold">No downloads yet</p>
-        <p className="max-w-md text-base text-text-muted">
+        <p className="text-xl font-bold">No downloads yet</p>
+        <p className="max-w-md text-[15px] text-text-muted">
           Paste a link to start your first download. It will show up here with live speed and time left.
         </p>
         <button
           type="button"
           onClick={onAdd}
-          className="inline-flex h-10 items-center gap-2 rounded-md bg-accent px-4 font-semibold text-on-accent shadow-glow hover:bg-accent-hover"
+          className="inline-flex h-11 items-center gap-2 rounded-lg bg-[linear-gradient(90deg,#8b20ff,#2563eb)] px-5 text-[15px] font-semibold text-on-accent shadow-glow hover:brightness-110"
         >
-          <PackIcon name="link" className="h-4 w-4" />
+          <PackIcon name="link" className="h-5 w-5" />
           Add a link
         </button>
       </div>

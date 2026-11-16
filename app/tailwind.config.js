@@ -52,6 +52,8 @@ export default {
         card: 'var(--shadow-card)',
         pop: 'var(--shadow-pop)',
         glow: 'var(--shadow-glow)',
+        'glow-cyan': 'var(--shadow-glow-cyan)',
+        panel: 'var(--shadow-panel)',
       },
       spacing: {
         sidebar: '280px',
