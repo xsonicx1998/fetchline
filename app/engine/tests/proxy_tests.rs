@@ -694,6 +694,31 @@ async fn ftp_download_multi_segment_byte_exact() {
     );
 }
 
+/// BUG-048 follow-up: poll the download's `.part` file until it
+/// holds a real payload byte. The file is pre-sized to the full
+/// size with `set_len` (all zeros) before the segments start, and
+/// the fixture payload is `(i % 251)`, so any written region is
+/// non-zero almost everywhere — the first non-zero byte is proof a
+/// segment has written. Polling every 5 ms catches the first chunk
+/// (~30–80 ms after the segments spawn), long before the run loop
+/// could finish the file. Returns false on timeout instead of
+/// pausing blind: a timeout must fail the test loudly, never
+/// re-introduce the race it exists to kill.
+async fn wait_for_part_bytes(mgr: &DownloadManager, id: &str, secs: u64) -> bool {
+    for _ in 0..secs * 200 {
+        if let Ok(Some(row)) = mgr.get_download(id) {
+            let part = format!("{}.part", row.save_path);
+            if let Ok(bytes) = std::fs::read(&part) {
+                if bytes.iter().any(|&b| b != 0) {
+                    return true;
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    false
+}
+
 #[tokio::test]
 async fn ftp_pause_then_resume_completes_byte_exact() {
     let server = FtpServer::start(FtpConfig {
@@ -715,11 +740,27 @@ async fn ftp_pause_then_resume_completes_byte_exact() {
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
-    // BUG-048: wait for the run task to report itself downloading,
-    // then pause immediately — never a blind sleep. The status flip
-    // and the download start in the same task, so observing
-    // "downloading" bounds how far the download can have got.
-    assert!(wait_for_status(&mgr, &id, "downloading", 10).await);
+    // BUG-048 (follow-up, CI run #23): the status flip cannot gate
+    // the pause. `set_status("downloading")` is the run task's FIRST
+    // step, before any segment is spawned, so waiting for
+    // "downloading" lets the pause land before a single byte is
+    // written ("pause landed before any bytes", the exact opposite
+    // of run #22's "file finished before the pause"). The pause
+    // window is bounded on BOTH sides, so the gate must be real
+    // progress — and the DB row cannot be that gate: progress is
+    // checkpointed to SQLite only every 2 s (CHECKPOINT_INTERVAL)
+    // while the whole download takes ~400 ms, so the row reads 0
+    // for the entire download. The `.part` file is the live
+    // observable instead (see `wait_for_part_bytes` below): it is
+    // pre-sized with set_len (all zeros) and the segments write
+    // real payload bytes into it, so the first non-zero byte proves
+    // bytes have landed. Pausing at that moment is early enough
+    // that the run loop — which notices the flag at most one
+    // 250 ms progress tick later — still has ~1 MiB to go.
+    assert!(
+        wait_for_part_bytes(&mgr, &id, 10).await,
+        "no bytes written to the .part file within 10 s"
+    );
     mgr.pause_download(&id).await.unwrap();
     assert!(wait_for_status(&mgr, &id, "paused", 10).await);
     let paused = mgr.get_download(&id).unwrap().unwrap();

@@ -4139,6 +4139,43 @@ suite 15/15 three consecutive runs; full engine suite 417/417;
 run this push triggers is the proof — its build-windows job must
 go green.
 
+## BUG-048 follow-up (CI run #23): wait-for-status fires before any bytes — 2026-11-16
+
+The BUG-048 fix above failed again in CI run #23 (43790293212,
+head 9bca7f53) on the SAME test with the OPPOSITE timing
+failure: `ftp_pause_then_resume_completes_byte_exact` panicked
+at `proxy_tests.rs:726:5` with "pause landed before any bytes"
+(331 passed, 1 failed; all other suites ok). The wait-for-status
+gate was wrong: `set_status("downloading")` is the run task's
+FIRST step, before any segment is spawned, so observing
+"downloading" lets the pause land before a single byte is
+written. The test's pause window is bounded on BOTH sides — it
+needs bytes > 0 AND bytes < total at pause time.
+
+Fix (test-only, `proxy_tests.rs`): replace the
+wait-for-status gate with a wait for REAL PROGRESS — poll the
+download's `.part` file until it holds a non-zero payload byte
+(new helper `wait_for_part_bytes`, 5 ms poll, 10 s timeout that
+fails loudly instead of pausing blind). The DB row cannot be
+that gate: progress is checkpointed to SQLite only every 2 s
+(`CHECKPOINT_INTERVAL`) while the whole 2 MiB download takes
+~400 ms, so the row reads 0 for the entire download. The
+`.part` file is pre-sized with `set_len` (all zeros) and the
+fixture payload is `(i % 251)`, so the first non-zero byte
+proves a segment has written. Pausing at that moment (~30–80 ms
+after the segments spawn) is early enough that the run loop —
+which notices the flag at most one 250 ms progress tick later —
+still has ~1 MiB to go. The 50 ms fixture chunk delay is kept.
+The test still asserts exactly what it asserted before (bytes >
+0 and < full size at pause, byte-exact file after resume). No
+engine source, no other test, and no UI file changed.
+
+Status: fixed as described. Verified on Linux: the proxy_tests
+suite 15/15 five consecutive runs; full engine suite 417/417;
+`cargo check --tests` 0 warnings; `npm run build` passes. The
+run this push triggers is the proof — its build-windows job must
+go green so the user can see the Round 48 look.
+
 ## Known limitations, not bugs (round-24 additions)
 
 - The Tauri shell never compiles or runs on this VM, so a

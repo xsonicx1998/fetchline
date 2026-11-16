@@ -3154,3 +3154,27 @@ deleted buttons or functions; dark only.
   --tests` 0 warnings; `npm run build` passes. The run this
   push triggers is the proof — it must go green so the user can
   see the Round 48 look.
+
+## Round 48 CI-fix — CI verdict (run #23, 2026-11-16)
+- **Run #23 (43790293212, head 9bca7f53) FAILED again at
+  build-windows, step 8 "Engine tests (smoke check)" (exit
+  code 1); smoke-test and extension-capture-test were skipped.**
+  The fix passed locally (proxy_tests 15/15 three times, full
+  suite 417/417), so this is NOT a local-verification miss.
+- **The exact failing test is NOT established from the API:**
+  the check-run annotations only say "Process completed with
+  exit code 1" (plus an unrelated Node 20 deprecation warning)
+  and the job-logs endpoint returns 403. A browser task signed
+  in as xsonicx1998 is needed to read the step-8 log of job
+  133046938946 and name the failing test. Two possibilities:
+  the same FTP test failed again despite the fix (the margin
+  analysis: pause flag noticed within 250 ms of being set vs
+  ~400 ms download — thin on a loaded runner), or a DIFFERENT
+  test failed. No fix loop was started; the verdict note rides
+  with the next push.
+
+## Round 48 CI-fix #2 — BUG-048 follow-up: wait for real progress, not status — 2026-11-16
+- **Diagnosis CONFIRMED by a browser log read:** exactly ONE test failed in run #23 — `ftp_pause_then_resume_completes_byte_exact` (`app/engine/tests/proxy_tests.rs:726:5`), "pause landed before any bytes". Per-suite totals: 331 passed, 1 failed (proxy_tests 14 passed, 1 failed; all other suites ok). Steps 1–7 passed; smoke + capture were skipped. This is the SAME test with the OPPOSITE timing failure to run #22 ("file finished before the pause").
+- **Root cause (proven from the engine source):** `set_status("downloading")` is the run task's FIRST step, before any segment is spawned — so the BUG-048 wait-for-status gate lets the pause land before a single byte is written. The pause window is bounded on BOTH sides: bytes > 0 AND bytes < total at pause time.
+- **Fix, test-only (BUG-048 follow-up, see `replica/bugs.md`):** the wait-for-status gate is replaced with a wait for REAL PROGRESS — new helper `wait_for_part_bytes` polls the download's `.part` file every 5 ms until it holds a non-zero payload byte, then pauses (10 s timeout fails loudly, never pauses blind). The DB row cannot be the gate: progress is checkpointed to SQLite only every 2 s while the whole download takes ~400 ms, so the row reads 0 throughout. The `.part` file is pre-sized with `set_len` (all zeros) and the fixture payload is `(i % 251)`, so the first non-zero byte proves a segment has written; pausing then (~30–80 ms after spawn) leaves ~1 MiB for the run loop's ≤250 ms notice latency. The 50 ms fixture chunk delay is kept. No engine source, no other test, no UI file changed; the test asserts exactly what it asserted before.
+- Verified on Linux: proxy_tests 15/15 five consecutive runs; full engine suite **417/417 pass, 0 failed**; `cargo check --tests` 0 warnings; `npm run build` passes. The run this push triggers is the proof — it must go green so the user can see the Round 48 look.
