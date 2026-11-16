@@ -50,8 +50,8 @@ def main() -> int:
 
     if manifest.get("manifest_version") != 3:
         problems.append("manifest_version must be 3")
-    if manifest.get("name") != "Fetchline":
-        problems.append("name must be Fetchline")
+    if manifest.get("name") != "Sonic Manager":
+        problems.append("name must be Sonic Manager")
     if len(manifest.get("description", "")) <= 10:
         problems.append("description must be a real sentence, not a stub")
     if manifest.get("background", {}).get("service_worker") != "background.js":

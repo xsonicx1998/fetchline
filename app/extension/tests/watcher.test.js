@@ -9,7 +9,11 @@
 // assertions cover the whole decision: cancel the browser
 // download, erase it, hand the URL to the host (with that URL's
 // cookies, when the browser has any), and record the hand-off —
-// or leave the browser download completely alone.
+// or leave the browser download completely alone. BUG-049: the
+// fake's cancel enforces Chrome's real signature (a bare download
+// id — cancel({ id }) throws "No matching signature" in real
+// Chrome), and a cancel failure (download already finished) must
+// still hand the URL over instead of dropping it silently.
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -25,7 +29,7 @@ const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
 // Test-only dummy cookie values, never real ones.
 const DUMMY_COOKIES = [{ name: "session", value: "test-dummy-value" }];
 
-function loadBackground({ seed = {}, cookiesForUrl = () => [] } = {}) {
+function loadBackground({ seed = {}, cookiesForUrl = () => [], cancelThrows = false } = {}) {
   const storage = { ...seed };
   const sentMessages = [];
   const cancelled = [];
@@ -62,7 +66,16 @@ function loadBackground({ seed = {}, cookiesForUrl = () => [] } = {}) {
     },
     downloads: {
       onCreated: { addListener(fn) { listeners.downloadCreated = fn; } },
-      cancel: async ({ id }) => { cancelled.push(id); },
+      // BUG-049: chrome.downloads.cancel takes the bare download id,
+      // cancel(downloadId) — the old code passed { id } and real
+      // Chrome threw "No matching signature" on every download while
+      // this fake happily destructured the object. The fake now
+      // enforces the real signature, so a wrong call fails here.
+      cancel: async (id) => {
+        if (typeof id !== "number") throw new Error("No matching signature.");
+        if (cancelThrows) throw new Error("Download not found");
+        cancelled.push(id);
+      },
       erase: async ({ id }) => { erased.push(id); },
     },
     cookies: {
@@ -207,4 +220,30 @@ test("watcher ignores non-http(s) downloads and downloads that already finished"
   });
   assert.deepEqual(env.cancelled, []);
   assert.equal(env.sentMessages.length, 0);
+});
+
+test("watcher calls cancel with the bare download id, not a query object (BUG-049)", async () => {
+  // Real Chrome's cancel(downloadId) throws "No matching signature"
+  // for cancel({ id }) — and the old fake destructured the object,
+  // so the suite passed while every real download sailed past the
+  // watcher. The fake now throws on a non-number, so this test
+  // fails if the call ever regresses to the object form.
+  const env = loadBackground({ seed: { desktopIntegration: true } });
+  await env.fireDownload(zipDownload(7));
+  assert.deepEqual(env.cancelled, [7]);
+  assert.equal(env.sentMessages.length, 1);
+});
+
+test("watcher still hands over when cancel fails because the download already finished (BUG-049)", async () => {
+  // A small file can complete before this async handler runs, so
+  // cancel rejects. The URL must still reach Sonic Manager instead
+  // of vanishing silently — and the browser's finished copy is
+  // left alone (nothing is erased when nothing was cancelled).
+  const env = loadBackground({ seed: { desktopIntegration: true }, cancelThrows: true });
+  await env.fireDownload(zipDownload(1));
+  assert.deepEqual(env.cancelled, []);
+  assert.deepEqual(env.erased, []);
+  assert.equal(env.sentMessages.length, 1);
+  assert.equal(env.sentMessages[0].url, "http://127.0.0.1/file.zip");
+  assert.equal(env.storage.lastHandoff.ok, true);
 });

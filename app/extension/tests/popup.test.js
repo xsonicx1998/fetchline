@@ -114,14 +114,14 @@ function loadPopup({ storageData = {}, nativeReply = { ok: true, pending_count: 
 test("formatPendingCount covers unknown, none, one and many", () => {
   const exposed = loadPopupExposed();
   assert.equal(exposed.formatPendingCount(null), "Waiting links: unknown — check the desktop app.");
-  assert.equal(exposed.formatPendingCount(0), "No links waiting in Fetchline.");
+  assert.equal(exposed.formatPendingCount(0), "No links waiting in Sonic Manager.");
   assert.equal(
     exposed.formatPendingCount(1),
-    "1 link waiting in Fetchline — it will start downloading shortly.",
+    "1 link waiting in Sonic Manager — it will start downloading shortly.",
   );
   assert.equal(
     exposed.formatPendingCount(3),
-    "3 links waiting in Fetchline — they will start downloading shortly.",
+    "3 links waiting in Sonic Manager — they will start downloading shortly.",
   );
 });
 
@@ -158,7 +158,7 @@ function loadPopupExposed() {
 
 test("formatHandoff covers nothing sent, success and failure", () => {
   const popup = loadPopupExposed();
-  assert.equal(popup.formatHandoff(null), "Nothing sent to Fetchline yet.");
+  assert.equal(popup.formatHandoff(null), "Nothing sent to Sonic Manager yet.");
   const ok = popup.formatHandoff({ at: Date.UTC(2026, 10, 15, 12, 0, 0), ok: true, message: "Sent to Fetchline" });
   assert.match(ok, /^Last sent /);
   assert.match(ok, /Sent to Fetchline/);
@@ -177,7 +177,7 @@ test("popup shows the stored pending count and last hand-off on open", async () 
   });
   await env.domContentLoaded();
   await tick();
-  assert.match(env.elements.pendingInfo.textContent, /2 links waiting in Fetchline/);
+  assert.match(env.elements.pendingInfo.textContent, /2 links waiting in Sonic Manager/);
   assert.match(env.elements.handoffInfo.textContent, /^Last sent /);
   assert.match(env.elements.handoffInfo.textContent, /Sent to Fetchline/);
 });
@@ -186,8 +186,8 @@ test("popup shows the empty state when nothing is waiting or sent", async () => 
   const env = loadPopup({ storageData: { pendingCount: 0, catchEnabled: true } });
   await env.domContentLoaded();
   await tick();
-  assert.equal(env.elements.pendingInfo.textContent, "No links waiting in Fetchline.");
-  assert.equal(env.elements.handoffInfo.textContent, "Nothing sent to Fetchline yet.");
+  assert.equal(env.elements.pendingInfo.textContent, "No links waiting in Sonic Manager.");
+  assert.equal(env.elements.handoffInfo.textContent, "Nothing sent to Sonic Manager yet.");
 });
 
 test("Send this page records a successful hand-off and the pending count", async () => {
@@ -198,7 +198,7 @@ test("Send this page records a successful hand-off and the pending count", async
   await tick(20);
   assert.equal(env.storage.lastHandoff.ok, true);
   assert.equal(env.storage.pendingCount, 3);
-  assert.match(env.elements.pendingInfo.textContent, /3 links waiting in Fetchline/);
+  assert.match(env.elements.pendingInfo.textContent, /3 links waiting in Sonic Manager/);
   assert.match(env.elements.handoffInfo.textContent, /^Last sent /);
 });
 
@@ -210,6 +210,6 @@ test("Send this page records a failed hand-off when the host is unreachable", as
   await env.elements.sendTab.listeners.click();
   await tick(20);
   assert.equal(env.storage.lastHandoff.ok, false);
-  assert.match(env.storage.lastHandoff.message, /Could not reach Fetchline/);
+  assert.match(env.storage.lastHandoff.message, /Could not reach Sonic Manager/);
   assert.match(env.elements.handoffInfo.textContent, /^Last send failed /);
 });

@@ -292,8 +292,29 @@ chrome.downloads.onCreated.addListener(async (item) => {
     if (!DEFAULT_CATCH_EXTENSIONS.includes(ext)) return;
     // Cancel the browser download first, then hand the URL over, so
     // the file is never downloaded twice.
-    await chrome.downloads.cancel({ id: item.id });
-    await chrome.downloads.erase({ id: item.id }).catch(() => {});
+    // BUG-049 (Round 50): chrome.downloads.cancel takes the bare
+    // download id — cancel(downloadId) — NOT a query object.
+    // The old call cancel({ id }) threw "No matching signature" in
+    // real Chrome on EVERY download, the empty catch below swallowed
+    // it, and the browser download sailed past the watcher uncaught
+    // with no trace (the Node fake destructured an object, so the
+    // unit suite never saw it). A cancel can still fail when the
+    // download already finished — a small file can complete before
+    // this async handler runs — and then there is nothing left to
+    // cancel; the URL is handed over anyway so it still lands in
+    // Sonic Manager instead of vanishing silently, and the browser's
+    // finished copy stays where it is (only a cancelled download is
+    // erased from the browser's list).
+    let cancelled = false;
+    try {
+      await chrome.downloads.cancel(item.id);
+      cancelled = true;
+    } catch {
+      // Already finished (or otherwise uncancellable): hand over anyway.
+    }
+    if (cancelled) {
+      await chrome.downloads.erase({ id: item.id }).catch(() => {});
+    }
     await handToFetchline({
       type: "download_link",
       url: item.url,

@@ -3,7 +3,7 @@
 ``extension-capture-test``).
 
 Proves a link from a real browser reaches the desktop app on
-Windows, in three phases. Exit 0 only if every enabled phase
+Windows, in four phases. Exit 0 only if every enabled phase
 passes; any failure prints ``FAIL: <phase>: <reason>`` and exits 1.
 
 Phase 1 — host protocol (deterministic): drive the real
@@ -51,14 +51,28 @@ wait for it to drain the queue (startup + 30 s tick) and download
 the pinned file through the real engine, then verify the file in
 the Downloads folder byte-for-byte (SHA-256).
 
+Phase 4 — downloads watcher (BUG-049): a REAL browser download of
+a .mp4 must be intercepted by the extension's watcher
+(background.js): the browser download is cancelled and erased and
+a pending_links row lands in app.db. The fixture is a local HTTP
+server serving the file SLOWLY (512 KiB at ~80 KiB/s, so the
+download stays in_progress for ~6 s like a real mp4) — a fast
+fixture would let the download finish before the async watcher
+runs and prove nothing about the cancel. The old code called
+cancel({ id }) — Chrome's cancel takes the bare download id, so
+every real download threw "No matching signature", the empty catch
+swallowed it, and the file downloaded in the browser while the app
+saw nothing (the Node fake destructured an object, so the unit
+suite never saw it). This phase is the regression proof in a real
+browser.
+
 What this does NOT prove (honest limits): a human right-click
-on a link ("Download with Fetchline") or the download watcher
-cannot be driven in headless Chrome — there is no mouse and no
-real popup window. Those paths use the SAME ``sendNativeMessage``
-+ ``handToFetchline`` code Phase 2 exercises (the popup's ping
-and the menu's ``download_link`` go through the same transport),
-and the menu/watcher wiring itself is covered by the Node
-fake-``chrome`` tests (``npm run test:extension*``).
+on a link ("Download with Fetchline") cannot be driven in headless
+Chrome — there is no mouse and no real popup window. That path
+uses the SAME ``sendNativeMessage`` + ``handToFetchline`` code the
+watcher phase (Phase 4) exercises end to end, and the menu wiring
+itself is covered by the Node fake-``chrome`` tests
+(``npm run test:extension*``).
 
 Usage (PowerShell, from the repo root):
   python scripts/capture-test.py --host-exe "C:\\Program Files\\Sonic Manager\\fetchline-host.exe"
@@ -73,11 +87,11 @@ Usage (PowerShell, from the repo root):
 the app binary); Phase 2 verifies the installed registry key +
 manifest point at it instead of registering its own.
 
-``--skip-browser`` / ``--skip-drain`` exist for local debugging
-only (Phase 1 alone can run on Linux against a built host).
-Phase 2 is stdlib-only now (the CDP pipe needs no
+``--skip-browser`` / ``--skip-drain`` / ``--skip-watcher`` exist for
+local debugging only (Phase 1 alone can run on Linux against a
+built host). Phase 2 is stdlib-only now (the CDP pipe needs no
 websocket-client — the old port/websocket popup check was
-removed in Round 38); Phase 1 and 3 are stdlib-only too.
+removed in Round 38); Phases 1, 3 and 4 are stdlib-only too.
 """
 
 import argparse
@@ -95,6 +109,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 REPORT = "capture-test-report.txt"
 RESULTS = []
@@ -812,6 +827,210 @@ def phase_drain(app_exe, downloads_dir, expected_sha256, timeout=120):
     log("PHASE 3 PASSED")
 
 
+# ---------------------------------------------------------------- Phase 4
+
+# Small fake mp4: a valid ftyp box + padding. The watcher only looks
+# at the filename extension, and Chrome downloads whatever bytes the
+# server sends — the content never needs to play.
+_WATCHER_MP4 = (
+    b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00isomiso2"
+    + b"\x00" * (64 * 1024)
+)
+
+_WATCHER_PAGE = """<!doctype html><html><body>
+<a id="dl" href="/test.mp4" download="test.mp4">Download test.mp4</a>
+</body></html>
+"""
+
+
+class _WatcherFixtureHandler(BaseHTTPRequestHandler):
+    def log_message(self, *args):  # keep the test output clean
+        pass
+
+    def do_GET(self):
+        if self.path == "/page.html":
+            body = _WATCHER_PAGE.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path == "/test.mp4":
+            # 512 KiB streamed at ~80 KiB/s: the download stays
+            # in_progress for ~6 s, like a real mp4 from the
+            # internet. A fast fixture would let the download finish
+            # before the async watcher runs and prove nothing about
+            # the cancel (BUG-049: the cancel itself was the bug).
+            body = _WATCHER_MP4 * 8
+            self.send_response(200)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header(
+                "Content-Disposition", 'attachment; filename="test.mp4"'
+            )
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            for off in range(0, len(body), 16384):
+                try:
+                    self.wfile.write(body[off:off + 16384])
+                    self.wfile.flush()
+                except ConnectionError:
+                    return  # watcher cancelled: Chrome closed the stream
+                time.sleep(0.2)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+
+def _watcher_pending_rows(db_path, url):
+    uri = "file:" + urllib.parse.quote(db_path) + "?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=10)
+    try:
+        return conn.execute(
+            "SELECT id, url, source, status FROM pending_links WHERE url = ?",
+            (url,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def phase_watcher(chrome_exe, extension_dir, host_exe, db_path):
+    """Phase 4 — downloads watcher: a REAL browser download of a
+    .mp4 must be intercepted (cancelled + erased by the extension,
+    pending_links row in app.db). Runs AFTER the drain phase, when
+    the app is no longer running, so the row stays pending for the
+    read-back. The installed host + registry key were already
+    verified by Phase 2; this phase proves the watcher itself."""
+    log("PHASE 4: downloads watcher — real browser download must be intercepted")
+    if not os.path.isfile(db_path):
+        fail("watcher", f"app.db not found at {db_path}")
+    extension_dir = os.path.abspath(extension_dir)
+    manifest_path = os.path.join(extension_dir, "manifest.json")
+    try:
+        with open(manifest_path, encoding="utf-8") as f:
+            expected_id = chrome_id_from_key(json.load(f).get("key", ""))
+    except (OSError, json.JSONDecodeError) as e:
+        fail("watcher", f"cannot read {manifest_path}: {e}")
+    if not expected_id:
+        fail("watcher", "extension manifest.json has no usable key")
+
+    download_dir = tempfile.mkdtemp(prefix="fl-watcher-downloads-")
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _WatcherFixtureHandler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    page_url = f"http://127.0.0.1:{port}/page.html"
+    mp4_url = f"http://127.0.0.1:{port}/test.mp4"
+    log(f"  fixture server on 127.0.0.1:{port}; download dir {download_dir}")
+
+    profile_dir = tempfile.mkdtemp(prefix="fl-watcher-profile-")
+    stderr_path = os.path.abspath("watcher-chrome-stderr.log")
+    pipe = None
+    try:
+        pipe = PipeCDP(chrome_exe, profile_dir, stderr_path)
+        try:
+            installed_id = install_extension(pipe, extension_dir)
+        except (TimeoutError, RuntimeError, OSError) as e:
+            for line in chrome_stderr_tail(stderr_path, 30):
+                log("    chrome stderr: " + line)
+            fail("watcher", f"could not install the extension via CDP pipe: {e}")
+        if installed_id != expected_id:
+            fail(
+                "watcher",
+                f"CDP install returned id {installed_id}, not the stable id "
+                f"{expected_id}",
+            )
+        log("  installed id matches the stable id from manifest.json's key")
+        time.sleep(3)  # let onInstalled/onStartup refresh desktop settings
+        target = pipe.call(
+            "Target.createTarget", {"url": page_url}, timeout=15
+        )
+        target_id = target.get("targetId")
+        if not target_id:
+            fail("watcher", f"Target.createTarget for {page_url} returned no targetId")
+        attached = pipe.call(
+            "Target.attachToTarget",
+            {"targetId": target_id, "flatten": True},
+            timeout=15,
+        )
+        session_id = attached.get("sessionId")
+        if not session_id:
+            fail("watcher", "Target.attachToTarget returned no sessionId")
+        try:
+            pipe.call(
+                "Page.setDownloadBehavior",
+                {
+                    "behavior": "allow",
+                    "downloadPath": download_dir,
+                    "eventsEnabled": True,
+                },
+                session_id=session_id,
+                timeout=15,
+            )
+        except (TimeoutError, RuntimeError, OSError) as e:
+            log(f"  (Page.setDownloadBehavior failed, continuing: {e})")
+        pipe.call("Page.enable", session_id=session_id, timeout=15)
+        time.sleep(1.5)
+        pipe.call(
+            "Runtime.evaluate",
+            {
+                "expression": "document.getElementById('dl') ? (document.getElementById('dl').click(), 'clicked') : 'no link'",
+                "returnByValue": True,
+            },
+            session_id=session_id,
+            timeout=15,
+        )
+        log("  clicked the download link")
+        rows = []
+        landed = []
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            try:
+                rows = _watcher_pending_rows(db_path, mp4_url)
+            except sqlite3.Error as e:
+                fail("watcher", f"could not read pending_links from {db_path}: {e}")
+            landed = [
+                f for f in os.listdir(download_dir) if f.startswith("test")
+            ]
+            if rows:
+                break
+            time.sleep(0.5)
+        log(f"  pending rows for the fixture URL: {rows}")
+        log(f"  files in download dir: {landed}")
+        if not rows:
+            for line in chrome_stderr_tail(stderr_path, 30):
+                log("    chrome stderr: " + line)
+            fail(
+                "watcher",
+                "no pending_links row for the fixture mp4 after 30 s — the "
+                "watcher did not hand the browser download over "
+                "(BUG-049: the cancel call itself used to throw "
+                "'No matching signature' and the empty catch swallowed it)",
+            )
+        row = rows[0]
+        if row[2] != "browser" or row[3] != "pending":
+            fail(
+                "watcher",
+                f"pending_links row is wrong: source={row[2]!r} status={row[3]!r}",
+            )
+        if landed:
+            fail(
+                "watcher",
+                f"pending row landed but the browser ALSO downloaded the file "
+                f"({landed}) — the watcher handed over without cancelling",
+            )
+        log("  watcher cancelled the browser download and handed the URL over")
+    finally:
+        server.shutdown()
+        if pipe is not None:
+            try:
+                pipe.call("Browser.close", timeout=10)
+            except Exception:  # noqa: BLE001
+                pass
+            pipe.close()
+        shutil.rmtree(profile_dir, ignore_errors=True)
+        shutil.rmtree(download_dir, ignore_errors=True)
+    log("PHASE 4 PASSED")
+
+
 # ---------------------------------------------------------------- main
 
 def main():
@@ -828,6 +1047,8 @@ def main():
                     help="local debugging only: skip Phase 2")
     ap.add_argument("--skip-drain", action="store_true",
                     help="local debugging only: skip Phase 3")
+    ap.add_argument("--skip-watcher", action="store_true",
+                    help="local debugging only: skip Phase 4")
     args = ap.parse_args()
 
     phase_host(args.host_exe, args.db_path, args.url)
@@ -842,6 +1063,12 @@ def main():
         ran.append("drain")
     else:
         log("PHASE 3 SKIPPED (--skip-drain)")
+    if not args.skip_watcher:
+        phase_watcher(args.chrome_exe, args.extension_dir,
+                      args.host_exe, args.db_path)
+        ran.append("watcher")
+    else:
+        log("PHASE 4 SKIPPED (--skip-watcher)")
     log(f"CAPTURE TEST PASSED (phases run: {', '.join(ran)})")
     write_report()
 

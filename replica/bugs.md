@@ -4176,6 +4176,104 @@ suite 15/15 five consecutive runs; full engine suite 417/417;
 run this push triggers is the proof — its build-windows job must
 go green so the user can see the Round 48 look.
 
+## Round 50 — BUG-049 (real product bug: the downloads watcher never catches anything — `chrome.downloads.cancel` takes a bare id, and the code passed an object) — 2026-11-16
+
+The user installed the run #25 MSI and reported on his own PC:
+a real mp4 download in Chrome was NOT intercepted (it downloaded
+in the browser), right-click → "Download with Fetchline" did
+NOTHING visible, and nothing appeared in the app — while the
+extension popup said "Connected". He then closed his browser and
+asked for the testing to be done without him, so the popup's
+last-handoff line (the decisive evidence) was never provided.
+
+Reproduction on the VPS (headless Chrome 157, current extension,
+freshly built host, fresh app.db, local fixture server): the
+failure reproduced exactly, 3 runs in a row, slow fixture and
+fast fixture alike — popup "Connected to the Sonic Manager
+desktop app", catch toggle ON, pending "No links waiting", the
+mp4 landed in the browser's download dir, no pending_links row,
+no hand-off recorded. The worker was alive and the listener was
+registered (`chrome.downloads.onCreated.hasListeners()` true, and
+a probe listener added in the live worker DID fire with
+`state=in_progress`), so the event was delivered — the handler
+itself was exiting silently.
+
+Root cause (proven with an instrumented background.js on the VPS
+copy only, console trace via CDP): the handler ran cleanly
+through every gate — `catch=true desktop=true excl=[]/[]`,
+`ext=mp4 host=127.0.0.1`, "cancelling id=1" — and then
+`chrome.downloads.cancel({ id: item.id })` threw:
+"Error in invocation of downloads.cancel(integer downloadId,
+optional function callback): No matching signature."
+`chrome.downloads.cancel` takes the BARE download id —
+`cancel(downloadId)` — not a query object (only `erase`/`search`
+take query objects). The empty `catch {}` swallowed the throw,
+so every browser download sailed past the watcher uncaught with
+no trace anywhere. Never caught before because the Node fake in
+`watcher.test.js` destructured an object
+(`cancel: async ({ id }) => ...`), encoding the same wrong
+assumption — the 9-case suite passed while every real download
+failed. The popup handshake (Phase 2) never exercises cancel,
+and the right-click path never calls it either, so nothing in CI
+could see it. Note the user's right-click doing nothing is a
+SEPARATE symptom this bug does not explain by itself (the menu
+path never calls cancel): on his streaming site the download was
+most likely a blob:/HLS flow the watcher ignores by design, or
+the hand-off landed but was never drained visibly — still open,
+needs his PC to confirm now that the watcher works.
+
+Fix (product, `app/extension/background.js`, the watcher only):
+`cancel({ id: item.id })` → `cancel(item.id)`, and a cancel
+failure is now non-fatal for the hand-off — a small file can
+complete before this async handler runs, and then there is
+nothing left to cancel; the URL is handed over anyway so it
+still lands in Sonic Manager instead of vanishing silently (the
+browser's finished copy stays where it is; only a cancelled
+download is erased from the browser's list). `erase({ id })` is
+unchanged: erase really does take a query object.
+
+Tests:
+- `app/extension/tests/watcher.test.js`: the fake's cancel now
+  enforces Chrome's real signature (throws "No matching
+  signature." on a non-number — the old call fails 4 of the 11
+  tests against this fake, proven by running the suite against
+  the reverted call in /tmp), plus two new tests: cancel is
+  called with the bare id, and a cancel failure (download
+  already finished) still hands the URL over with nothing
+  erased. Suite 11/11.
+- `scripts/capture-test.py` gains Phase 4 (watcher): a second
+  headless Chrome launch installs the extension, clicks a real
+  download link for a SLOW fixture mp4 (512 KiB at ~80 KiB/s,
+  in_progress ~6 s), and asserts a pending_links row
+  (source=browser, status=pending) AND no file in the download
+  dir. Runs after the drain phase, with `--skip-watcher` for
+  local debugging. The module docstring now says four phases,
+  and the honest-limits note now records that the watcher IS
+  driven (only the human right-click still cannot be).
+- Rebrand leftovers found while verifying (pre-existing since
+  Round 40, NOT this bug): `validate_manifest.py` still demanded
+  the name "Fetchline" and all 6 `popup.test.js` cases expected
+  "Fetchline" strings, so `npm run test:extension` and the popup
+  suite failed locally while CI stayed green (the workflow never
+  runs them). Fixed in this round by updating the expectations
+  to "Sonic Manager" (dummy input messages and the
+  `FetchlinePopup` identifier untouched). Extension JS suite now
+  38/38 (11 watcher + 4 background + 6 popup + 17 video).
+
+Status: fixed as described. Verified on the VPS with the fixed
+background.js: slow fixture INTERCEPTED (pending row
+`http://127.0.0.1:63555/test.mp4`, source=browser,
+status=pending; no file in the download dir; popup "Last sent
+4:20:41 AM: Link queued — Fetchline will pick it up", "1 link
+waiting in Sonic Manager") and fast fixture INTERCEPTED the same
+way. Verified on Linux: full engine suite 417/417; `cargo
+check --tests` 0 warnings; `npm run build` passes; extension JS
+38/38. The run this push triggers is the proof — its
+extension-capture-test job must go green with Phase 4 passing.
+The progress window still has never been seen opening in the
+running app (session 0 has no GUI), and the user's own-PC
+confirmation is still outstanding.
+
 ## Known limitations, not bugs (round-24 additions)
 
 - The Tauri shell never compiles or runs on this VM, so a
