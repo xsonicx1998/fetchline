@@ -99,8 +99,19 @@ export function CategorySidebar({
     `flex h-8 items-center gap-2 rounded-md px-2 text-left text-base ${
       active ? 'bg-accent font-semibold text-on-accent' : 'text-text hover:bg-surface-2'
     } ${dropTarget === key ? 'outline outline-2 outline-accent' : ''}`
-  const countClass = (active: boolean) =>
-    `text-xs ${active ? 'text-white/80' : 'text-text-muted'}`
+  const countClass = (active: boolean, fadeOnHover = false) =>
+    `text-xs transition-opacity ${active ? 'text-white/80' : 'text-text-muted'} ${
+      fadeOnHover ? 'group-hover:opacity-0' : ''
+    }`
+
+  /** Hover actions (delete category, run grabber, sync/schedule a
+   *  queue) live in an absolutely-positioned overlay at the row's
+   *  right edge instead of in the row's flow (Round 46): in-flow
+   *  buttons, invisible or not, still took 24 px each, which is
+   *  what truncated "Main download queue" at 1024 px. The overlay
+   *  fades in on hover/focus and the count fades out under it; the
+   *  buttons stay keyboard-focusable (opacity-0, never
+   *  display:none). */
 
   const allActive = selectedCategory === null && selectedQueue === null && selectedFilter === 'all'
 
@@ -125,7 +136,7 @@ export function CategorySidebar({
         <span className={countClass(allActive)}>{countFor(null)}</span>
       </button>
       {categories.map((c) => (
-        <div key={c.id} className="group flex items-center gap-1" {...dropProps(`cat:${c.id}`, { kind: 'category', id: c.id })}>
+        <div key={c.id} className="group relative flex items-center gap-1" {...dropProps(`cat:${c.id}`, { kind: 'category', id: c.id })}>
           <button
             type="button"
             onClick={() => {
@@ -138,7 +149,7 @@ export function CategorySidebar({
           >
             <PackIcon name="category-folder" className="h-4 w-4" />
             <span className="flex-1 truncate">{c.name}</span>
-            <span className={countClass(selectedCategory === c.id)}>{countFor(c.id)}</span>
+            <span className={countClass(selectedCategory === c.id, true)}>{countFor(c.id)}</span>
           </button>
           {c.is_builtin ? null : (
             <button
@@ -146,7 +157,7 @@ export function CategorySidebar({
               onClick={() => onDeleteCategory(c)}
               aria-label={`Delete category ${c.name}`}
               title={`Delete category ${c.name}`}
-              className="shrink-0 rounded-md p-1 text-text-muted opacity-0 hover:bg-surface-2 hover:text-danger group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
+              className="absolute right-1 top-1/2 z-10 -translate-y-1/2 rounded-md p-1 text-text-muted opacity-0 hover:bg-surface-2 hover:text-danger group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
             >
               <Trash2 className="h-4 w-4" aria-hidden="true" />
             </button>
@@ -189,7 +200,7 @@ export function CategorySidebar({
         const running = p.status === 'exploring' || p.status === 'downloading'
         const active = selectedFilter === 'grabber' && selectedGrabberId === p.id
         return (
-          <div key={p.id} className="group flex items-center gap-1">
+          <div key={p.id} className="group relative flex items-center gap-1">
             <button
               type="button"
               onClick={() => onSelectFilter('grabber', p.id)}
@@ -199,11 +210,11 @@ export function CategorySidebar({
             >
               <PackIcon name="grabber" className="h-4 w-4" />
               <span className="flex-1 truncate">{p.name}</span>
-              <span className={countClass(active)}>
+              <span className={countClass(active, true)}>
                 {p.files_downloaded} file{p.files_downloaded === 1 ? '' : 's'}
               </span>
               {running ? (
-                <span className="shrink-0 rounded-full bg-info px-2 py-0.5 text-xs font-semibold text-bg">
+                <span className="shrink-0 rounded-full bg-info px-2 py-0.5 text-xs font-semibold text-bg transition-opacity group-hover:opacity-0">
                   Running
                 </span>
               ) : null}
@@ -214,7 +225,7 @@ export function CategorySidebar({
                 onClick={() => onRunGrabber(p.id)}
                 aria-label={`Run grabber project ${p.name}`}
                 title={`Run ${p.name}`}
-                className="shrink-0 rounded-md p-1 text-text-muted opacity-0 hover:bg-surface-2 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
+                className="absolute right-1 top-1/2 z-10 -translate-y-1/2 rounded-md p-1 text-text-muted opacity-0 hover:bg-surface-2 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
               >
                 <Play className="h-4 w-4" aria-hidden="true" />
               </button>
@@ -233,7 +244,7 @@ export function CategorySidebar({
 
       <p className="px-2 pb-1 pt-3 text-xs font-semibold uppercase text-text-muted">Queues</p>
       {queues.map((q) => (
-        <div key={q.id} className="group flex items-center gap-1" {...dropProps(`queue:${q.id}`, { kind: 'queue', id: q.id })}>
+        <div key={q.id} className="group relative flex items-center gap-1" {...dropProps(`queue:${q.id}`, { kind: 'queue', id: q.id })}>
           <button
             type="button"
             onClick={() => {
@@ -248,33 +259,35 @@ export function CategorySidebar({
           >
             <PackIcon name="queue" className="h-4 w-4" />
             <span className="flex-1 truncate">{q.name}</span>
-            <span className={countClass(selectedQueue === q.id)}>
+            <span className={countClass(selectedQueue === q.id, true)}>
               {q.file_count} file{q.file_count === 1 ? '' : 's'}
             </span>
             {q.running ? (
-              <span className="shrink-0 rounded-full bg-info px-2 py-0.5 text-xs font-semibold text-bg">
+              <span className="shrink-0 rounded-full bg-info px-2 py-0.5 text-xs font-semibold text-bg transition-opacity group-hover:opacity-0">
                 Running
               </span>
             ) : null}
           </button>
-          <button
-            type="button"
-            onClick={() => onSyncQueue(q.id)}
-            aria-label={`Sync ${q.name} now`}
-            title={`Sync ${q.name} now`}
-            className="shrink-0 rounded-md p-1 text-text-muted opacity-0 hover:bg-surface-2 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
-          >
-            <RefreshCw className="h-4 w-4" aria-hidden="true" />
-          </button>
-          <button
-            type="button"
-            onClick={() => onOpenScheduler(q.id)}
-            aria-label={`Schedule ${q.name}`}
-            title={`Schedule ${q.name}`}
-            className="shrink-0 rounded-md p-1 text-text-muted opacity-0 hover:bg-surface-2 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
-          >
-            <Play className="h-4 w-4" aria-hidden="true" />
-          </button>
+          <div className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+            <button
+              type="button"
+              onClick={() => onSyncQueue(q.id)}
+              aria-label={`Sync ${q.name} now`}
+              title={`Sync ${q.name} now`}
+              className="rounded-md p-1 text-text-muted hover:bg-surface-2 focus-visible:opacity-100"
+            >
+              <RefreshCw className="h-4 w-4" aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              onClick={() => onOpenScheduler(q.id)}
+              aria-label={`Schedule ${q.name}`}
+              title={`Schedule ${q.name}`}
+              className="rounded-md p-1 text-text-muted hover:bg-surface-2 focus-visible:opacity-100"
+            >
+              <Play className="h-4 w-4" aria-hidden="true" />
+            </button>
+          </div>
         </div>
       ))}
       <button

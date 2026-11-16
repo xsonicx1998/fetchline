@@ -76,7 +76,7 @@ export function DownloadTable({ downloads, queues, categories, selectedId, onSel
       <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
         <PackIcon
           name="download"
-          className="h-16 w-16 text-accent drop-shadow-[0_0_16px_rgba(139,32,255,0.65)]"
+          className="h-16 w-16 text-white drop-shadow-[0_0_16px_rgba(255,255,255,0.35)]"
         />
         <p className="text-lg font-semibold">No downloads yet</p>
         <p className="max-w-md text-base text-text-muted">

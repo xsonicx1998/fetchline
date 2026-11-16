@@ -2952,3 +2952,45 @@ font stays Inter with Segoe UI fallback (the logo SVG declares
   `?raw` icons are inlined in the JS). The run this push triggers
   is the proof — its smoke screenshot should show the new look:
   no menu bar, purple Add URL button, glowing gear, neon waves.
+
+## Round 46 — match the reference exactly at 1024×768: toolbar fits, queue name fits, white empty-state icon — 2026-11-16
+
+The user confirmed the pack's design-reference image (also
+`~/workspace/user/files/17670_1_7tp5.webp`) is the final look. The
+run #19 smoke screenshot (1024×768) showed two layout defects
+against it, logged as BUG-047 and fixed here. Nothing else changes:
+palette, icons, logo, menu-bar removal and all Round 45 work stay
+as-is; dark only.
+
+- **Toolbar fits at 1024 px (BUG-047a):** the 96 px fixed columns ×
+  11 buttons totalled ~1160 px, so Stop Queue and Grabber were cut
+  off behind a horizontal scrollbar. Buttons are now
+  `flex-auto` with `min-width: fit-content`: each sizes to its
+  content and grows to fill the row, so all 11 buttons fit with
+  room to spare and "Delete Completed" stays on one line. The
+  container is `overflow-hidden` instead of `overflow-x-auto`, so
+  a scrollbar can never appear. Fit checked with real font
+  metrics (DejaVu Sans Bold, wider than Inter, as the upper
+  bound): content totals ~873 px against 1008 px available.
+- **"Main download queue" fits (BUG-047b):** the sidebar went
+  256 → 280 px, and the hover actions (delete category, run
+  grabber, sync/schedule queue) moved out of the row's flow into
+  an absolutely-positioned overlay at the row's right edge — the
+  in-flow buttons, invisible or not, still took 24 px each, which
+  is what truncated the name. The overlay fades in on
+  hover/focus and the count fades out under it; the buttons stay
+  keyboard-focusable (opacity-0, never display:none), and the
+  Running pill fades with the count. Same treatment for the
+  category delete and grabber run buttons, which had the same
+  latent truncation for long names.
+- **Empty state matches the reference:** the download icon is
+  white now (was purple) with a soft white glow, and the backdrop
+  scrim lightened 0.55/0.70 → 0.45/0.60 so the neon waves show
+  more prominently across the bottom, as in the reference.
+- Verified on Linux: full engine suite **417/417 pass, 0 failed**;
+  `cargo check --tests` 0 warnings; `npm run build` passes. No
+  engine changes, no new features, no renamed or deleted buttons
+  or functions. The run this push triggers is the proof — its
+  smoke screenshot should show all 11 toolbar buttons with no
+  scrollbar, "Main download queue 0 files" in full, and the white
+  empty-state icon.

@@ -4072,6 +4072,37 @@ class, so the body backdrop still shows through in dark mode. The
 run this push triggers is the proof — its smoke screenshot should
 show the dark theme with the background and the header logo.
 
+## Round 46 — BUG-047: the Round 45 layout overflows at 1024×768 — 2026-11-16
+
+Found in the run #19 smoke screenshot (1024×768), fixed in this
+round. Two defects against the user's final reference image:
+
+- **BUG-047a (toolbar overflow):** the toolbar's 96 px fixed
+  columns × 11 buttons totalled ~1160 px, wider than the 1024 px
+  window — "Stop Queue" and "Grabber" were cut off and a
+  horizontal scrollbar appeared under the toolbar. Fix: buttons
+  are `flex-auto` with `min-width: fit-content` (size to content,
+  grow to fill the row) and the container is `overflow-hidden`
+  instead of `overflow-x-auto`. Fit verified with real font
+  metrics before building (DejaVu Sans Bold, wider than Inter:
+  ~873 px of content against 1008 px available).
+- **BUG-047b ("Main download queue" truncates):** the sidebar
+  showed "Main download qu... 0 files" despite the 256 px width.
+  Root cause: the hover-action buttons (sync/schedule) sat in the
+  row's flow and took 24 px each even while invisible
+  (opacity-0), leaving ~102 px for a ~140 px name. Fix: sidebar
+  256 → 280 px, and the hover actions moved to an
+  absolutely-positioned overlay at the row's right edge (count
+  fades out under it on hover/focus; buttons stay
+  keyboard-focusable). Same treatment for the category delete and
+  grabber run buttons.
+
+Status: fixed as described. Verified on Linux: full engine suite
+417/417 pass, 0 failed; `cargo check --tests` 0 warnings; `npm
+run build` passes. The run this push triggers is the proof — its
+smoke screenshot should show all 11 toolbar buttons with no
+scrollbar and "Main download queue 0 files" in full.
+
 ## Known limitations, not bugs (round-24 additions)
 
 - The Tauri shell never compiles or runs on this VM, so a

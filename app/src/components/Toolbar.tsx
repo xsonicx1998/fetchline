@@ -56,7 +56,7 @@ function ToolbarButton({
       onClick={onClick}
       aria-label={ariaLabel ?? label}
       title={ariaLabel ?? label}
-      className="flex w-[96px] shrink-0 flex-col items-center justify-center gap-1 rounded-md px-1 py-1.5 hover:bg-surface-2 disabled:opacity-45"
+      className="flex min-w-fit flex-auto flex-col items-center justify-center gap-1 rounded-md px-1 py-1.5 hover:bg-surface-2 disabled:opacity-45"
     >
       <PackIcon name={icon} className={`h-7 w-7 ${color}`} />
       <span className="max-w-full whitespace-nowrap text-[11px] font-medium leading-tight text-text">
@@ -92,12 +92,16 @@ function GrabberItem({
  *  pack's SVG icons in the reference's colours — cyan for go/add,
  *  pink for stop/delete, white for plain delete. Add URL is the big
  *  glowing purple button; Options is the big cyan gear in a purple
- *  halo. Columns are 96 px wide, so "Delete Completed" fits on one
- *  line (Round 44 truncated it at 76 px). The Grabber dropdown
- *  already holds Video grabber, Site grabber, Download all links
- *  and Batch — the menu bar's Downloads actions live there now
- *  that the menu bar is gone. Disabled states match the old menu
- *  bar exactly. */
+ *  halo. Buttons size to their content and grow to fill the row
+ *  (flex-auto, min-width fit-content), so all 11 fit at 1024 px
+ *  with no scrollbar and "Delete Completed" stays on one line
+ *  (Round 46: fixed 96 px columns overflowed at 1024 px, cutting
+ *  off Stop Queue and Grabber behind a scrollbar). The container
+ *  is overflow-hidden, so a scrollbar can never appear. The Grabber
+ *  dropdown already holds Video grabber, Site grabber, Download
+ *  all links and Batch — the menu bar's Downloads actions live
+ *  there now that the menu bar is gone. Disabled states match the
+ *  old menu bar exactly. */
 export function Toolbar({ actions, selected, queue, hasDownloading, hasComplete }: ToolbarProps) {
   const [grabberOpen, setGrabberOpen] = useState(false)
 
@@ -126,7 +130,7 @@ export function Toolbar({ actions, selected, queue, hasDownloading, hasComplete 
     <div
       role="toolbar"
       aria-label="Download actions"
-      className="flex h-[84px] shrink-0 items-stretch gap-0.5 overflow-x-auto border-b border-border bg-surface px-2 py-1"
+      className="flex h-[84px] shrink-0 items-stretch gap-0.5 overflow-hidden border-b border-border bg-surface px-2 py-1"
     >
       <button
         type="button"
@@ -182,7 +186,7 @@ export function Toolbar({ actions, selected, queue, hasDownloading, hasComplete 
         onClick={actions.settings}
         aria-label="Options"
         title="Options"
-        className="flex w-[96px] shrink-0 flex-col items-center justify-center gap-1 rounded-md px-1 py-1.5 hover:bg-surface-2"
+        className="flex min-w-fit flex-auto flex-col items-center justify-center gap-1 rounded-md px-1 py-1.5 hover:bg-surface-2"
       >
         <span
           className="flex h-12 w-12 items-center justify-center rounded-full shadow-glow"
@@ -214,13 +218,13 @@ export function Toolbar({ actions, selected, queue, hasDownloading, hasComplete 
         onClick={actions.stopQueue}
       />
       <ToolbarSeparator />
-      <div className="relative shrink-0">
+      <div className="relative min-w-fit flex-auto">
         <button
           type="button"
           aria-haspopup="menu"
           aria-expanded={grabberOpen}
           onClick={() => setGrabberOpen((v) => !v)}
-          className="flex h-full w-[96px] flex-col items-center justify-center gap-1 rounded-md px-1 py-1.5 hover:bg-surface-2"
+          className="flex h-full w-full flex-col items-center justify-center gap-1 rounded-md px-1 py-1.5 hover:bg-surface-2"
         >
           <PackIcon name="grabber" className="h-7 w-7 text-info" />
           <span className="flex items-center gap-0.5 whitespace-nowrap text-[11px] font-medium leading-tight text-text">

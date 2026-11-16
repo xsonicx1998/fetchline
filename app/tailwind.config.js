@@ -54,7 +54,7 @@ export default {
         glow: 'var(--shadow-glow)',
       },
       spacing: {
-        sidebar: '256px',
+        sidebar: '280px',
       },
     },
   },
