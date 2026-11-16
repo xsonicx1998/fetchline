@@ -1,6 +1,7 @@
 import { useState } from 'react'
-import { CircleCheck, Clock, Folder, FolderOpen, Globe, List, Play, Plus, Trash2 } from 'lucide-react'
+import { Play, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import type { CategoryRow, DownloadRow, GrabberProjectRow, QueueRow } from '../lib/types'
+import { PackIcon } from './PackIcon'
 
 /** Which list the main table shows. 'all' is every download (or
  *  one category's); 'unfinished' / 'finished' filter by status the
@@ -26,6 +27,9 @@ interface CategorySidebarProps {
   onOpenScheduler: (queueId: string) => void
   onRunGrabber: (projectId: string) => void
   onNewGrabber: () => void
+  /** Re-probe a sync queue now (was Downloads > Sync queue now in
+   *  the menu bar; the menu bar is gone in Round 45). */
+  onSyncQueue: (queueId: string) => void
   /** A download row was dropped on a category or queue. */
   onDropDownload: (downloadId: string, target: { kind: 'category' | 'queue'; id: string }) => void
 }
@@ -56,6 +60,7 @@ export function CategorySidebar({
   onOpenScheduler,
   onRunGrabber,
   onNewGrabber,
+  onSyncQueue,
   onDropDownload,
 }: CategorySidebarProps) {
   const [dropTarget, setDropTarget] = useState<string | null>(null)
@@ -87,10 +92,15 @@ export function CategorySidebar({
     onDrop: (e: React.DragEvent) => handleDrop(e, target),
   })
 
+  /** The active row is the reference's filled purple row, white
+   *  text — not the old soft tint. The count inside it is white
+   *  at 80% so it stays readable on the purple. */
   const rowClass = (active: boolean, key: string) =>
     `flex h-8 items-center gap-2 rounded-md px-2 text-left text-base ${
-      active ? 'bg-accent-soft font-semibold text-accent' : 'text-text hover:bg-surface-2'
+      active ? 'bg-accent font-semibold text-on-accent' : 'text-text hover:bg-surface-2'
     } ${dropTarget === key ? 'outline outline-2 outline-accent' : ''}`
+  const countClass = (active: boolean) =>
+    `text-xs ${active ? 'text-white/80' : 'text-text-muted'}`
 
   const allActive = selectedCategory === null && selectedQueue === null && selectedFilter === 'all'
 
@@ -110,9 +120,9 @@ export function CategorySidebar({
         aria-current={allActive || undefined}
         className={rowClass(allActive, 'all')}
       >
-        <FolderOpen className="h-4 w-4 shrink-0" aria-hidden="true" />
+        <PackIcon name="category-folder" className="h-4 w-4" />
         <span className="flex-1 truncate">All downloads</span>
-        <span className="text-xs text-text-muted">{countFor(null)}</span>
+        <span className={countClass(allActive)}>{countFor(null)}</span>
       </button>
       {categories.map((c) => (
         <div key={c.id} className="group flex items-center gap-1" {...dropProps(`cat:${c.id}`, { kind: 'category', id: c.id })}>
@@ -126,9 +136,9 @@ export function CategorySidebar({
             aria-current={selectedCategory === c.id || undefined}
             className={`${rowClass(selectedCategory === c.id, `cat:${c.id}`)} flex-1`}
           >
-            <Folder className="h-4 w-4 shrink-0" aria-hidden="true" />
+            <PackIcon name="category-folder" className="h-4 w-4" />
             <span className="flex-1 truncate">{c.name}</span>
-            <span className="text-xs text-text-muted">{countFor(c.id)}</span>
+            <span className={countClass(selectedCategory === c.id)}>{countFor(c.id)}</span>
           </button>
           {c.is_builtin ? null : (
             <button
@@ -159,9 +169,9 @@ export function CategorySidebar({
         aria-current={selectedFilter === 'unfinished' || undefined}
         className={rowClass(selectedFilter === 'unfinished', 'unfinished')}
       >
-        <Clock className="h-4 w-4 shrink-0" aria-hidden="true" />
+        <PackIcon name="unfinished" className="h-4 w-4" />
         <span className="flex-1 truncate">Unfinished</span>
-        <span className="text-xs text-text-muted">{unfinishedCount}</span>
+        <span className={countClass(selectedFilter === 'unfinished')}>{unfinishedCount}</span>
       </button>
       <button
         type="button"
@@ -169,9 +179,9 @@ export function CategorySidebar({
         aria-current={selectedFilter === 'finished' || undefined}
         className={rowClass(selectedFilter === 'finished', 'finished')}
       >
-        <CircleCheck className="h-4 w-4 shrink-0" aria-hidden="true" />
+        <PackIcon name="finished" className="h-4 w-4" />
         <span className="flex-1 truncate">Finished</span>
-        <span className="text-xs text-text-muted">{finishedCount}</span>
+        <span className={countClass(selectedFilter === 'finished')}>{finishedCount}</span>
       </button>
 
       <p className="px-2 pb-1 pt-3 text-xs font-semibold uppercase text-text-muted">Grabber projects</p>
@@ -187,13 +197,13 @@ export function CategorySidebar({
               title={`${p.name} — ${p.files_downloaded} downloaded, ${p.files_matched} matched`}
               className={`${rowClass(active, `grabber:${p.id}`)} flex-1`}
             >
-              <Globe className="h-4 w-4 shrink-0" aria-hidden="true" />
+              <PackIcon name="grabber" className="h-4 w-4" />
               <span className="flex-1 truncate">{p.name}</span>
-              <span className="text-xs text-text-muted">
+              <span className={countClass(active)}>
                 {p.files_downloaded} file{p.files_downloaded === 1 ? '' : 's'}
               </span>
               {running ? (
-                <span className="shrink-0 rounded-full bg-accent px-2 py-0.5 text-xs font-semibold text-on-accent">
+                <span className="shrink-0 rounded-full bg-info px-2 py-0.5 text-xs font-semibold text-bg">
                   Running
                 </span>
               ) : null}
@@ -236,16 +246,25 @@ export function CategorySidebar({
             title={`${q.name} — double-click to open the scheduler`}
             className={`${rowClass(selectedQueue === q.id, `queue:${q.id}`)} flex-1`}
           >
-            <List className="h-4 w-4 shrink-0" aria-hidden="true" />
+            <PackIcon name="queue" className="h-4 w-4" />
             <span className="flex-1 truncate">{q.name}</span>
-            <span className="text-xs text-text-muted">
+            <span className={countClass(selectedQueue === q.id)}>
               {q.file_count} file{q.file_count === 1 ? '' : 's'}
             </span>
             {q.running ? (
-              <span className="shrink-0 rounded-full bg-accent px-2 py-0.5 text-xs font-semibold text-on-accent">
+              <span className="shrink-0 rounded-full bg-info px-2 py-0.5 text-xs font-semibold text-bg">
                 Running
               </span>
             ) : null}
+          </button>
+          <button
+            type="button"
+            onClick={() => onSyncQueue(q.id)}
+            aria-label={`Sync ${q.name} now`}
+            title={`Sync ${q.name} now`}
+            className="shrink-0 rounded-md p-1 text-text-muted opacity-0 hover:bg-surface-2 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
+          >
+            <RefreshCw className="h-4 w-4" aria-hidden="true" />
           </button>
           <button
             type="button"

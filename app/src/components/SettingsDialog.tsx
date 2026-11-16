@@ -63,6 +63,9 @@ interface SettingsDialogProps {
   onClose: () => void
   /** The parent reloads settings and categories after a save. */
   onSaved: () => void
+  /** Manual update check (was Help > Check for updates in the menu
+   *  bar; the menu bar is gone in Round 45). */
+  onCheckUpdates: () => void
 }
 
 function emptyProxy(): ProxyConfigInput {
@@ -93,7 +96,7 @@ function emptyProxy(): ProxyConfigInput {
  *  dial-up (RAS) execution itself is unproven on this VM. Sounds
  *  play on Windows only; the Test button validates the WAV file
  *  here and reports that plainly. */
-export function SettingsDialog({ open, categories, onClose, onSaved }: SettingsDialogProps) {
+export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpdates }: SettingsDialogProps) {
   const [tab, setTab] = useState<Tab>('general')
   const [settings, setSettings] = useState<Settings | null>(null)
   const [loading, setLoading] = useState(false)
@@ -576,8 +579,8 @@ export function SettingsDialog({ open, categories, onClose, onSaved }: SettingsD
               <p className={hintCls}>
                 When on, Sonic Manager checks the update server once a week (on the scheduler&apos;s
                 regular tick) and asks before updating — nothing is ever installed
-                automatically. Turning it off stops the automatic check; Help &gt; Check for
-                updates still works.
+                automatically. Turning it off stops the automatic check; the button below
+                still works.
               </p>
               <div>
                 <label htmlFor="set-update-url" className={labelCls}>
@@ -600,20 +603,13 @@ export function SettingsDialog({ open, categories, onClose, onSaved }: SettingsD
                     : 'never'}
                   .
                 </p>
-              </div>
-              <div>
-                <label htmlFor="set-theme" className={labelCls}>
-                  Theme
-                </label>
-                <select
-                  id="set-theme"
-                  value={settings.theme}
-                  onChange={(e) => set('theme', e.target.value as 'light' | 'dark')}
-                  className={inputCls}
+                <button
+                  type="button"
+                  onClick={onCheckUpdates}
+                  className="mt-2 inline-flex h-9 items-center rounded-md bg-accent px-3 text-sm font-semibold text-on-accent shadow-glow hover:bg-accent-hover"
                 >
-                  <option value="light">Light</option>
-                  <option value="dark">Dark</option>
-                </select>
+                  Check for updates now
+                </button>
               </div>
               <div>
                 <label htmlFor="set-language" className={labelCls}>

@@ -2,71 +2,47 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Design tokens — copied from replica/design/tokens.css (the single
-   source is tokens.json; keep the two in sync when the palette changes).
-   Components use these custom properties via Tailwind classes. */
+/* Design tokens — the user's asset pack (Round 45, ui/colors.json +
+   ui/theme.css). Dark only now: the user deleted the light theme,
+   so :root IS the dark palette and there is no [data-theme] switch
+   any more. The single source is replica/design/tokens.json; keep
+   the two in sync when the palette changes. Components use these
+   custom properties via Tailwind classes. */
 
 :root {
-  --color-bg: #ffffff;
-  --color-surface: #f6f7f9;
-  --color-surface-2: #eceef1;
-  --color-surface-raised: #ffffff;
-  --color-border: #e2e5ea;
-  --color-border-input: #8a94a3;
-  --color-text: #171a21;
-  --color-text-muted: #5a6472;
-  --color-text-faint: #7d8794;
-  --color-accent: #c92a2a;
-  --color-accent-hover: #a82323;
-  --color-accent-soft: #fdecec;
+  --color-bg: #0b0f24;
+  --color-surface: #111833;
+  --color-surface-2: #1a2342;
+  --color-surface-raised: #202a4d;
+  --color-border: #27345c;
+  --color-border-input: #5a6b9a;
+  --color-text: #ffffff;
+  --color-text-muted: #aab4d0;
+  --color-text-faint: #7e8bb0;
+  --color-accent: #8b20ff;
+  --color-accent-hover: #a44dff;
+  --color-accent-soft: #2a1650;
   --color-on-accent: #ffffff;
-  --color-danger: #b42318;
-  --color-danger-soft: #fef3f2;
-  --color-success: #16794c;
-  --color-success-soft: #ecfdf3;
-  --color-warning: #8a6d1a;
-  --color-warning-soft: #fffaeb;
-  --color-info: #0b6fc4;
-  --color-info-soft: #eff8ff;
+  --color-danger: #f02dcd;
+  --color-danger-soft: #3a1030;
+  --color-success: #32d583;
+  --color-success-soft: #12261c;
+  --color-warning: #f5c542;
+  --color-warning-soft: #33270e;
+  --color-info: #00c8ff;
+  --color-info-soft: #0e2a3d;
 
   --font-sans: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
   --radius-sm: 6px; --radius-md: 8px; --radius-lg: 12px; --radius-xl: 16px; --radius-pill: 999px;
 
-  --shadow-card: 0 1px 2px rgba(16, 24, 40, .06), 0 1px 3px rgba(16, 24, 40, .10);
-  --shadow-pop: 0 12px 32px rgba(16, 24, 40, .16);
-  --shadow-glow: 0 0 12px rgba(201, 42, 42, .35);
-
-  --motion-fast: 120ms; --motion-base: 200ms; --motion-ease: cubic-bezier(.2, .8, .2, 1);
-}
-
-[data-theme="dark"] {
-  --color-bg: #0a0f24;
-  --color-surface: #111a35;
-  --color-surface-2: #1a2547;
-  --color-surface-raised: #1e2c52;
-  --color-border: #2a3a66;
-  --color-border-input: #5a6b9a;
-  --color-text: #f2f5fb;
-  --color-text-muted: #a8b4d0;
-  --color-text-faint: #7d8aa8;
-  --color-accent: #f73244;
-  --color-accent-hover: #ff4d5e;
-  --color-accent-soft: #3a1620;
-  --color-on-accent: #0a0f24;
-  --color-danger: #ff6b6b;
-  --color-danger-soft: #3a1d1d;
-  --color-success: #32d583;
-  --color-success-soft: #12261c;
-  --color-warning: #f5c542;
-  --color-warning-soft: #33270e;
-  --color-info: #23a9ea;
-  --color-info-soft: #12283d;
-
   --shadow-card: 0 1px 2px rgba(0, 0, 0, .30);
   --shadow-pop: 0 12px 32px rgba(0, 0, 0, .50);
-  --shadow-glow: 0 0 16px rgba(247, 50, 68, .45), 0 0 32px rgba(247, 50, 68, .18);
+  --shadow-glow: 0 0 10px rgba(139, 32, 255, .60), 0 0 24px rgba(139, 32, 255, .35);
+  --shadow-glow-cyan: 0 0 10px rgba(0, 200, 255, .55), 0 0 22px rgba(0, 200, 255, .30);
+
+  --motion-fast: 120ms; --motion-base: 200ms; --motion-ease: cubic-bezier(.2, .8, .2, 1);
 }
 
 html, body, #root { height: 100%; }
@@ -76,6 +52,15 @@ body {
   color: var(--color-text);
   font-family: var(--font-sans);
   margin: 0;
+}
+
+/* Pack icons (PackIcon.tsx): the SVG is inlined, so its inner
+   <svg> takes the wrapper's size — the 256 width/height attributes
+   on the files must not win. */
+.pack-icon svg {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 /* Visible keyboard focus everywhere (components.md). */

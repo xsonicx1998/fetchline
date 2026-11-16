@@ -1,18 +1,19 @@
-/* Sonic Manager backdrop — the user's background art, under a dark
-   scrim so labels stay readable (the art is busy: lightning and
-   rings must never fight the text). Dark theme only: the art is a
-   dark-navy image, so the light theme keeps its flat background.
+/* Sonic Manager backdrop — the user's asset-pack background
+   (sonic-neon-waves.svg: dark navy + purple/pink + cyan glowing
+   waves), replacing the old background.jpg (lightning + gold
+   rings). The SVG is text, so it reaches the repo through the
+   connector like any other asset. Dark only (the light theme was
+   deleted in Round 45). A light scrim keeps labels readable while
+   the waves stay visible at the bottom-right, as in the reference.
    Imported after index.css in main.tsx, so it wins over the plain
-   body background there. The image file
-   (app/src/assets/background.jpg) is binary: it reaches the repo
-   through the GitHub web UI.
+   body background there.
    NOTE: this only shows because the app root divs (App.tsx,
    ProgressWindow.tsx) carry no bg-bg class — the body backdrop
    shows through them. Do not re-add bg-bg there. */
-[data-theme="dark"] body {
+body {
   background-image:
-    linear-gradient(rgba(10, 15, 36, 0.84), rgba(10, 15, 36, 0.88)),
-    url('./assets/background.jpg');
+    linear-gradient(rgba(11, 15, 36, 0.55), rgba(11, 15, 36, 0.70)),
+    url('./assets/backgrounds/sonic-neon-waves.svg');
   background-size: cover;
   background-position: center;
   background-attachment: fixed;

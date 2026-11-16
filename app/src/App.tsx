@@ -25,7 +25,6 @@ import {
   startQueue,
   stopQueue,
   syncQueueNow,
-  updateSettings,
 } from './lib/api'
 import { formatSpeed } from './lib/format'
 import type { CategoryRow, DownloadRow, GrabberProjectRow, PendingAction, QueueRow, QuotaStatus, Settings, UpdateCheckResult } from './lib/types'
@@ -37,7 +36,6 @@ import { Button } from './components/Button'
 import { CategorySidebar, type SidebarFilter } from './components/CategorySidebar'
 import { DownloadAllDialog } from './components/DownloadAllDialog'
 import { DownloadTable } from './components/DownloadTable'
-import { MenuBar } from './components/MenuBar'
 import { QueueActionDialog } from './components/QueueActionDialog'
 import { SchedulerDialog } from './components/SchedulerDialog'
 import { SettingsDialog } from './components/SettingsDialog'
@@ -46,8 +44,13 @@ import { Toolbar } from './components/Toolbar'
 import { UpdateDialog } from './components/UpdateDialog'
 import { VideoGrabberDialog } from './components/VideoGrabberDialog'
 
-/** S01 — main window, IDM's arrangement (Round 44): menu bar,
- *  big-icon toolbar, categories tree on the left, file table.
+/** S01 — main window (Round 45): the user's asset pack — big-icon
+ *  toolbar, categories tree on the left, file table. No menu bar:
+ *  the reference has none (title bar only, which the native
+ *  Windows title bar provides); its actions live on the toolbar,
+ *  in the Grabber dropdown, on the table's right-click menu and in
+ *  Settings. Dark only — the light theme was deleted at the user's
+ *  instruction.
  *  The list is refreshed once a second and that refresh is the
  *  live path for the table — the `download-progress` listener that
  *  used to patch rows between polls is gone (BUG-044: it never
@@ -82,7 +85,6 @@ export default function App() {
   const [showScheduler, setShowScheduler] = useState(false)
   const [schedulerQueueId, setSchedulerQueueId] = useState<string | null>(null)
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
-  const [theme, setTheme] = useState<'light' | 'dark'>('dark')
   const [error, setError] = useState<string | null>(null)
   const [settings, setSettings] = useState<Settings | null>(null)
   /** Download quota (S12): live usage, shown in the status bar
@@ -101,7 +103,6 @@ export default function App() {
     try {
       const s = await getSettings()
       setSettings(s)
-      setTheme(s.theme)
       try {
         setQuotaStatus(await getQuotaStatus())
       } catch {
@@ -224,11 +225,14 @@ export default function App() {
     }
   }, [refresh, refreshAll, refreshCategories, refreshQueues, refreshGrabberProjects, refreshSettings])
 
+  /** Dark only (Round 45): the theme is a constant now, but the
+   *  attribute stays set so the Tailwind dark-mode selector keeps
+   *  working if a `dark:` variant is ever added. */
   useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme)
-  }, [theme])
+    document.documentElement.setAttribute('data-theme', 'dark')
+  }, [])
 
-  /** Manual update check (Help > Check for updates). Runs even
+  /** Manual update check (Settings > Check for updates). Runs even
    *  when the weekly setting is off; a failure shows the error
    *  in the dialog instead of a silent nothing. */
   async function runManualUpdateCheck() {
@@ -242,16 +246,6 @@ export default function App() {
       setUpdateCheckError(e instanceof Error ? e.message : String(e))
     } finally {
       setCheckingUpdate(false)
-    }
-  }
-
-  /** Theme toggle: applies at once and persists it in settings
-   *  when the bridge is available. */
-  function toggleTheme() {
-    const next = theme === 'light' ? 'dark' : 'light'
-    setTheme(next)
-    if (settings) {
-      void updateSettings({ ...settings, theme: next }).catch(() => undefined)
     }
   }
 
@@ -418,61 +412,25 @@ export default function App() {
     }
   }, [downloads, settings])
 
-  const statusText =
-    runningCount > 0 ? `${runningCount} downloading · ${formatSpeed(totalSpeed)}` : 'Idle'
-  const menuActions = {
+  const toolbarActions = {
     add: () => setShowAdd(true),
-    batch: () => setShowBatch(true),
-    downloadAll: () => setShowDownloadAll(true),
     resume: () => selected && void run(() => resumeDownload(selected.id)),
     stop: () => selected && void run(() => pauseDownload(selected.id)),
     stopAll: () => void handleStopAll(),
     deleteSelected: () => selected && requestRemove(selected),
     deleteCompleted: () => void handleDeleteCompleted(),
-    openFolder: () => selected && void run(() => openFolder(selected.id)),
-    remove: () => selected && requestRemove(selected),
     settings: () => setShowSettings(true),
-    videoGrabber: () => setShowVideoGrabber(true),
-    siteGrabber: () => setShowSiteGrabber(true),
+    scheduler: () => openScheduler(),
     startQueue: () => activeQueueRow && void run(() => startQueue(activeQueueRow.id)),
     stopQueue: () => activeQueueRow && void run(() => stopQueue(activeQueueRow.id)),
-    syncNow: () =>
-      activeQueueRow && void run(() => syncQueueNow(activeQueueRow.id).then(() => undefined)),
-    openProgress: () => selected && void openProgressWindowFor(selected.id, false),
-    moveToCategory: (categoryId: string) =>
-      selected && void run(() => moveToCategory(selected.id, categoryId)),
-    checkUpdates: () => void runManualUpdateCheck(),
-    toggleTheme,
-  }
-  const toolbarActions = {
-    add: menuActions.add,
-    resume: menuActions.resume,
-    stop: menuActions.stop,
-    stopAll: menuActions.stopAll,
-    deleteSelected: menuActions.deleteSelected,
-    deleteCompleted: menuActions.deleteCompleted,
-    settings: menuActions.settings,
-    scheduler: () => openScheduler(),
-    startQueue: menuActions.startQueue,
-    stopQueue: menuActions.stopQueue,
-    videoGrabber: menuActions.videoGrabber,
-    siteGrabber: menuActions.siteGrabber,
-    downloadAll: menuActions.downloadAll,
-    batch: menuActions.batch,
+    videoGrabber: () => setShowVideoGrabber(true),
+    siteGrabber: () => setShowSiteGrabber(true),
+    downloadAll: () => setShowDownloadAll(true),
+    batch: () => setShowBatch(true),
   }
 
   return (
     <div className="flex h-full flex-col text-text">
-      <MenuBar
-        actions={menuActions}
-        selected={selected}
-        categories={categories}
-        queue={activeQueueRow}
-        hasDownloading={runningCount > 0}
-        hasComplete={hasComplete}
-        theme={theme}
-        statusText={statusText}
-      />
       <Toolbar
         actions={toolbarActions}
         selected={selected}
@@ -511,16 +469,20 @@ export default function App() {
           onOpenScheduler={(queueId) => openScheduler(queueId)}
           onRunGrabber={(projectId) => void run(() => runGrabber(projectId))}
           onNewGrabber={() => setShowSiteGrabber(true)}
+          onSyncQueue={(queueId) => void run(() => syncQueueNow(queueId).then(() => undefined))}
           onDropDownload={(downloadId, target) => void handleDropDownload(downloadId, target)}
         />
         <main className="min-w-0 flex-1 overflow-auto">
           <DownloadTable
             downloads={visible}
             queues={queues}
+            categories={categories}
             selectedId={selectedId}
             onSelect={setSelectedId}
             onOpenProgress={(id) => void openProgressWindowFor(id, false)}
             onAdd={() => setShowAdd(true)}
+            onOpenFolder={(id) => void run(() => openFolder(id))}
+            onMoveToCategory={(id, categoryId) => void run(() => moveToCategory(id, categoryId))}
           />
         </main>
       </div>
@@ -620,6 +582,7 @@ export default function App() {
         open={showSettings}
         categories={categories}
         onClose={() => setShowSettings(false)}
+        onCheckUpdates={() => void runManualUpdateCheck()}
         onSaved={() => {
           void refreshSettings()
           void refreshCategories()

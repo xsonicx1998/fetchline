@@ -137,13 +137,14 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
   const [completionBusy, setCompletionBusy] = useState(false)
   const [completionSaved, setCompletionSaved] = useState(false)
 
-  // The window runs the same bundle as the main window, so it
-  // applies the stored theme itself on mount.
+  // The window runs the same bundle as the main window. Dark only
+  // (Round 45): the stored theme is ignored, the attribute stays
+  // 'dark' so the Tailwind dark-mode selector keeps working.
   useEffect(() => {
+    document.documentElement.setAttribute('data-theme', 'dark')
     void getSettings()
       .then((s) => {
         setSettings(s)
-        document.documentElement.setAttribute('data-theme', s.theme)
       })
       .catch(() => undefined)
   }, [])

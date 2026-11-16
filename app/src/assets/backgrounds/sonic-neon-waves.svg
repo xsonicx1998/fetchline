@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">
+ <defs>
+  <linearGradient id="base" x2="0" y2="1"><stop stop-color="#080D20"/><stop offset="1" stop-color="#0B1230"/></linearGradient>
+  <linearGradient id="purple" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#8B20FF" stop-opacity="0"/><stop offset=".35" stop-color="#8B20FF"/><stop offset=".7" stop-color="#F02DCD"/><stop offset="1" stop-color="#8B20FF" stop-opacity="0"/></linearGradient>
+  <linearGradient id="cyan" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#00C8FF" stop-opacity="0"/><stop offset=".55" stop-color="#00C8FF"/><stop offset="1" stop-color="#087BFF" stop-opacity="0"/></linearGradient>
+  <filter id="glow" x="-40%" y="-100%" width="180%" height="300%"><feGaussianBlur stdDeviation="18"/></filter>
+ </defs>
+ <rect width="1920" height="1080" fill="url(#base)"/>
+ <path d="M-100 700 C250 560 420 850 730 900 S1180 980 1450 730 S1770 390 2020 430" fill="none" stroke="url(#purple)" stroke-width="28" opacity=".65" filter="url(#glow)"/>
+ <path d="M-100 700 C250 560 420 850 730 900 S1180 980 1450 730 S1770 390 2020 430" fill="none" stroke="url(#purple)" stroke-width="5"/>
+ <path d="M650 1120 C970 850 1200 1000 1470 820 S1750 620 2020 540" fill="none" stroke="url(#cyan)" stroke-width="34" opacity=".6" filter="url(#glow)"/>
+ <path d="M650 1120 C970 850 1200 1000 1470 820 S1750 620 2020 540" fill="none" stroke="url(#cyan)" stroke-width="6"/>
+ <path d="M-80 970 C280 820 450 1080 760 1030 S1120 880 1370 950" fill="none" stroke="#8B20FF" stroke-width="18" opacity=".35" filter="url(#glow)"/>
+</svg>

@@ -340,6 +340,9 @@ export interface Settings {
   max_connections: number
   speed_limit_kbps: number | null
   language: string
+  /** The engine still stores a theme (and accepts 'light'), but
+   *  the UI is dark only since Round 45 — nothing reads this for
+   *  theming any more, and Settings no longer offers the choice. */
   theme: 'light' | 'dark'
   browser_integration: boolean
   /** Dial-Up tab (S09 finish): legacy settings. The connection

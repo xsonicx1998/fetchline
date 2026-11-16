@@ -2863,3 +2863,92 @@ itself, runner-only). Packaging only — no engine change, no licence work.
   build` passes. The run this push triggers is the proof — its
   smoke screenshot should show the new menu bar, toolbar,
   categories tree and table in the dark Sonic theme.
+
+## Round 45 — the user's asset pack: menu bar gone, light theme deleted, pack icons + neon-waves background — 2026-11-16
+
+The user sent `Sonic_Manager_Assets` (ZIP, 2.1 MB) and approved the
+plan first (with one change: delete the light theme — dark only).
+The pack: 18 SVG line icons (24×24, stroke 1.8, currentColor), the
+lightning logo (purple-gradient rounded square + black bolt, cyan
+outline), the neon-waves SVG background, colors.json + theme.css
+(purple #8B20FF, cyan #00C8FF, pink #F02DCD, bg #0B0F24, surface
+#111833, muted #AAB4D0, border #27345C), two reference PNGs, and
+the instruction file (UI only, no engine changes, no new features,
+use the pack's SVGs/colors/background). The preview image mentions
+PNG icons/backgrounds and a font folder, but the zip has SVGs only
+— PNGs are generated from the SVG at build time (below), and the
+font stays Inter with Segoe UI fallback (the logo SVG declares
+"Segoe UI, Arial, sans-serif"; no font file was supplied).
+
+- **Menu bar removed** (`app/src/components/MenuBar.tsx` deleted;
+  the reference has none — the native Windows title bar is the
+  title bar). Its actions were re-homed, none dropped: Batch +
+  Download all were already in the Grabber dropdown; Open folder +
+  Move to category moved to a new right-click menu on table rows
+  (`DownloadTable.tsx`); Sync queue now is a hover button on queue
+  rows in the sidebar; Check for updates is a button in Settings
+  (update section). The status text the menu bar showed is covered
+  by the footer. Resume/Stop/Stop All/Delete/Delete Completed were
+  already toolbar buttons.
+- **Light theme deleted** (user's explicit decision): `:root` IS
+  the dark palette now; no `[data-theme]` switch anywhere. Removed
+  the light tokens from `app/src/index.css`,
+  `replica/design/tokens.css` and `replica/design/tokens.json`
+  (dark-only, 19 pairs), the theme toggle, and the theme option in
+  Settings. `data-theme="dark"` is still set on mount (App +
+  ProgressWindow) so the Tailwind dark-mode selector keeps working.
+  The engine still stores a `theme` field and accepts 'light'
+  (no engine change); the UI never reads it for theming any more
+  (`app/src/lib/types.ts` carries a comment saying so). No engine
+  test asserts on the light theme, so none changed.
+- **New palette** from the pack everywhere (toolbar, sidebar,
+  table, dialogs, progress window, extension popup): purple accent
+  #8B20FF, cyan info #00C8FF, pink danger #F02DCD; the red accent
+  #f73244 is gone. The old JPG background (lightning + gold rings)
+  is replaced by the neon-waves SVG (`background.css`, lighter
+  scrim 0.55/0.70 so the waves stay visible at the bottom-right as
+  in the reference). `background.jpg` stays in the repo unused (a
+  binary file — it is no longer referenced).
+- **Pack icons** (`app/src/components/PackIcon.tsx`, new): the 18
+  SVGs are copied into `app/src/assets/icons/` and imported with
+  `?raw` and inlined — as `<img>` their `currentColor` would fall
+  back to black and the per-action colours would be lost. Toolbar:
+  Add URL is the big glowing purple button, Options the big cyan
+  gear in a purple halo (radial gradient + glow shadow), Resume /
+  Start Queue / Grabber cyan, Stop / Stop All / Delete Completed /
+  Scheduler pink, Delete white. Columns widened to 96 px, so
+  "Delete Completed" fits on one line (Round 44 truncated it).
+  Sidebar: category-folder / unfinished / finished / grabber /
+  queue pack icons; the active row is the reference's filled
+  purple row with white text; sidebar widened 232 → 256 px, so
+  "Main download queue" fits. Empty state: the pack's glowing
+  download icon + link icon on the "Add a link" button. The small
+  hover chrome (delete category, run grabber, scheduler, sync) is
+  still Lucide — the pack has no equivalents.
+- **Logo + app icon**: the header logo is the pack's lightning
+  mark as the native title-bar icon, via the generated icon set.
+  `scripts/generate-icons.py` now renders the mark from
+  `app/src-tauri/icons/logo.svg` (text, in the repo) with Pillow
+  only — diagonal gradient as anti-diagonal lines, rounded-square
+  mask, bolt polygon with cyan outline — so CI needs no new
+  dependency. Caught before building: the first version rotated a
+  horizontal gradient, whose corners fill black and showed as dark
+  triangles; the anti-diagonal version was verified by eye (purple
+  → deep-blue rounded square, dark bolt, cyan outline). Falls back
+  to the old `logo.jpg` if `logo.svg` is missing, and fails loudly
+  if neither exists. The mark is a bold square, so all four
+  extension icons use the whole mark (the old head-crop is gone).
+- **Contrast** (WCAG AA, inline checker in /tmp, not committed):
+  **19/19 pass, 0 failed** on the new dark-only pairs. One catch
+  fixed on the way: the first derived border-input #4a5b8a scored
+  2.85 (UI threshold 3.0); it is now #5a6b9a (3.61), the value the
+  old dark theme used.
+- No engine changes, no new features, no renamed or deleted
+  buttons or functions. The table keeps Round 44's IDM columns;
+  the progress window keeps its three tabs.
+- Verified on Linux: full engine suite **417/417 pass, 0 failed**;
+  `cargo check --tests` 0 warnings; `npm run build` passes (the
+  background SVG is inlined in the built CSS as a data URI; the
+  `?raw` icons are inlined in the JS). The run this push triggers
+  is the proof — its smoke screenshot should show the new look:
+  no menu bar, purple Add URL button, glowing gear, neon waves.

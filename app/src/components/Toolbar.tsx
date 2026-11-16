@@ -1,22 +1,7 @@
 import { useEffect, useState } from 'react'
-import {
-  Ban,
-  ChevronDown,
-  Clapperboard,
-  Clock,
-  Download,
-  FolderDown,
-  Globe,
-  Hand,
-  ListPlus,
-  Play,
-  Plus,
-  Settings as SettingsIcon,
-  Square,
-  Trash2,
-  type LucideIcon,
-} from 'lucide-react'
+import { ChevronDown, Clapperboard, FolderDown, Globe, ListPlus } from 'lucide-react'
 import type { DownloadRow, QueueRow } from '../lib/types'
+import { PackIcon, type PackIconName } from './PackIcon'
 
 /** The actions the toolbar offers. Every entry wires to an existing
  *  command or dialog — the toolbar rearranges the app, it adds
@@ -50,14 +35,14 @@ interface ToolbarProps {
 }
 
 function ToolbarButton({
-  icon: Icon,
+  icon,
   label,
   color,
   disabled,
   onClick,
   ariaLabel,
 }: {
-  icon: LucideIcon
+  icon: PackIconName
   label: string
   color: string
   disabled?: boolean
@@ -71,10 +56,10 @@ function ToolbarButton({
       onClick={onClick}
       aria-label={ariaLabel ?? label}
       title={ariaLabel ?? label}
-      className="flex w-[76px] shrink-0 flex-col items-center justify-center gap-1 rounded-md px-1 py-1.5 hover:bg-surface-2 disabled:opacity-45"
+      className="flex w-[96px] shrink-0 flex-col items-center justify-center gap-1 rounded-md px-1 py-1.5 hover:bg-surface-2 disabled:opacity-45"
     >
-      <Icon className={`h-7 w-7 ${color}`} aria-hidden="true" />
-      <span className="max-w-full truncate whitespace-nowrap text-[11px] font-medium leading-tight text-text">
+      <PackIcon name={icon} className={`h-7 w-7 ${color}`} />
+      <span className="max-w-full whitespace-nowrap text-[11px] font-medium leading-tight text-text">
         {label}
       </span>
     </button>
@@ -86,11 +71,9 @@ function ToolbarSeparator() {
 }
 
 function GrabberItem({
-  icon: Icon,
   onClick,
   children,
 }: {
-  icon: LucideIcon
   onClick: () => void
   children: React.ReactNode
 }) {
@@ -100,20 +83,21 @@ function GrabberItem({
       onClick={onClick}
       className="flex w-full items-center gap-2 rounded px-3 py-1.5 text-left text-sm text-text hover:bg-surface-2"
     >
-      <Icon className="h-4 w-4 shrink-0 text-info" aria-hidden="true" />
       {children}
     </button>
   )
 }
 
-/** S01 — the main toolbar, IDM's order and shape: big icons with
- *  the label underneath, one line each (the old "Add a link" label
- *  wrapped to two lines — the fixed width + `truncate` ends that).
- *  Icons are Lucide, drawn in our own style, coloured in the Sonic
- *  palette the way the user's recolored reference shows them:
- *  blue for go/add actions, red for stop/delete, grey for plain
- *  delete. No IDM artwork is copied. Disabled states match the
- *  menu bar exactly. */
+/** S01 — the main toolbar, the user's asset pack (Round 45): the
+ *  pack's SVG icons in the reference's colours — cyan for go/add,
+ *  pink for stop/delete, white for plain delete. Add URL is the big
+ *  glowing purple button; Options is the big cyan gear in a purple
+ *  halo. Columns are 96 px wide, so "Delete Completed" fits on one
+ *  line (Round 44 truncated it at 76 px). The Grabber dropdown
+ *  already holds Video grabber, Site grabber, Download all links
+ *  and Batch — the menu bar's Downloads actions live there now
+ *  that the menu bar is gone. Disabled states match the old menu
+ *  bar exactly. */
 export function Toolbar({ actions, selected, queue, hasDownloading, hasComplete }: ToolbarProps) {
   const [grabberOpen, setGrabberOpen] = useState(false)
 
@@ -142,26 +126,35 @@ export function Toolbar({ actions, selected, queue, hasDownloading, hasComplete 
     <div
       role="toolbar"
       aria-label="Download actions"
-      className="flex h-[68px] shrink-0 items-stretch gap-0.5 overflow-x-auto border-b border-border bg-surface px-2 py-1"
+      className="flex h-[84px] shrink-0 items-stretch gap-0.5 overflow-x-auto border-b border-border bg-surface px-2 py-1"
     >
-      <ToolbarButton icon={Plus} label="Add URL" color="text-info" onClick={actions.add} />
+      <button
+        type="button"
+        onClick={actions.add}
+        aria-label="Add URL"
+        title="Add URL"
+        className="mr-1 flex h-12 shrink-0 items-center gap-2 self-center rounded-xl bg-accent px-4 font-semibold text-on-accent shadow-glow hover:bg-accent-hover"
+      >
+        <PackIcon name="add-url" className="h-6 w-6" />
+        Add URL
+      </button>
       <ToolbarSeparator />
       <ToolbarButton
-        icon={Download}
+        icon="resume"
         label="Resume"
         color="text-info"
         disabled={!canResume}
         onClick={actions.resume}
       />
       <ToolbarButton
-        icon={Ban}
+        icon="stop"
         label="Stop"
         color="text-danger"
         disabled={!canStop}
         onClick={actions.stop}
       />
       <ToolbarButton
-        icon={Hand}
+        icon="stop-all"
         label="Stop All"
         color="text-danger"
         disabled={!hasDownloading}
@@ -169,14 +162,14 @@ export function Toolbar({ actions, selected, queue, hasDownloading, hasComplete 
       />
       <ToolbarSeparator />
       <ToolbarButton
-        icon={Trash2}
+        icon="delete"
         label="Delete"
-        color="text-text-muted"
+        color="text-text"
         disabled={!selected}
         onClick={actions.deleteSelected}
       />
       <ToolbarButton
-        icon={Trash2}
+        icon="delete-completed"
         label="Delete Completed"
         color="text-danger"
         disabled={!hasComplete}
@@ -184,28 +177,37 @@ export function Toolbar({ actions, selected, queue, hasDownloading, hasComplete 
         ariaLabel="Delete Completed"
       />
       <ToolbarSeparator />
-      <ToolbarButton
-        icon={SettingsIcon}
-        label="Options"
-        color="text-info"
+      <button
+        type="button"
         onClick={actions.settings}
-      />
+        aria-label="Options"
+        title="Options"
+        className="flex w-[96px] shrink-0 flex-col items-center justify-center gap-1 rounded-md px-1 py-1.5 hover:bg-surface-2"
+      >
+        <span
+          className="flex h-12 w-12 items-center justify-center rounded-full shadow-glow"
+          style={{ background: 'radial-gradient(circle, rgba(139,32,255,.55), rgba(139,32,255,.10))' }}
+        >
+          <PackIcon name="options" className="h-8 w-8 text-info" />
+        </span>
+        <span className="whitespace-nowrap text-[11px] font-medium leading-tight text-text">Options</span>
+      </button>
       <ToolbarButton
-        icon={Clock}
+        icon="scheduler"
         label="Scheduler"
-        color="text-accent"
+        color="text-danger"
         onClick={actions.scheduler}
       />
       <ToolbarSeparator />
       <ToolbarButton
-        icon={Play}
+        icon="start-queue"
         label="Start Queue"
         color="text-info"
         disabled={!canStartQueue}
         onClick={actions.startQueue}
       />
       <ToolbarButton
-        icon={Square}
+        icon="stop-queue"
         label="Stop Queue"
         color="text-danger"
         disabled={!canStopQueue}
@@ -218,9 +220,9 @@ export function Toolbar({ actions, selected, queue, hasDownloading, hasComplete 
           aria-haspopup="menu"
           aria-expanded={grabberOpen}
           onClick={() => setGrabberOpen((v) => !v)}
-          className="flex h-full w-[76px] flex-col items-center justify-center gap-1 rounded-md px-1 py-1.5 hover:bg-surface-2"
+          className="flex h-full w-[96px] flex-col items-center justify-center gap-1 rounded-md px-1 py-1.5 hover:bg-surface-2"
         >
-          <Globe className="h-7 w-7 text-info" aria-hidden="true" />
+          <PackIcon name="grabber" className="h-7 w-7 text-info" />
           <span className="flex items-center gap-0.5 whitespace-nowrap text-[11px] font-medium leading-tight text-text">
             Grabber
             <ChevronDown className="h-3 w-3 text-text-muted" aria-hidden="true" />
@@ -240,16 +242,20 @@ export function Toolbar({ actions, selected, queue, hasDownloading, hasComplete 
               aria-label="Grabber"
               className="absolute left-0 z-20 mt-1 min-w-60 rounded-md border border-border bg-surface-raised p-1 shadow-pop"
             >
-              <GrabberItem icon={Clapperboard} onClick={grabberItem(actions.videoGrabber)}>
+              <GrabberItem onClick={grabberItem(actions.videoGrabber)}>
+                <Clapperboard className="h-4 w-4 shrink-0 text-info" aria-hidden="true" />
                 Video grabber…
               </GrabberItem>
-              <GrabberItem icon={FolderDown} onClick={grabberItem(actions.siteGrabber)}>
+              <GrabberItem onClick={grabberItem(actions.siteGrabber)}>
+                <FolderDown className="h-4 w-4 shrink-0 text-info" aria-hidden="true" />
                 Site grabber…
               </GrabberItem>
-              <GrabberItem icon={Globe} onClick={grabberItem(actions.downloadAll)}>
+              <GrabberItem onClick={grabberItem(actions.downloadAll)}>
+                <Globe className="h-4 w-4 shrink-0 text-info" aria-hidden="true" />
                 Download all links…
               </GrabberItem>
-              <GrabberItem icon={ListPlus} onClick={grabberItem(actions.batch)}>
+              <GrabberItem onClick={grabberItem(actions.batch)}>
+                <ListPlus className="h-4 w-4 shrink-0 text-info" aria-hidden="true" />
                 Batch…
               </GrabberItem>
             </div>
