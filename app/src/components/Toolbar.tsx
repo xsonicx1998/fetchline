@@ -109,7 +109,10 @@ function GrabberItem({
  *  is overflow-hidden, so a scrollbar can never appear. Round 47:
  *  icons 28 → 32 px, labels 11 → 12 px, icons glow constantly
  *  (drop-shadow per colour, brighter on hover) and the Options
- *  halo is a stronger cyan + purple multi-layer glow. The Grabber
+ *  halo is a stronger cyan + purple multi-layer glow. Round 49:
+ *  the halo disc shrinks 56 → 40 px with a tighter glow (the 56 px
+ *  disc read as a big loose circle around the 36 px gear); the gear
+ *  itself stays 36 px. The Grabber
  *  dropdown already holds Video grabber, Site grabber, Download
  *  all links and Batch — the menu bar's Downloads actions live
  *  there now that the menu bar is gone. Disabled states match the
@@ -206,11 +209,11 @@ export function Toolbar({ actions, selected, queue, hasDownloading, hasComplete 
         className="group flex min-w-fit flex-auto flex-col items-center justify-center gap-1 rounded-md px-1 py-1.5 hover:bg-surface-2"
       >
         <span
-          className="flex h-14 w-14 items-center justify-center rounded-full"
+          className="flex h-10 w-10 items-center justify-center rounded-full"
           style={{
             background: 'radial-gradient(circle, rgba(139,32,255,.70), rgba(0,200,255,.25) 55%, rgba(139,32,255,.08))',
             boxShadow:
-              '0 0 18px rgba(0,200,255,.60), 0 0 36px rgba(139,32,255,.55), 0 0 60px rgba(139,32,255,.30)',
+              '0 0 10px rgba(0,200,255,.60), 0 0 20px rgba(139,32,255,.55), 0 0 32px rgba(139,32,255,.30)',
           }}
         >
           <PackIcon name="options" className="h-9 w-9 text-info icon-glow-cyan" />
