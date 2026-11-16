@@ -4497,11 +4497,86 @@ Tests (8 new, in `app/engine/tests/history_tests.rs`):
 
 Status: implemented as described. Verified on Linux: full engine
 suite **445/445 pass, 0 failed** (437 + 8 new); `cargo check
---tests` 0 warnings. The run this push triggers is the proof —
-it must go green. Honest limits: the new Tauri commands are
+--tests` 0 warnings. **CI run #29 FULLY GREEN 2026-11-16
+~07:05 EET (run 43819643263, head 0928b120): build-windows ✅,
+smoke-test ✅, extension-capture-test ✅; installer 15,616,779
+bytes; smoke artifact 380,078 bytes.** Honest limits: the new Tauri commands are
 uncompiled on this VM (gdk-3.0, same as every round); the
 History sidebar section is the frontend worker's half and has
 never been seen in the running desktop app.
+
+## Round 54 — Real E2E GUI tests (tauri-driver + WebDriverIO) — 2026-11-16
+
+**User order (2026-11-16 ~16:44 EET):** "try everything" — build a
+comprehensive End-to-End test that really drives the program on a
+real Windows server in GitHub Actions, and deliver no new version
+until it passes and the logs + screenshots are inspected. (He asked
+first whether Wine/Xvfb could do it — no: WebView2 does not run
+under Wine, and apt is broken on this VM — then ordered the
+tauri-driver path.)
+
+**What was built (no product behaviour changed in this round):**
+- `scripts/e2e/e2e-test.mjs` — plain-Node WebdriverIO `remote()`
+  script (no wdio runner) driving the real debug binary through
+  tauri-driver on 127.0.0.1:4444. 11 steps, one screenshot after
+  EVERY step into `test-screenshots/` (+ results.json/results.md,
+  startup.log, tauri-driver.log): 01 launch (window renders, no
+  white screen), 02 stale-drain, 03 progress-window, 04 progress
+  moves, 05 stop/pause, 06 resume, 07 add-url, 08 delete, 09
+  sidebar, 10 options, 11 stop-all.
+- `scripts/e2e/fixture-server.mjs` — local slow HTTP server
+  (127.0.0.1, ephemeral port): 20 MiB at 32 KiB/s per connection,
+  real Range support (206) + HEAD, so a download lasts ~160 s and
+  is still running through every pause/resume/delete step (the
+  BUG-048 timing trap: a fast fixture finishes before Pause lands).
+  Locally verified: HEAD 200 with Content-Length 20971520 +
+  Accept-Ranges; Range 0-99999 → 206, exactly 100000 bytes; 128 KiB
+  in 3.0 s.
+- `scripts/e2e/package.json` (+ lockfile) — webdriverio 10.2.0,
+  own dependency tree so the app's package.json is untouched.
+- `.github/workflows/e2e-windows.yml` — new workflow (push +
+  workflow_dispatch, windows-latest, 30 min timeout): Node 20,
+  Rust MSVC, npm ci, icons, host build, `tauri build --debug
+  --no-bundle`, `cargo install tauri-driver --locked`,
+  msedgedriver-tool (the Edge driver must EXACTLY match the
+  installed Edge build or the session hangs forever at startup),
+  `npm ci` in scripts/e2e, run the suite, upload
+  `fetchline-e2e-screenshots` (if: always()).
+- **The 4 bugs from the user's own-PC test of run #29 are the
+  suite's designed reproductions, asserted as correct behaviour
+  (a failure is a FINDING, never a reason to weaken the test):**
+  (1) step 02 seeds a stale pending link through the REAL
+  fetchline-host binary (Native Messaging frames, like
+  capture-test.py) BEFORE launch and asserts it stays Waiting
+  instead of auto-starting; (2) step 03 asserts a separate OS
+  progress window exists for it (checked via user32 EnumWindows
+  on the fetchline.exe process — authoritative — plus WebDriver
+  window handles); (3) step 05 asserts toolbar Stop is usable
+  with nothing selected, then pauses the selected row; (4) step 10
+  asserts the Settings dialog renders all 9 tabs with real values
+  (no "could not be loaded" alert; progress-window checkbox ON).
+  Correct-behaviour note recorded in the test: the default
+  download folder is EMPTY by default (`Settings::default` is
+  `String::new()`), so an empty folder field is NORMAL and is not
+  asserted.
+- Selectors verified against the real .tsx source (aria-labels on
+  the toolbar, #add-url, tab roles in SettingsDialog, sidebar nav
+  label, StatusBadge text Waiting/Downloading/Paused/Finished/
+  Failed, confirm dialog "Remove this download?" / "Remove").
+  No data-testid attributes were needed; none added. No product
+  file was changed.
+
+**Local verification:** `node --check` on both .mjs files; fixture
+server exercised with curl (see above); `npm run build` passes;
+full engine suite 445/445 (ran locally before the push).
+
+**Workflow-file route:** `.github/workflows/e2e-windows.yml`
+cannot be pushed via the connector (no Workflows permission — the
+403 is a permission limit, not a broken connection). It was written
+locally and must be uploaded via the GitHub web UI signed in as
+xsonicx1998, then the run it triggers is watched to completion and
+its screenshots artifact is fetched and inspected. CI verdict:
+PENDING the browser upload (record here when it lands).
 
 ## Known limitations, not bugs (round-24 additions)
 

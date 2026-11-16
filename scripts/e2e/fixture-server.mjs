@@ -1,0 +1,114 @@
+// Slow fixture server for the Round 54 E2E tests (see e2e-test.mjs).
+//
+// Serves two 20 MiB files, /slow-a.mp4 and /slow-b.mp4, from a local
+// HTTP server on 127.0.0.1 (ephemeral port), throttled to 32 KiB/s per
+// connection with real Range support (206 Partial Content) and HEAD.
+//
+// Why slow, why big, why Range:
+// - The engine downloads in 4 segments (default max_connections); a
+//   fast fixture finishes before Pause can land (the BUG-048 timing
+//   trap). 20 MiB at 4 x 32 KiB/s lasts ~160 s, so the download is
+//   still running through every pause/resume/delete step.
+// - Range support matters: without it the engine falls back to a
+//   single segment (16 KiB/s worst case, 20 MiB would take ~20 min
+//   to finish — the test never needs it to finish, but percent
+//   would barely move). With Range, percent moves ~1 point every
+//   ~1.6 s and the speed column stays live.
+// - The capture test's watcher fixture (512 KiB at ~80 KiB/s, no
+//   Range) proves localhost downloads work in the real app; this
+//   server is the same idea, stretched out for the GUI steps.
+
+import http from 'node:http';
+import crypto from 'node:crypto';
+
+export const FIXTURE_SIZE = 20 * 1024 * 1024; // 20 MiB
+export const CHUNK_BYTES = 32 * 1024; // 32 KiB per write
+export const CHUNK_DELAY_MS = 1000; // 1 s between writes -> 32 KiB/s per connection
+export const FIXTURE_PATHS = ['/slow-a.mp4', '/slow-b.mp4'];
+
+// Content is irrelevant to the app (it never inspects it); random
+// bytes are fine and fast to generate once.
+const PAYLOAD = crypto.randomBytes(FIXTURE_SIZE);
+
+function handle(req, res) {
+  const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+  if (!FIXTURE_PATHS.includes(url.pathname)) {
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('not found');
+    return;
+  }
+  const filename = url.pathname.slice(1);
+
+  // Range: bytes=start-end (single range only; the engine asks for
+  // one range per segment request).
+  let start = 0;
+  let end = FIXTURE_SIZE - 1;
+  let status = 200;
+  const range = req.headers.range;
+  if (range) {
+    const m = /^bytes=(\d*)-(\d*)$/.exec(range);
+    if (m) {
+      start = m[1] ? Number.parseInt(m[1], 10) : 0;
+      end = m[2] ? Number.parseInt(m[2], 10) : FIXTURE_SIZE - 1;
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start >= FIXTURE_SIZE || end < start) {
+        res.writeHead(416, { 'Content-Range': `bytes */${FIXTURE_SIZE}` });
+        res.end();
+        return;
+      }
+      status = 206;
+    }
+  }
+
+  const length = end - start + 1;
+  const headers = {
+    'Content-Type': 'video/mp4',
+    'Content-Length': String(length),
+    'Accept-Ranges': 'bytes',
+    'Content-Disposition': `attachment; filename="${filename}"`,
+  };
+  if (status === 206) headers['Content-Range'] = `bytes ${start}-${end}/${FIXTURE_SIZE}`;
+  res.writeHead(status, headers);
+  if (req.method === 'HEAD') {
+    res.end();
+    return;
+  }
+
+  // Stream the slice throttled: one CHUNK_BYTES write per second.
+  // A closed connection (pause/cancel/delete) ends the loop silently.
+  let offset = start;
+  const pump = () => {
+    if (offset > end) {
+      res.end();
+      return;
+    }
+    const n = Math.min(CHUNK_BYTES, end - offset + 1);
+    let ok = true;
+    try {
+      ok = res.write(PAYLOAD.subarray(offset, offset + n));
+    } catch {
+      return;
+    }
+    offset += n;
+    if (offset > end) {
+      res.end();
+      return;
+    }
+    const next = () => setTimeout(pump, CHUNK_DELAY_MS);
+    if (ok) next();
+    else res.once('drain', next);
+  };
+  pump();
+}
+
+/** Start the server on an ephemeral localhost port. Resolves with
+ *  { server, port, baseUrl }. Callers stop it with server.close(). */
+export function startFixtureServer() {
+  return new Promise((resolve, reject) => {
+    const server = http.createServer(handle);
+    server.on('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const port = server.address().port;
+      resolve({ server, port, baseUrl: `http://127.0.0.1:${port}` });
+    });
+  });
+}
