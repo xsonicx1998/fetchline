@@ -3116,3 +3116,41 @@ deleted buttons or functions; dark only.
   run this push triggers is the proof — its smoke screenshot
   should show every toolbar and sidebar icon bright and glowing
   at 1024 px, with all 11 toolbar buttons still fitting.
+
+## Round 48 — CI verdict (run #22, 2026-11-16)
+- **Run #22 (43788891810, head ab3af71f) FAILED at build-windows,
+  step 8 "Engine tests (smoke check)" (exit code 1); smoke-test
+  and extension-capture-test were skipped.** The exact failing
+  test is NOT established from the API: the job-logs endpoint
+  returns 403 ("Must have admin rights to Repository") and the
+  check-run annotations only say "Process completed with exit
+  code 1". A browser task signed in as xsonicx1998 is needed to
+  read the step-8 log and name the failing test.
+- This change touched zero engine code (CSS, three TSX files,
+  18 SVG icons, tokens.json, this log) and the engine suite
+  passed locally 417/417 immediately before the push, so the
+  failure cannot be caused by Round 48. Prime suspect,
+  unconfirmed: the known flaky `ftp_pause_then_resume_completes_
+  byte_exact` timing race, which failed at exactly this step in
+  run #8 and never reproduced. No fix loop was started; the
+  verdict note rides with the next push.
+
+## Round 48 CI-fix — flaky FTP pause test (BUG-048) — 2026-11-16
+- **Diagnosis CONFIRMED by a browser log read:** exactly ONE
+  test failed in run #22 — `ftp_pause_then_resume_completes_
+  byte_exact` (`app/engine/tests/proxy_tests.rs:716:5`), "file
+  finished before the pause". Per-suite totals: 331 passed,
+  1 failed (proxy_tests 14 passed, 1 failed; all other suites
+  ok). Steps 1–7 passed; smoke + capture were skipped.
+- **Fix, test-only (BUG-048, see `replica/bugs.md`):** the test
+  replaced its blind 200 ms sleep with wait-for-active
+  (`wait_for_status(..., "downloading", 10)`) before pausing,
+  and the fixture chunk delay went 20 ms → 50 ms (download now
+  ~400 ms, so the pause lands mid-download). No engine source,
+  no other test, no UI file changed; the test asserts exactly
+  what it asserted before.
+- Verified on Linux: proxy_tests 15/15 three consecutive runs;
+  full engine suite **417/417 pass, 0 failed**; `cargo check
+  --tests` 0 warnings; `npm run build` passes. The run this
+  push triggers is the proof — it must go green so the user can
+  see the Round 48 look.

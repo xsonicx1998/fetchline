@@ -698,7 +698,14 @@ async fn ftp_download_multi_segment_byte_exact() {
 async fn ftp_pause_then_resume_completes_byte_exact() {
     let server = FtpServer::start(FtpConfig {
         size_bytes: 2 * 1024 * 1024,
-        chunk_delay: Duration::from_millis(20),
+        // BUG-048: the chunk delay was 20 ms, so the 2 MiB file
+        // (4 segments x 8 chunks x 20 ms) finished in ~200 ms — the
+        // same time the old fixed 200 ms sleep waited before pausing.
+        // On a fast runner the pause landed after the last chunk
+        // ("file finished before the pause", CI runs #8 and #22).
+        // At 50 ms the download takes ~400 ms, so the pause below
+        // lands with most of the file still to go.
+        chunk_delay: Duration::from_millis(50),
         ..Default::default()
     });
     let dir = tmpdir();
@@ -708,7 +715,11 @@ async fn ftp_pause_then_resume_completes_byte_exact() {
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // BUG-048: wait for the run task to report itself downloading,
+    // then pause immediately — never a blind sleep. The status flip
+    // and the download start in the same task, so observing
+    // "downloading" bounds how far the download can have got.
+    assert!(wait_for_status(&mgr, &id, "downloading", 10).await);
     mgr.pause_download(&id).await.unwrap();
     assert!(wait_for_status(&mgr, &id, "paused", 10).await);
     let paused = mgr.get_download(&id).unwrap().unwrap();

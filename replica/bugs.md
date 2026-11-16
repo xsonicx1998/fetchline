@@ -4103,6 +4103,42 @@ run build` passes. The run this push triggers is the proof — its
 smoke screenshot should show all 11 toolbar buttons with no
 scrollbar and "Main download queue 0 files" in full.
 
+## Round 48 CI-fix — BUG-048: flaky `ftp_pause_then_resume_completes_byte_exact` — 2026-11-16
+
+Test-only race, found in CI, not a product bug. The test failed
+in run #8 (head ce293c5) and again in run #22 (head ab3af71f),
+both times at exactly one test with "file finished before the
+pause" (`app/engine/tests/proxy_tests.rs:716:5`); all other
+suites passed (331 passed, 1 failed in run #22). The Round 48
+change itself touched zero engine code, so the failure cannot be
+caused by the round.
+
+Root cause: the test downloaded a 2 MiB file from the fixture
+FTP server (4 segments x 8 chunks x 20 ms chunk delay ≈ 200 ms
+total) and then slept a fixed 200 ms before pausing. On a fast
+runner the download was already finished when the pause landed:
+the pause flag was set while the last segment finished its final
+chunk, so the run loop paused with all bytes done and the
+"paused" row showed the full size. The blind sleep raced the
+download; the faster the runner, the more likely the failure.
+
+Fix (test-only, `proxy_tests.rs`): wait for the run task to
+report itself downloading (`wait_for_status(..., "downloading",
+10)`) and pause immediately — the status flip and the download
+start in the same task, so observing "downloading" bounds how
+far the download can have got — and raise the fixture chunk
+delay 20 ms → 50 ms, so the download takes ~400 ms and the pause
+lands with most of the file still to go. The test still asserts
+exactly what it asserted before (bytes > 0 and < full size at
+pause, byte-exact file after resume). No engine source, no other
+test, and no UI file changed.
+
+Status: fixed as described. Verified on Linux: the proxy_tests
+suite 15/15 three consecutive runs; full engine suite 417/417;
+`cargo check --tests` 0 warnings; `npm run build` passes. The
+run this push triggers is the proof — its build-windows job must
+go green.
+
 ## Known limitations, not bugs (round-24 additions)
 
 - The Tauri shell never compiles or runs on this VM, so a
