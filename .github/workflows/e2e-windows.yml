@@ -77,13 +77,19 @@ jobs:
 
       # The E2E suite seeds a stale pending link through the REAL
       # host binary (see scripts/e2e/e2e-test.mjs), so the host must
-      # be built exactly as in build-windows.yml.
+      # be built exactly as in build-windows.yml — INCLUDING the copy
+      # into app/src-tauri/binaries/: tauri.conf.json declares
+      # bundle.externalBin "binaries/fetchline-host", and `tauri
+      # build` fails when that file is missing (run #1 proved it:
+      # step 9 "Build debug app" failed with the copy omitted).
       - name: Build fetchline-host (external binary)
         working-directory: app/host
         shell: pwsh
         run: |
           cargo build --release -p fetchline-host
-          Get-ChildItem target\release\fetchline-host.exe
+          New-Item -ItemType Directory -Force -Path ..\src-tauri\binaries | Out-Null
+          Copy-Item target\release\fetchline-host.exe ..\src-tauri\binaries\fetchline-host-x86_64-pc-windows-msvc.exe
+          Get-ChildItem ..\src-tauri\binaries
 
       # Debug build, no installers: fast, and the suite drives the
       # raw exe (app/src-tauri/target/debug/fetchline.exe).
