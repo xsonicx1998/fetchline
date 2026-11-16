@@ -303,6 +303,26 @@ CREATE TABLE IF NOT EXISTS pending_links (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Download history (Round 53, 2026-11-16): every finished
+-- download, recorded when it completes and kept even when the
+-- download is deleted from the main table. `download_id` is
+-- deliberately NOT a foreign key (no REFERENCES, no ON DELETE
+-- CASCADE): deleting a download must never delete its history
+-- row. UNIQUE(download_id) makes recording idempotent.
+CREATE TABLE IF NOT EXISTS download_history (
+  id TEXT PRIMARY KEY,
+  download_id TEXT NOT NULL UNIQUE,
+  filename TEXT NOT NULL,
+  url TEXT NOT NULL,
+  final_url TEXT,
+  size_bytes INTEGER,
+  folder TEXT NOT NULL,
+  category_id TEXT,
+  completed_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_download_history_completed
+  ON download_history(completed_at DESC);
+
 -- Indexes: every foreign key + every filtered/sorted column
 CREATE INDEX IF NOT EXISTS idx_downloads_status_created ON downloads(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_downloads_category ON downloads(category_id);

@@ -4412,12 +4412,96 @@ modelled on the Round 51 refresh tests):
 
 Status: implemented as described. Verified on Linux: full engine
 suite **437/437 pass, 0 failed** (422 + 15 new); `cargo check
---tests` 0 warnings; `npm run build` passes. The run this push
-triggers is the proof — it must go green. Honest limit: the
-smoke screenshot shows the main window only; the offer dialog
-itself needs the user's own PC test to be seen in action (like
-the progress window, it has never opened in the running desktop
-app).
+--tests` 0 warnings; `npm run build` passes.
+
+CI verdict (run #28, 43815862108, head e3b3b853, 2026-11-16) —
+FULLY GREEN: build-windows success, smoke-test success,
+extension-capture-test success. Installer 15,570,771 bytes
+(~14.8 MB); smoke artifact 375,182 bytes; capture artifact 3,804
+bytes. The parent fetches the screenshot from the smoke artifact.
+Honest limit: the smoke screenshot shows the main window only;
+the offer dialog itself needs the user's own PC test to be seen
+in action (like the progress window, it has never opened in the
+running desktop app).
+
+## Round 53 — Download history (step 4 of the user's agreed sequence) — 2026-11-16
+
+The user approved the plan presented to him (tapped "تمام، نفّذ
+سجل التحميلات"): a History section in the sidebar recording
+every finished download, surviving removal from the main table,
+searchable, with open-folder / re-download from history and a
+clear-history option. This is the last step of the agreed
+sequence (refresh address → clipboard monitoring → history).
+
+How it works (product, engine half — the frontend worker builds
+the sidebar section in parallel against the same contract):
+
+- New `download_history` table (`replica/schema.sql` +
+  `Store::migrate`, same pattern as `pending_links`):
+  `id`, `download_id UNIQUE`, `filename`, `url`, `final_url`,
+  `size_bytes`, `folder`, `category_id`, `completed_at`, plus
+  an index on `completed_at DESC`. `download_id` is
+  deliberately NOT a foreign key (no REFERENCES, no ON DELETE
+  CASCADE): deleting a download must never delete its history
+  row. `UNIQUE(download_id)` makes recording idempotent.
+- The only recording hook is inside `Store::mark_complete` —
+  the single completion call (`manager.rs:4200`) — so finished
+  downloads ONLY: failed / cancelled / paused rows never land
+  in history. The row is read with the already-locked
+  connection (`get_download` would lock the same mutex and
+  deadlock); `record_history` (`INSERT OR REPLACE`, folder =
+  parent directory of `save_path`, `completed_at` = the row's
+  own value or now) is also public for tests. Deleting a
+  download (`set_status 'deleted'`) touches no history row —
+  verified by test, no cleanup was added to any delete path.
+- Store methods `list_history(query)` (empty query = all;
+  otherwise filename OR url `LIKE`, with `%` and `_` escaped
+  so they match literally; newest first),
+  `get_history_entry(id)`, `clear_history()` (history only —
+  the downloads table is untouched). New serializable
+  `HistoryRow` (`id, download_id, filename, url, final_url,
+  size_bytes, folder, category_id, completed_at`).
+- Manager methods `list_history`, `clear_history`,
+  `redownload_from_history(history_id)` (through the REAL
+  `add_download` path — probe, excluded-sites refusal,
+  duplicate handling — from `final_url` or `url`, same
+  filename / folder / category; the history row is untouched,
+  so the same entry can be re-downloaded again) and
+  `open_history_folder(history_id)` (same platform opener
+  `open_folder` uses — `crate::queue::open_path`; a folder
+  deleted after the download finished is a clear error, not a
+  silent no-op).
+- New Tauri commands in `app/src-tauri/src/lib.rs`, registered
+  in `generate_handler` (app commands run ungated, no
+  capability change): `list_download_history(query)`,
+  `clear_download_history()`,
+  `redownload_from_history(id) -> (String, ProbeInfo)`,
+  `open_history_folder(id)`.
+
+Tests (8 new, in `app/engine/tests/history_tests.rs`):
+- a real download driven to completion through the manager is
+  recorded with the right filename / URL / final URL / size /
+  folder (and the finished bytes match);
+- recording the same download twice more leaves exactly one
+  history row;
+- deleting the download from the main table keeps its history
+  row;
+- search matches by filename and by URL, returns nothing for a
+  non-match, and `%` / `_` match literally;
+- clear history empties the table and leaves the download
+  untouched;
+- re-download from a history entry creates a new download from
+  the stored URL and really completes (history then has 2
+  rows); unknown history id errors for both re-download and
+  open-folder; open-folder errors when the folder is gone.
+
+Status: implemented as described. Verified on Linux: full engine
+suite **445/445 pass, 0 failed** (437 + 8 new); `cargo check
+--tests` 0 warnings. The run this push triggers is the proof —
+it must go green. Honest limits: the new Tauri commands are
+uncompiled on this VM (gdk-3.0, same as every round); the
+History sidebar section is the frontend worker's half and has
+never been seen in the running desktop app.
 
 ## Known limitations, not bugs (round-24 additions)
 

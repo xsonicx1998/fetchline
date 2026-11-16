@@ -1,13 +1,14 @@
 import { useState } from 'react'
-import { Play, Plus, RefreshCw, Trash2 } from 'lucide-react'
+import { History, Play, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import type { CategoryRow, DownloadRow, GrabberProjectRow, QueueRow } from '../lib/types'
 import { PackIcon } from './PackIcon'
 
 /** Which list the main table shows. 'all' is every download (or
  *  one category's); 'unfinished' / 'finished' filter by status the
- *  way IDM's tree does; 'grabber' shows one site-grabber project's
- *  downloads. */
-export type SidebarFilter = 'all' | 'unfinished' | 'finished' | 'grabber'
+ *  way IDM's tree does; 'history' shows the finished-download
+ *  records (Round 53) instead of the live table; 'grabber' shows
+ *  one site-grabber project's downloads. */
+export type SidebarFilter = 'all' | 'unfinished' | 'finished' | 'history' | 'grabber'
 
 interface CategorySidebarProps {
   categories: CategoryRow[]
@@ -198,6 +199,15 @@ export function CategorySidebar({
         <PackIcon name="finished" className="h-5 w-5 icon-glow-purple" />
         <span className="flex-1 truncate">Finished</span>
         <span className={countClass(selectedFilter === 'finished')}>{finishedCount}</span>
+      </button>
+      <button
+        type="button"
+        onClick={() => onSelectFilter('history')}
+        aria-current={selectedFilter === 'history' || undefined}
+        className={rowClass(selectedFilter === 'history', 'history')}
+      >
+        <History className="h-5 w-5 icon-glow-purple" aria-hidden="true" />
+        <span className="flex-1 truncate">History</span>
       </button>
 
       <p className="px-2 pb-1 pt-3 text-xs font-semibold uppercase tracking-wider text-text-muted">Grabber projects</p>

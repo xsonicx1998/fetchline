@@ -40,6 +40,7 @@ import { CategorySidebar, type SidebarFilter } from './components/CategorySideba
 import { ClipboardOfferDialog } from './components/ClipboardOfferDialog'
 import { DownloadAllDialog } from './components/DownloadAllDialog'
 import { DownloadTable } from './components/DownloadTable'
+import { HistoryView } from './components/HistoryView'
 import { QueueActionDialog } from './components/QueueActionDialog'
 import { RefreshAddressDialog } from './components/RefreshAddressDialog'
 import { SchedulerDialog } from './components/SchedulerDialog'
@@ -75,8 +76,9 @@ export default function App() {
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null)
   const [selectedQueue, setSelectedQueue] = useState<string | null>(null)
   /** Which list the table shows: every download (or one
-   *  category's), the unfinished / finished filter, or one
-   *  grabber project's downloads. */
+   *  category's), the unfinished / finished filter, the download
+   *  history (Round 53 — the main area renders HistoryView
+   *  instead of the table), or one grabber project's downloads. */
   const [selectedFilter, setSelectedFilter] = useState<SidebarFilter>('all')
   const [selectedGrabberId, setSelectedGrabberId] = useState<string | null>(null)
   const [showAdd, setShowAdd] = useState(false)
@@ -500,18 +502,30 @@ export default function App() {
             waves show through behind the table while the rows stay
             readable (the thead is opaque). */}
         <main className="min-w-0 flex-1 overflow-auto rounded-xl border border-border bg-surface/40 shadow-panel">
-          <DownloadTable
-            downloads={visible}
-            queues={queues}
-            categories={categories}
-            selectedId={selectedId}
-            onSelect={setSelectedId}
-            onOpenProgress={(id) => void openProgressWindowFor(id, false)}
-            onAdd={() => setShowAdd(true)}
-            onOpenFolder={(id) => void run(() => openFolder(id))}
-            onMoveToCategory={(id, categoryId) => void run(() => moveToCategory(id, categoryId))}
-            onRefreshAddress={(download) => setRefreshTarget(download)}
-          />
+          {selectedFilter === 'history' ? (
+            <HistoryView
+              onRedownloaded={() => {
+                // The new download lives in the downloads view —
+                // go back there so it is visible at once.
+                selectFilter('all')
+                void refreshAll()
+              }}
+              onError={setError}
+            />
+          ) : (
+            <DownloadTable
+              downloads={visible}
+              queues={queues}
+              categories={categories}
+              selectedId={selectedId}
+              onSelect={setSelectedId}
+              onOpenProgress={(id) => void openProgressWindowFor(id, false)}
+              onAdd={() => setShowAdd(true)}
+              onOpenFolder={(id) => void run(() => openFolder(id))}
+              onMoveToCategory={(id, categoryId) => void run(() => moveToCategory(id, categoryId))}
+              onRefreshAddress={(download) => setRefreshTarget(download)}
+            />
+          )}
         </main>
       </div>
 

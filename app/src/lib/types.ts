@@ -140,6 +140,24 @@ export interface ClipboardOffer {
   filename: string
 }
 
+/** Round 53 — download history: one finished download, as the
+ *  history view shows it. Mirrors the engine's `HistoryRow`: the
+ *  record survives removal from the main table, so a finished
+ *  file can be found again, re-downloaded, or its folder opened.
+ *  `completed_at` is a UTC ISO-8601 string; `size_bytes` is null
+ *  when the size was never known. */
+export interface HistoryRow {
+  id: string
+  download_id: string
+  filename: string
+  url: string
+  final_url: string | null
+  size_bytes: number | null
+  folder: string
+  category_id: string | null
+  completed_at: string
+}
+
 /** Mirrors engine QueueRow. `type` is always "queue" for now; the
  *  scheduler fields are UTC ISO strings or null when unset. */
 export interface QueueRow {

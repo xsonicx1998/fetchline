@@ -71,7 +71,7 @@ pub use proxy::{
 };
 pub use queue::PendingAction;
 pub use quota::{QuotaGate, QuotaStatus, QUOTA_MB_BYTES};
-pub use store::{CategoryRow, DownloadRow, PendingLinkRow, QueueRow, SegmentRow, Settings, Store};
+pub use store::{CategoryRow, DownloadRow, HistoryRow, PendingLinkRow, QueueRow, SegmentRow, Settings, Store};
 pub use update::{
     compare_versions, fetch_manifest, is_newer, parse_manifest, parse_version,
     result_from_manifest, weekly_check_due, UpdateCheckResult, UpdateManifest,

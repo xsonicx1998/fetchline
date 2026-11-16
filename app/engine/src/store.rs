@@ -224,6 +224,25 @@ pub struct PendingLinkRow {
     pub created_at: String,
 }
 
+/// One finished download in the history (Round 53): recorded
+/// when a download completes and kept even when the download is
+/// deleted from the main table — `download_id` is deliberately
+/// NOT a foreign key (see schema.sql). `folder` is the parent
+/// directory of the finished file, so "Open folder" and
+/// "Re-download" both work from a history row alone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryRow {
+    pub id: String,
+    pub download_id: String,
+    pub filename: String,
+    pub url: String,
+    pub final_url: Option<String>,
+    pub size_bytes: Option<i64>,
+    pub folder: String,
+    pub category_id: Option<String>,
+    pub completed_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadRow {
     pub id: String,
@@ -427,6 +446,30 @@ impl Store {
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_pending_links_status_created \
              ON pending_links(status, created_at)",
+            [],
+        )?;
+        // Added in Round 53 (2026-11-16): the download-history
+        // table. It is also in schema.sql, so fresh databases get
+        // it from the schema; this CREATE covers databases made
+        // before the table existed. No foreign key on download_id
+        // on purpose — deleting a download must never delete its
+        // history row.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS download_history (
+               id TEXT PRIMARY KEY,
+               download_id TEXT NOT NULL UNIQUE,
+               filename TEXT NOT NULL,
+               url TEXT NOT NULL,
+               final_url TEXT,
+               size_bytes INTEGER,
+               folder TEXT NOT NULL,
+               category_id TEXT,
+               completed_at TEXT NOT NULL DEFAULT (datetime('now')))",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_download_history_completed \
+             ON download_history(completed_at DESC)",
             [],
         )?;
         // Added in the video-grabber milestone (S08): the
@@ -2334,6 +2377,104 @@ impl Store {
              updated_at = datetime('now') WHERE id = ?1",
             params![id],
         )?;
+        // Download history (Round 53): a finished download is
+        // recorded here, in the same lock — the row is read with
+        // the already-locked connection (get_download would lock
+        // the same mutex and deadlock). This is the ONLY place
+        // history is recorded, so failed / cancelled / paused rows
+        // never land in it. INSERT OR REPLACE + UNIQUE(download_id)
+        // makes a second completion of the same download a no-op.
+        let row = conn
+            .query_row(
+                "SELECT id, url, final_url, filename, save_path, category_id, queue_id, \
+                 queue_position, size_bytes, downloaded_bytes, status, speed_bps, eta_seconds, \
+                 etag, last_modified, error_message, created_at, completed_at, \
+                 speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges, updated_at, grabber_project_id \
+                 FROM downloads WHERE id = ?1",
+                params![id],
+                row_to_download,
+            )
+            .optional()?;
+        if let Some(row) = row {
+            Self::record_history_locked(&conn, &row)?;
+        }
+        Ok(())
+    }
+
+    // -- download history (Round 53) --------------------------------------
+
+    /// Record a finished download in the history. Idempotent:
+    /// `INSERT OR REPLACE` on the UNIQUE(download_id) keeps one
+    /// row per download no matter how often it is called. The
+    /// folder is the parent directory of the finished file; the
+    /// completion time is the row's own `completed_at` when it has
+    /// one, otherwise now.
+    pub fn record_history(&self, row: &DownloadRow) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        Self::record_history_locked(&conn, row)
+    }
+
+    fn record_history_locked(conn: &Connection, row: &DownloadRow) -> Result<()> {
+        let folder = Path::new(&row.save_path)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        conn.execute(
+            "INSERT OR REPLACE INTO download_history \
+             (id, download_id, filename, url, final_url, size_bytes, folder, category_id, completed_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE(?9, datetime('now')))",
+            params![
+                Self::new_id(),
+                row.id,
+                row.filename,
+                row.url,
+                row.final_url,
+                row.size_bytes,
+                folder,
+                row.category_id,
+                row.completed_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// History rows, newest first. An empty query matches
+    /// everything; otherwise the filename or the URL must contain
+    /// the query — `%` and `_` in the query are escaped so they
+    /// match literally, never as LIKE wildcards.
+    pub fn list_history(&self, query: &str) -> Result<Vec<HistoryRow>> {
+        let conn = self.conn.lock().unwrap();
+        let escaped = query.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let pattern = format!("%{escaped}%");
+        let mut stmt = conn.prepare(
+            "SELECT id, download_id, filename, url, final_url, size_bytes, folder, category_id, completed_at \
+             FROM download_history \
+             WHERE (?1 = '' OR filename LIKE ?2 ESCAPE '\\' OR url LIKE ?2 ESCAPE '\\') \
+             ORDER BY completed_at DESC, id DESC",
+        )?;
+        let rows = stmt.query_map(params![query, pattern], row_to_history)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(EngineError::from)
+    }
+
+    /// One history row by its history id, or `None`.
+    pub fn get_history_entry(&self, id: &str) -> Result<Option<HistoryRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, download_id, filename, url, final_url, size_bytes, folder, category_id, completed_at \
+             FROM download_history WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![id], row_to_history)?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Empty the whole history. The main downloads table is
+    /// untouched — clearing history never deletes a download.
+    pub fn clear_history(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM download_history", [])?;
         Ok(())
     }
 
@@ -2638,6 +2779,20 @@ fn row_to_pending_link(r: &rusqlite::Row<'_>) -> rusqlite::Result<PendingLinkRow
         error: r.get(6)?,
         cookies: r.get(7)?,
         created_at: r.get(8)?,
+    })
+}
+
+fn row_to_history(r: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryRow> {
+    Ok(HistoryRow {
+        id: r.get(0)?,
+        download_id: r.get(1)?,
+        filename: r.get(2)?,
+        url: r.get(3)?,
+        final_url: r.get(4)?,
+        size_bytes: r.get(5)?,
+        folder: r.get(6)?,
+        category_id: r.get(7)?,
+        completed_at: r.get(8)?,
     })
 }
 

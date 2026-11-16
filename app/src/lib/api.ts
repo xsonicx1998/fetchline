@@ -11,6 +11,7 @@ import type {
   DetectedVideo,
   DownloadRow,
   GrabberProjectRow,
+  HistoryRow,
   PageLink,
   PendingAction,
   ProbeInfo,
@@ -135,6 +136,33 @@ export async function getProgressSnapshot(id: string): Promise<ProgressEvent | n
 
 export async function deleteDownload(id: string, deleteFile: boolean): Promise<void> {
   return invoke('delete_download', { id, deleteFile })
+}
+
+/** Round 53 — download history: finished downloads, recorded so
+ *  they survive removal from the main table. `query` matches the
+ *  filename or the URL (empty = everything, newest first). */
+export async function listDownloadHistory(query: string): Promise<HistoryRow[]> {
+  return invoke<HistoryRow[]>('list_download_history', { query })
+}
+
+/** Round 53 — download history: erase every history record. The
+ *  files on disk are kept — only the records go. */
+export async function clearDownloadHistory(): Promise<void> {
+  return invoke('clear_download_history')
+}
+
+/** Round 53 — download history: download a finished file again
+ *  from its recorded link. Returns the new download's id and
+ *  probe info, exactly like `add_download`. */
+export async function redownloadFromHistory(id: string): Promise<[string, ProbeInfo]> {
+  return invoke<[string, ProbeInfo]>('redownload_from_history', { id })
+}
+
+/** Round 53 — download history: open the folder a finished
+ *  download was saved to. Fails with a clear error when the
+ *  folder no longer exists. */
+export async function openHistoryFolder(id: string): Promise<void> {
+  return invoke('open_history_folder', { id })
 }
 
 export async function listQueues(): Promise<QueueRow[]> {

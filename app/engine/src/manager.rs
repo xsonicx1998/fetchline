@@ -57,7 +57,7 @@ use crate::proxy::{
 };
 use crate::queue::PendingAction;
 use crate::quota::{window_end_unix, window_expired, QuotaGate, QuotaStatus, QUOTA_MB_BYTES};
-use crate::store::{CategoryRow, DownloadRow, QueueRow, SegmentRow, Settings, Store};
+use crate::store::{CategoryRow, DownloadRow, HistoryRow, QueueRow, SegmentRow, Settings, Store};
 use crate::timeutil::{now_unix, parse_iso_to_unix, unix_to_iso};
 use crate::update::{
     fetch_manifest, result_from_manifest, weekly_check_due, UpdateCheckResult,
@@ -3537,6 +3537,65 @@ impl DownloadManager {
     pub fn open_folder(&self, id: &str) -> Result<()> {
         let folder = self.folder_for_download(id)?;
         crate::queue::open_path(&folder.to_string_lossy())
+    }
+
+    // -- download history (Round 53) --------------------------------------
+
+    /// History rows, newest first; `query` filters by filename or
+    /// URL (empty = everything). A thin pass-through to the store.
+    pub fn list_history(&self, query: &str) -> Result<Vec<HistoryRow>> {
+        self.store.list_history(query)
+    }
+
+    /// Empty the whole download history. Downloads are untouched.
+    pub fn clear_history(&self) -> Result<()> {
+        self.store.clear_history()
+    }
+
+    /// Re-download a finished file from its history row: a fresh
+    /// download through the REAL `add_download` path (probe,
+    /// excluded-sites refusal, duplicate handling), from the final
+    /// URL when the probe followed a redirect, otherwise the
+    /// original URL — into the same folder, under the same name
+    /// and category. The history row itself is untouched, so the
+    /// same entry can be re-downloaded again.
+    pub async fn redownload_from_history(
+        self: &Arc<Self>,
+        history_id: &str,
+    ) -> Result<(String, ProbeInfo)> {
+        let entry = self
+            .store
+            .get_history_entry(history_id)?
+            .ok_or_else(|| EngineError::NotFound(history_id.to_string()))?;
+        let url = entry.final_url.as_deref().unwrap_or(&entry.url);
+        self.add_download(
+            url,
+            Some(entry.filename),
+            Some(entry.folder),
+            entry.category_id,
+            None,
+        )
+        .await
+    }
+
+    /// Open the folder a history entry's file lives in, with the
+    /// same platform opener `open_folder` uses. The entry must
+    /// exist, and the folder must still be on disk — a folder
+    /// deleted (or moved) after the download finished is a clear
+    /// error, not a silent no-op.
+    pub fn open_history_folder(&self, history_id: &str) -> Result<()> {
+        let entry = self
+            .store
+            .get_history_entry(history_id)?
+            .ok_or_else(|| EngineError::NotFound(history_id.to_string()))?;
+        let folder = Path::new(&entry.folder);
+        if !folder.is_dir() {
+            return Err(EngineError::InvalidState(format!(
+                "The folder no longer exists: {}",
+                folder.display()
+            )));
+        }
+        crate::queue::open_path(&entry.folder)
     }
 
     // -- antivirus hook (S14) --------------------------------------------

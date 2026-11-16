@@ -14,9 +14,10 @@ use std::time::Duration;
 
 use fetchline_engine::{
     BatchResult, CategoryRow, DetectedVideo, DownloadManager, DownloadRow, DrainSummary,
-    GrabberProjectRow, PageLink, PendingAction, ProbeInfo, ProxyConfigInput, ProxyConfigRow,
-    QueueRow, QuotaStatus, RefreshAddressResult, ScanResult, Settings, SiteLoginInput,
-    SiteLoginRow, SoundSetting, SoundSettingInput, Store, SyncResult, UpdateCheckResult,
+    GrabberProjectRow, HistoryRow, PageLink, PendingAction, ProbeInfo, ProxyConfigInput,
+    ProxyConfigRow, QueueRow, QuotaStatus, RefreshAddressResult, ScanResult, Settings,
+    SiteLoginInput, SiteLoginRow, SoundSetting, SoundSettingInput, Store, SyncResult,
+    UpdateCheckResult,
 };
 use tauri::{AppHandle, Emitter, LogicalSize, Manager, Size, State, WebviewUrl, WebviewWindowBuilder};
 
@@ -372,6 +373,45 @@ async fn delete_download(state: State<'_, AppState>, id: String, delete_file: bo
 #[tauri::command]
 async fn list_downloads(state: State<'_, AppState>) -> Result<Vec<DownloadRow>, String> {
     state.manager.list_downloads().map_err(|e| e.to_string())
+}
+
+/// Download history (Round 53): finished downloads, newest
+/// first. `query` filters by filename or URL; empty = everything.
+#[tauri::command]
+async fn list_download_history(
+    state: State<'_, AppState>,
+    query: String,
+) -> Result<Vec<HistoryRow>, String> {
+    state.manager.list_history(&query).map_err(|e| e.to_string())
+}
+
+/// Download history (Round 53): empty the whole history.
+/// Downloads in the main table are untouched.
+#[tauri::command]
+async fn clear_download_history(state: State<'_, AppState>) -> Result<(), String> {
+    state.manager.clear_history().map_err(|e| e.to_string())
+}
+
+/// Download history (Round 53): re-download a finished file from
+/// its history entry — a fresh download from the stored URL, into
+/// the same folder, under the same name and category.
+#[tauri::command]
+async fn redownload_from_history(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(String, ProbeInfo), String> {
+    state
+        .manager
+        .redownload_from_history(&id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Download history (Round 53): open the folder a history
+/// entry's file lives in.
+#[tauri::command]
+async fn open_history_folder(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state.manager.open_history_folder(&id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1044,6 +1084,10 @@ pub fn run() {
             open_file,
             delete_download,
             list_downloads,
+            list_download_history,
+            clear_download_history,
+            redownload_from_history,
+            open_history_folder,
             get_categories,
             create_category,
             delete_category,
