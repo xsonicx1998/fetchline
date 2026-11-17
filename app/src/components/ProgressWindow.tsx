@@ -73,9 +73,11 @@ function partInfo(
  *  completion the footer offers Open file / Open folder
  *  (Round 63). Closing the window NEVER cancels the download:
  *  the engine keeps running and the window is only a view of
- *  it. The footer Cancel button is gone (Round 63): Pause is
- *  the only action while downloading, and the title-bar X
- *  still closes the window.
+ *  it. The footer has Pause + Cancel while downloading/paused
+ *  (Cancel restored in Round 63b per the user's decision, after
+ *  its Round 63 removal; it cancels the download), and on
+ *  completion it offers Open file / Open folder (Round 63)
+ *  instead. The title-bar X still closes the window.
  *
  *  Live feed: the window polls `list_downloads` (the row) and
  *  `get_progress_snapshot` (the latest progress event) every
@@ -747,6 +749,11 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
         {download.status === 'paused' || download.status === 'error' ? (
           <Button variant="primary" onClick={handleResume}>
             <Play className="h-4 w-4" aria-hidden="true" /> Resume
+          </Button>
+        ) : null}
+        {download.status === 'downloading' || download.status === 'paused' ? (
+          <Button variant="danger" onClick={handleCancel}>
+            Cancel
           </Button>
         ) : null}
         {download.status === 'complete' ? (
