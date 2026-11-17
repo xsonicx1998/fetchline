@@ -9,6 +9,12 @@ interface AddDownloadDialogProps {
   categories: CategoryRow[]
   /** S09 Downloads setting: which button is the primary one. */
   defaultAction?: 'start_now' | 'save_for_later'
+  /** Round 56 (§7.5): the configured default download folder,
+   *  shown as the "Save to folder" placeholder so the field no
+   *  longer shows a made-up path. Empty when no folder is
+   *  configured — the placeholder then says so, and the engine
+   *  falls back to the OS Downloads folder. */
+  defaultFolder?: string
   /** S08: prefill the URL field (the video panel passes the picked
    *  video's link). Empty by default — the dialog clears on open. */
   initialUrl?: string
@@ -29,6 +35,7 @@ export function AddDownloadDialog({
   open,
   categories,
   defaultAction = 'start_now',
+  defaultFolder = '',
   initialUrl = '',
   onClose,
   onAdded,
@@ -236,7 +243,7 @@ export function AddDownloadDialog({
               type="text"
               value={folder}
               onChange={(e) => setFolder(e.target.value)}
-              placeholder="C:\\Users\\you\\Downloads"
+              placeholder={defaultFolder || 'Leave empty for Downloads'}
               className="h-8 w-full rounded-md border border-border-input bg-bg px-3 font-mono text-base focus:border-accent"
             />
           </div>
@@ -264,13 +271,20 @@ export function AddDownloadDialog({
             <label htmlFor="add-cap" className="mb-1 block text-sm font-semibold">
               Speed cap for this download <span className="font-normal text-text-muted">(KB/s, 0 = no cap)</span>
             </label>
+            {/* Round 56 (§7.5): type="text" + inputMode="numeric",
+             *  not type="number" — a number input ignores Ctrl+A /
+             *  select-all in this webview, so typing appended to
+             *  the old value ("0512") instead of replacing it.
+             *  Focus selects the whole value, and non-digits are
+             *  stripped on input, so the field still only ever
+             *  holds a non-negative integer. */}
             <input
               id="add-cap"
-              type="number"
-              min={0}
-              max={10000000}
+              type="text"
+              inputMode="numeric"
               value={cap}
-              onChange={(e) => setCap(Math.max(0, Number(e.target.value) || 0))}
+              onChange={(e) => setCap(Math.max(0, Number(e.target.value.replace(/[^0-9]/g, '')) || 0))}
+              onFocus={(e) => e.target.select()}
               className="h-8 w-full rounded-md border border-border-input bg-bg px-3 text-base focus:border-accent"
             />
             <p className="mt-1 text-sm text-text-muted">

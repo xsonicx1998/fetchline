@@ -4743,6 +4743,115 @@ rate-limited for the shared egress IP) — the log was NOT read.
     only — CI is its first compile. The progress window's root
     cause and the whole round still need the VPS retest.
 
+## Round 56 — Fix round for the r55 live defects (invoke path wedged after completion, both webviews blank white) — 2026-11-17
+
+  The r55 VPS test (2026-11-17 ~01:57 EET) proved the engine
+  completes downloads — the DB row was complete at 23:29:41 —
+  but the UI stayed at "Downloading 0%" forever and both
+  webviews ended up blank white. Server evidence (02:36 EET)
+  overturned the first diagnosis: the run did not wedge and
+  the store did not deadlock — `mark_complete` ran, and the
+  checkpoint wrote. The failure is in the invoke path / tokio
+  runtime after the completion write, and the wedge mechanism
+  itself was NOT found in code. Step-0 live checks mostly
+  failed to run (02:50 EET): the browser agent could not drive
+  the RDP session, the main window is a blank white rectangle
+  that does not respond to maximize, DevTools was never opened,
+  and the app was deliberately NOT restarted (wedged state
+  preserved, PID 5860). This round implements the code-alone
+  parts of the §7 plan in `round56-investigation-rev.md`
+  (approved by the user 02:48 EET, "نفذ خطة الإصلاح");
+  the targeted runtime-wedge and webview-blank trigger fixes
+  wait for the post-rebuild retest, where the §7.4 A/B test
+  (plain index.html) is now the primary discriminator.
+
+  - **Observability that does not depend on the runtime
+    (§7.1):** `build_manager` now logs "reconciled 0
+    download(s)" on Ok(0) instead of silence (the r55 log's
+    silence was read as "the diagnostics never reached the
+    log"); a plain `std::thread` heartbeat appends
+    "heartbeat: startup" + "heartbeat: alive" to startup.log
+    every 30 s, plus a "clean shutdown" line after `app.run()`
+    returns (replacing "run returned ok" — a log ending
+    without it means the process died, not exited); the
+    store's single mutex is acquired only through
+    `Store::lock_conn`, which logs a > 1 s wait with its call
+    site (`#[track_caller]`); the store's diagnostics sink
+    (`Store::set_log_path`, pointed at startup.log by the
+    shell) receives probe durations and checkpoint failures
+    instead of `let _ =`; `list_downloads` logs a sampled
+    entry/exit trace (every 100th call, or any call slower
+    than 1 s) and `add_download` logs every call; and
+    `open_progress_window` logs BEFORE `build()` and logs the
+    window's resolved `url()` after creation (the r55 log had
+    no creation line at all).
+  - **Independent run watchdog (§7.2):** a separate task per
+    run watches a shared last-progress timestamp
+    (`Running.last_progress_ms`, stamped by the supervisor
+    loop whenever the total grows) and aborts the run after
+    180 s of no progress — it keeps running even when the
+    supervisor loop itself wedges, which is exactly what it
+    watches for. It reads the CURRENT map entry, so a stale
+    watchdog from an earlier run can never abort a newer run
+    that is making progress; it is suppressed during retry
+    backoff; the abort mirrors `cancel_download` (entry
+    removed first — that is what unblocks Resume — then
+    handle aborted, error status, snapshot), so a later
+    Resume can restart the download. Timeout is a test knob
+    (`set_run_watchdog_timeout_secs`, clamped >= 1 s,
+    default 180 s); the existing 30 s per-chunk watchdog is
+    untouched.
+  - **Frontend in-flight guard + "backend not responding"
+    (§7.3):** App.tsx's 1 s poll and ProgressWindow's 500 ms
+    poll skip a tick while a refresh is still in flight, and
+    the poll invoke itself is wrapped in `withTimeout`
+    (5 s) so a hung invoke REJECTS instead of pending
+    forever. After ~10 s with no poll response the window
+    stops issuing invokes and shows a sticky "Backend not
+    responding — restart the app" banner with Retry connection
+    (resumes polling) and Reload window. A successful poll
+    clears the dead state.
+  - **Heartbeat-detection mechanism (§7.4):** each window's
+    JS pings `webview_heartbeat` every 5 s with its label
+    (`main`, `progress-<id>`, guarded so a hung backend never
+    piles up pings); a runtime-independent monitor thread logs
+    "webview <label> heartbeat lost" when pings stop for 30 s
+    (and "resumed" on recovery), once per outage.
+    `reload_webview_window` is the recovery action: the main
+    window reloads in place (`window.location.reload()`), a
+    progress window is closed and rebuilt from scratch (new
+    renderer process) via the extracted `build_progress_window`
+    helper. Devtools are now enabled on the MAIN window too
+    (`tauri.conf.json`, verified against vendored Tauri 2.12.5
+    + wry 0.57.2: the builder flag is not feature-gated and
+    maps to WebView2 `AreDevToolsEnabled`, so F12 works in a
+    release build — the `devtools` cargo feature only gates
+    the `open_devtools()` API).
+  - **Side bugs + probe timeout (§7.5):** the Add dialog's
+    "Save to folder" placeholder no longer shows the made-up
+    `C:\Users\you\Downloads` — it shows the configured
+    default folder (new `defaultFolder` prop from Settings)
+    or "Leave empty for Downloads"; the speed-cap input is
+    `type="text"` + `inputMode="numeric"` with select-all on
+    focus (a number input ignores Ctrl+A, so typing appended
+    → "0512") and non-digits stripped on input; the probe
+    total timeout is 60 s → 30 s (the dialog's own 60 s
+    submit timeout is unchanged).
+  - **Tests:** 4 new engine tests (round56_tests.rs): the
+    independent watchdog aborts a stalled run in ~2 s with
+    its message (not after the 30 s chunk watchdog); a slow
+    4 MiB download at ~50 ms per chunk completes with the
+    watchdog at 2 s; the timeout defaults to 180 s and clamps
+    to >= 1 s; the probe duration is logged with its URL.
+    Suite 457/457 on Linux (453 + 4 new); `npm run build`
+    passes. The Tauri shell never compiles on this VM, so
+    `lib.rs` is verified by reading only + `rustfmt` parse —
+    the VPS build is its first compile. Deliberately NOT in
+    this round: the targeted runtime-wedge fix and the
+    webview-blank trigger fix (plain-index.html A/B test,
+    fragment removal) — those wait for the step-0 / retest
+    evidence.
+
 ## Known limitations, not bugs (round-24 additions)
 
 - The Tauri shell never compiles or runs on this VM, so a

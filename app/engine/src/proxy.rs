@@ -329,14 +329,18 @@ impl ProxyConfig {
 /// through this client, so a configured proxy really is used.
 ///
 /// Round 55 — total timeout: a request that must finish on its own
-/// (probe, page fetch, update check) gets a 60 s total timeout, so
-/// a stalled server can no longer block the Add dialog for minutes
+/// (probe, page fetch, update check) gets a total timeout, so a
+/// stalled server can no longer block the Add dialog for minutes
 /// (defect 3b: the 1 GB add hung silently). Segment body streams
 /// do NOT use this client — a slow download legitimately takes
-/// longer than 60 s, so segments use `build_segment_client`
+/// longer than 30 s, so segments use `build_segment_client`
 /// (connect timeout only) plus a per-chunk stall watchdog
 /// (`SEGMENT_STALL_TIMEOUT` in manager.rs) instead.
-pub const CLIENT_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
+/// Round 56 (§7.5): 60 s → 30 s — the r55 live test showed a
+/// 60 s probe failure is already past the point where the Add
+/// dialog feels hung, and the dialog's own 60 s client-side
+/// submit timeout still bounds the whole submit.
+pub const CLIENT_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub fn build_client(proxy: Option<&ProxyConfig>, timeout_secs: u64) -> Result<Client> {
     build_client_with_total_timeout(proxy, timeout_secs, CLIENT_TOTAL_TIMEOUT)

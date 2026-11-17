@@ -9,7 +9,9 @@
 //! (GTK 3, WebKitGTK) — see app/README.md. On Windows those are provided
 //! by the WebView2 runtime, which ships with Windows 10/11.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use fetchline_engine::{
@@ -19,11 +21,40 @@ use fetchline_engine::{
     SiteLoginInput, SiteLoginRow, SoundSetting, SoundSettingInput, Store, SyncResult,
     UpdateCheckResult,
 };
-use tauri::{AppHandle, Emitter, LogicalSize, Manager, Size, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Emitter, LogicalSize, Manager, Size, State, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder,
+};
 
 /// Shared state: one manager for the whole app lifetime.
 pub struct AppState {
     pub manager: Arc<DownloadManager>,
+    /// Webview heartbeat state (§7.4, Round 56): one entry per
+    /// window label (`main`, `progress-<download id>`), stamped
+    /// by the `webview_heartbeat` command every 5 s from JS and
+    /// read by the monitor thread in `setup`. A window whose
+    /// pings stop for 30 s is logged as lost — the renderer may
+    /// be dead even though the window still exists.
+    pub webview_heartbeats: Arc<StdMutex<HashMap<String, WebviewHeartbeat>>>,
+}
+
+/// One window's JS heartbeat state (§7.4, Round 56).
+pub struct WebviewHeartbeat {
+    /// Epoch millis of the last ping received.
+    pub last_seen_ms: u64,
+    /// Whether "heartbeat lost" is already logged for the current
+    /// outage (so a dead window logs once, not every 5 s).
+    pub lost_logged: bool,
+    /// Whether the first "heartbeat started" line is logged.
+    pub started_logged: bool,
+}
+
+/// Epoch milliseconds — the heartbeat monitor's clock.
+fn epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -112,15 +143,28 @@ fn build_manager(app: &AppHandle) -> Result<Arc<DownloadManager>, String> {
         }
     };
     log_startup(log, "store opened");
+    // Round 56 (§7.1): point the store's diagnostics sink at the
+    // same startup.log — the engine's probe/checkpoint/lock log
+    // lines land in the file the live tests already read. The
+    // log sits next to the database (same folder the shell's
+    // `startup_log_path` resolves to); if that cannot be resolved
+    // the engine stays silent instead of failing the launch.
+    if let Some(log_path) = startup_log_path_from_app(app) {
+        store.set_log_path(log_path);
+    }
     // Round 55 (defects 1 + 4): rows left `downloading` by a
     // previous run are zombies — no run exists for them in this
     // process, so they could never finish and Resume would refuse
     // them as "already running". Reset them to `paused` (bytes
     // kept) so they can be resumed instead of sitting at 0%
     // forever.
+    // Round 56 (§7.1a): the Ok(0) case used to log NOTHING, so a
+    // live test could never tell whether reconciliation ran at
+    // all — the r55 log's silence was read as "the diagnostics
+    // never reached the log". Every outcome is logged now.
     let store = Arc::new(store);
     match store.reconcile_stuck_downloads() {
-        Ok(0) => {}
+        Ok(0) => log_startup(log, "reconciled 0 download(s) stuck in 'downloading'"),
         Ok(n) => log_startup(
             log,
             &format!("reconciled {n} download(s) stuck in 'downloading' to 'paused'"),
@@ -135,6 +179,7 @@ fn build_manager(app: &AppHandle) -> Result<Arc<DownloadManager>, String> {
 
 #[tauri::command]
 async fn add_download(
+    app: AppHandle,
     state: State<'_, AppState>,
     url: String,
     filename: Option<String>,
@@ -142,11 +187,18 @@ async fn add_download(
     category: Option<String>,
     queue: Option<String>,
 ) -> Result<(String, ProbeInfo), String> {
-    state
+    // Command-entry trace (§7.1e): every call logs entry + exit.
+    let n = ADD_DOWNLOAD_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+    let started = std::time::Instant::now();
+    let log = startup_log_path_from_app(&app);
+    log_startup(log.as_deref(), &format!("cmd add_download #{n} entry"));
+    let result = state
         .manager
         .add_download(&url, filename, folder, category, queue)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string());
+    trace_command_exit(log.as_deref(), "add_download", n, started, result.is_ok());
+    result
 }
 
 #[tauri::command]
@@ -249,11 +301,67 @@ fn progress_window_title(downloaded_bytes: u64, size_bytes: Option<u64>, filenam
     }
 }
 
+/// Build one progress window for a download. The window loads the
+/// same frontend bundle with `#progress=<id>` in the URL, so
+/// `main.tsx` renders the progress view instead of the main
+/// window. Shared by `open_progress_window` and by
+/// `reload_webview_window` (which closes a dead window and builds
+/// a fresh one — §7.4, Round 56).
+/// Round 56 (§7.1f): the log line now goes out BEFORE `build()`
+/// (the r55 log had no creation line at all, so a live test could
+/// not tell whether the call was even reached), and the window's
+/// resolved URL is logged after creation — a URL that is wrong
+/// here is a different bug from a webview that never paints.
+fn build_progress_window(
+    app: &AppHandle,
+    manager: &DownloadManager,
+    download_id: &str,
+) -> Result<WebviewWindow, String> {
+    let log = startup_log_path_from_app(app);
+    let log = log.as_deref();
+    let row = manager
+        .get_download(download_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Download not found: {download_id}"))?;
+    let label = progress_window_label(download_id);
+    let url = WebviewUrl::App(format!("index.html#progress={download_id}").into());
+    log_startup(
+        log,
+        &format!("creating progress window {label}: index.html#progress={download_id}"),
+    );
+    match WebviewWindowBuilder::new(app, &label, url)
+        .title(progress_window_title(
+            row.downloaded_bytes as u64,
+            row.size_bytes.map(|s| s as u64),
+            &row.filename,
+        ))
+        .inner_size(600.0, 680.0)
+        .min_inner_size(520.0, 320.0)
+        .resizable(true)
+        .center()
+        .devtools(true)
+        .build()
+    {
+        Ok(window) => {
+            let url = window
+                .url()
+                .map(|u| u.to_string())
+                .unwrap_or_else(|e| format!("url error: {e}"));
+            log_startup(log, &format!("progress window {label} created: {url}"));
+            Ok(window)
+        }
+        Err(e) => {
+            log_startup(
+                log,
+                &format!("progress window {label} FAILED to create: {e}"),
+            );
+            Err(e.to_string())
+        }
+    }
+}
+
 /// Open (or focus, when it already exists) the separate progress
-/// window for a download. The window loads the same frontend
-/// bundle with `#progress=<id>` in the URL, so `main.tsx` renders
-/// the progress view instead of the main window. Errors when the
-/// download does not exist.
+/// window for a download. Errors when the download does not exist.
 #[tauri::command]
 fn open_progress_window(
     app: AppHandle,
@@ -268,11 +376,6 @@ fn open_progress_window(
     // its console errors can be captured in the test build.
     let log = startup_log_path_from_app(&app);
     let log = log.as_deref();
-    let row = state
-        .manager
-        .get_download(&download_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Download not found: {download_id}"))?;
     let label = progress_window_label(&download_id);
     if let Some(window) = app.get_webview_window(&label) {
         // Already open — bring it forward instead of a second copy.
@@ -280,32 +383,8 @@ fn open_progress_window(
         log_startup(log, &format!("progress window {label} already open — focused"));
         return Ok(());
     }
-    let url = WebviewUrl::App(format!("index.html#progress={download_id}").into());
-    match WebviewWindowBuilder::new(&app, &label, url)
-        .title(progress_window_title(
-            row.downloaded_bytes as u64,
-            row.size_bytes.map(|s| s as u64),
-            &row.filename,
-        ))
-        .inner_size(600.0, 680.0)
-        .min_inner_size(520.0, 320.0)
-        .resizable(true)
-        .center()
-        .devtools(true)
-        .build()
-    {
-        Ok(_) => {
-            log_startup(
-                log,
-                &format!("progress window {label} created: index.html#progress={download_id}"),
-            );
-            Ok(())
-        }
-        Err(e) => {
-            log_startup(log, &format!("progress window {label} FAILED to create: {e}"));
-            Err(e.to_string())
-        }
-    }
+    build_progress_window(&app, &state.manager, &download_id)?;
+    Ok(())
 }
 
 /// Resize a progress window between its full view (speed graph,
@@ -337,6 +416,79 @@ fn get_progress_snapshot(
     download_id: String,
 ) -> Result<Option<fetchline_engine::ProgressEvent>, String> {
     Ok(state.manager.last_progress(&download_id))
+}
+
+/// Webview heartbeat (§7.4, Round 56): each window's JS pings
+/// this every 5 s with its label (`main`,
+/// `progress-<download id>`). The monitor thread in `setup`
+/// logs "heartbeat lost" when a window's pings stop for 30 s —
+/// the renderer may be dead even though the window still exists
+/// (the r55 live test: both windows blank white, no console
+/// data, nothing in the log). A ping that arrives after a loss
+/// clears the flag, so a recovered window logs "resumed". The
+/// command never fails: a heartbeat must never surface as an
+/// error to the window that sends it.
+#[tauri::command]
+fn webview_heartbeat(state: State<'_, AppState>, label: String) -> Result<(), String> {
+    let now = epoch_ms();
+    let Ok(mut map) = state.webview_heartbeats.lock() else {
+        return Ok(());
+    };
+    match map.get_mut(&label) {
+        Some(hb) => {
+            hb.last_seen_ms = now;
+        }
+        None => {
+            map.insert(
+                label,
+                WebviewHeartbeat {
+                    last_seen_ms: now,
+                    lost_logged: false,
+                    started_logged: false,
+                },
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Reload a window's webview (§7.4, Round 56): the recovery
+/// action the "Backend not responding" banner offers. The main
+/// window is reloaded in place (`window.location.reload()` —
+/// recreating it would lose the app's window state); a progress
+/// window is closed and rebuilt from scratch, which also
+/// replaces a dead renderer process with a fresh one. A reload
+/// that fails (dead renderer) returns the error — the caller
+/// shows it instead of pretending the window recovered.
+#[tauri::command]
+fn reload_webview_window(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    label: String,
+) -> Result<(), String> {
+    let log = startup_log_path_from_app(&app);
+    let log = log.as_deref();
+    log_startup(log, &format!("reload requested for webview {label}"));
+    if label == "main" {
+        let window = app
+            .get_webview_window("main")
+            .ok_or_else(|| "No main window open".to_string())?;
+        return window
+            .eval("window.location.reload()")
+            .map_err(|e| e.to_string());
+    }
+    let Some(download_id) = label.strip_prefix("progress-") else {
+        return Err(format!("Unknown window label: {label}"));
+    };
+    let Some(window) = app.get_webview_window(&label) else {
+        return Err(format!(
+            "No progress window open for download {download_id}"
+        ));
+    };
+    window.close().map_err(|e| e.to_string())?;
+    log_startup(log, &format!("progress window {label} closed for reload"));
+    build_progress_window(&app, &state.manager, download_id)?;
+    Ok(())
 }
 
 /// Antivirus hook (S14): run the configured scanner against a
@@ -409,9 +561,53 @@ async fn delete_download(state: State<'_, AppState>, id: String, delete_file: bo
         .map_err(|e| e.to_string())
 }
 
+/// Command-entry trace (§7.1e, Round 56): sampled logging of the
+/// two commands the UI polls/uses most, so a wedged invoke path
+/// is visible in startup.log. `list_downloads` is polled every
+/// second — logging every call would drown the file, so only
+/// every 100th call is logged, plus any call slower than 1 s
+/// (the interesting case). `add_download` is rare, so every call
+/// logs its entry and its exit. A call whose entry never gets an
+/// exit is a call that never returned. The log path is resolved
+/// per call from the app handle, so the trace does not depend on
+/// any state a wedged runtime could hide.
+static LIST_DOWNLOADS_CALLS: AtomicU64 = AtomicU64::new(0);
+static ADD_DOWNLOAD_CALLS: AtomicU64 = AtomicU64::new(0);
+
+fn trace_command_exit(
+    log: Option<&std::path::Path>,
+    name: &str,
+    n: u64,
+    started: std::time::Instant,
+    ok: bool,
+) {
+    log_startup(
+        log,
+        &format!(
+            "cmd {name} #{n} exit in {}ms ({})",
+            started.elapsed().as_millis(),
+            if ok { "ok" } else { "err" }
+        ),
+    );
+}
+
 #[tauri::command]
-async fn list_downloads(state: State<'_, AppState>) -> Result<Vec<DownloadRow>, String> {
-    state.manager.list_downloads().map_err(|e| e.to_string())
+async fn list_downloads(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<DownloadRow>, String> {
+    let n = LIST_DOWNLOADS_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+    let started = std::time::Instant::now();
+    let result = state.manager.list_downloads().map_err(|e| e.to_string());
+    // Sampled (§7.1e): every 100th call, or any call slower than
+    // 1 s — a wedged invoke shows up as a missing sampled exit.
+    if n % 100 == 0 || started.elapsed() > Duration::from_secs(1) {
+        trace_command_exit(
+            startup_log_path_from_app(&app).as_deref(),
+            "list_downloads",
+            n,
+            started,
+            result.is_ok(),
+        );
+    }
+    result
 }
 
 /// Download history (Round 53): finished downloads, newest
@@ -980,11 +1176,39 @@ pub fn run() {
             &format!("webview version: ERROR {e:?}"),
         ),
     }
-    let result = tauri::Builder::default()
+    // Round 56 (§7.1b): build the app first, then run it, so a
+    // clean shutdown logs its own line. `app.run()` returns only
+    // when the app exits — the line after it is the shutdown
+    // marker, and a log that ends without it means the process
+    // died (panic, kill, crash) rather than exiting cleanly. The
+    // heartbeat thread's last beat brackets the lifetime from the
+    // other side. A build failure keeps the old behaviour (log +
+    // panic); it used to be reported as "run failed" by the
+    // Builder::run wrapper, which this split replaces.
+    let app = match tauri::Builder::default()
         .setup(|app| {
             let log = startup_log_path_from_app(app.handle());
             let log = log.as_deref();
             log_startup(log, "setup start");
+            // Round 56 (§7.1b): runtime-independent heartbeat — a
+            // plain std::thread (NOT a tokio task) appending a line
+            // to startup.log every 30 s, plus one at startup. If
+            // the tokio runtime wedges, the heartbeat keeps going
+            // (the r55 log went silent with no way to tell whether
+            // the process was alive at all); if the heartbeat stops
+            // too, the process itself is dead. The thread detaches
+            // and ends with the process — there is no clean way to
+            // stop it, and none is needed. No log path, no thread:
+            // a heartbeat that cannot be written is pointless.
+            if let Some(heartbeat_log) = startup_log_path_from_app(app.handle()) {
+                std::thread::spawn(move || {
+                    startup_log_line(&heartbeat_log, "heartbeat: startup");
+                    loop {
+                        std::thread::sleep(Duration::from_secs(30));
+                        startup_log_line(&heartbeat_log, "heartbeat: alive");
+                    }
+                });
+            }
             let manager = match build_manager(app.handle()) {
                 Ok(m) => m,
                 Err(e) => {
@@ -1099,7 +1323,74 @@ pub fn run() {
                 }
             });
             log_startup(log, "spawns done");
-            app.manage(AppState { manager });
+            // Webview heartbeat state (§7.4, Round 56): created
+            // here so the monitor thread and AppState share the
+            // same map. The monitor is a plain std::thread
+            // (runtime-independent, like the process heartbeat
+            // above) that checks every 5 s whether each window's
+            // JS is still pinging. A window whose pings stop for
+            // 30 s logs "heartbeat lost" — the renderer may be
+            // dead even though the window still exists (the r55
+            // live test: both windows blank white, no console
+            // data, nothing in the log). A recovered window logs
+            // "resumed". Each line is once per outage, not every
+            // check. No log path, no thread: it only logs.
+            let webview_heartbeats: Arc<StdMutex<HashMap<String, WebviewHeartbeat>>> =
+                Arc::new(StdMutex::new(HashMap::new()));
+            if let Some(monitor_log) = startup_log_path_from_app(app.handle()) {
+                let monitor_heartbeats = Arc::clone(&webview_heartbeats);
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(Duration::from_secs(5));
+                    let now = epoch_ms();
+                    let Ok(mut map) = monitor_heartbeats.lock() else {
+                        continue;
+                    };
+                    for (label, hb) in map.iter_mut() {
+                        if !hb.started_logged {
+                            startup_log_line(
+                                &monitor_log,
+                                &format!("webview {label} heartbeat started"),
+                            );
+                            hb.started_logged = true;
+                        }
+                        let silent_ms = now.saturating_sub(hb.last_seen_ms);
+                        if silent_ms > 30_000 && !hb.lost_logged {
+                            startup_log_line(
+                                &monitor_log,
+                                &format!(
+                                    "webview {label} heartbeat lost (last seen {}s ago)",
+                                    silent_ms / 1000
+                                ),
+                            );
+                            hb.lost_logged = true;
+                        } else if silent_ms <= 30_000 && hb.lost_logged {
+                            startup_log_line(
+                                &monitor_log,
+                                &format!("webview {label} heartbeat resumed"),
+                            );
+                            hb.lost_logged = false;
+                        }
+                    }
+                });
+            }
+            app.manage(AppState {
+                manager,
+                webview_heartbeats,
+            });
+            // Round 56 (§7.4): log the main window's resolved URL
+            // after creation — the same diagnostic as the progress
+            // window's URL log, so a wrong URL is visible for the
+            // main window too.
+            match app.get_webview_window("main") {
+                Some(window) => {
+                    let url = window
+                        .url()
+                        .map(|u| u.to_string())
+                        .unwrap_or_else(|e| format!("url error: {e}"));
+                    log_startup(log, &format!("main window url: {url}"));
+                }
+                None => log_startup(log, "main window not found in setup"),
+            }
             log_startup(log, "setup ok");
             Ok(())
         })
@@ -1116,6 +1407,8 @@ pub fn run() {
             open_progress_window,
             set_progress_window_compact,
             get_progress_snapshot,
+            webview_heartbeat,
+            reload_webview_window,
             run_antivirus_scan,
             get_scan_result,
             test_antivirus_scanner,
@@ -1175,18 +1468,17 @@ pub fn run() {
             test_sound_file,
             update_category
         ])
-        .run(tauri::generate_context!());
-    // BUG-029: `.run()` only returns when the app exits. Record the
-    // outcome first — a run error used to die in `.expect` with
-    // nothing on disk — then keep the exact same panic behaviour.
-    match result {
-        Ok(()) => startup_log_line(&startup_log_path_early(), "run returned ok"),
+        .build(tauri::generate_context!())
+    {
+        Ok(app) => app,
         Err(e) => {
-            startup_log_line(
-                &startup_log_path_early(),
-                &format!("run failed: {e}"),
-            );
-            panic!("error while running tauri application");
+            startup_log_line(&startup_log_path_early(), &format!("build failed: {e}"));
+            panic!("error while building tauri application");
         }
-    }
+    };
+    // BUG-029: `app.run()` only returns when the app exits. The
+    // line after it is the clean-shutdown marker (Round 56,
+    // §7.1b) — it replaces the old "run returned ok" line.
+    app.run(|_app_handle, _event| {});
+    startup_log_line(&startup_log_path_early(), "clean shutdown");
 }

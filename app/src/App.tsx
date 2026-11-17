@@ -23,11 +23,13 @@ import {
   openFolder,
   openProgressWindow,
   pauseDownload,
+  reloadWebviewWindow,
   resumeDownload,
   runGrabber,
   startQueue,
   stopQueue,
   syncQueueNow,
+  withTimeout,
 } from './lib/api'
 import { formatSpeed } from './lib/format'
 import type { CategoryRow, ClipboardOffer, DownloadRow, GrabberProjectRow, PendingAction, QueueRow, QuotaStatus, Settings, UpdateCheckResult } from './lib/types'
@@ -104,6 +106,23 @@ export default function App() {
   function actionError(e: unknown) {
     setBannerError(e instanceof Error ? e.message : String(e))
   }
+  /** Round 56 (§7.3): backend-not-responding guard. The 1 s poll
+   *  used to fire a new `list_downloads` invoke every second even
+   *  when the previous one never returned — a wedged backend
+   *  piled up invokes forever while the table sat frozen at 0%.
+   *  `refreshInFlight` skips a tick while a refresh is still
+   *  running; the poll invoke itself times out after 5 s
+   *  (`withTimeout`), so a hung invoke REJECTS instead of
+   *  pending forever; and when no poll has succeeded for ~10 s
+   *  the window declares the backend dead, stops issuing polls,
+   *  and offers Retry / Reload. A successful poll clears the dead
+   *  state. The refs mirror the state so the interval callback
+   *  never reads a stale closure. */
+  const [backendDead, setBackendDead] = useState(false)
+  const backendDeadRef = useRef(false)
+  const refreshInFlight = useRef(false)
+  const pollStoppedRef = useRef(false)
+  const lastPollOkAt = useRef(Date.now())
   const [settings, setSettings] = useState<Settings | null>(null)
   /** Download quota (S12): live usage, shown in the status bar
    *  when a quota is enabled; refreshed with the settings. */
@@ -165,13 +184,38 @@ export default function App() {
   }, [])
 
   const refresh = useCallback(async () => {
+    // In-flight guard (§7.3): skip the tick while a refresh is
+    // still running — a hung invoke must not pile up a new one
+    // every second.
+    if (refreshInFlight.current) return
+    refreshInFlight.current = true
     try {
-      setDownloads(await listDownloads())
+      setDownloads(await withTimeout(listDownloads(), 5000, 'Backend did not respond within 5 seconds'))
       setError(null)
+      lastPollOkAt.current = Date.now()
+      if (backendDeadRef.current) {
+        backendDeadRef.current = false
+        setBackendDead(false)
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      refreshInFlight.current = false
     }
   }, [])
+
+  /** Resume polling after the backend-dead banner (§7.3): clear
+   *  the stop flag, reset the staleness clock, and refresh at
+   *  once. The interval is still alive (its ticks no-op while
+   *  stopped), so no timer needs recreating. If the backend is
+   *  still dead the banner comes back after ~10 s. */
+  const retryPolling = useCallback(() => {
+    pollStoppedRef.current = false
+    backendDeadRef.current = false
+    setBackendDead(false)
+    lastPollOkAt.current = Date.now()
+    void refresh()
+  }, [refresh])
 
   const refreshAll = useCallback(async () => {
     await refresh()
@@ -187,12 +231,30 @@ export default function App() {
   }, [refresh, refreshQueues, refreshGrabberProjects, selectedQueue])
 
   useEffect(() => {
-    void refresh()
+    if (!pollStoppedRef.current) void refresh()
     void refreshCategories()
     void refreshQueues()
     void refreshGrabberProjects()
     void refreshSettings()
-    const timer = window.setInterval(() => void refreshAll(), 1000)
+    const timer = window.setInterval(() => {
+      if (pollStoppedRef.current) return
+      void refreshAll()
+      // Backend-dead detection (§7.3): no successful poll for
+      // ~10 s — stop issuing invokes and show the banner. A poll
+      // still in flight is not a dead backend (its 5 s timeout
+      // has not fired yet), so the check waits for it. The
+      // interval itself keeps ticking (its ticks no-op) so Retry
+      // needs no timer recreation.
+      if (
+        !refreshInFlight.current &&
+        Date.now() - lastPollOkAt.current > 10_000 &&
+        !backendDeadRef.current
+      ) {
+        backendDeadRef.current = true
+        pollStoppedRef.current = true
+        setBackendDead(true)
+      }
+    }, 1000)
     let unlistenAction: (() => void) | undefined
     let unlistenUpdate: (() => void) | undefined
     let unlistenClipboard: (() => void) | undefined
@@ -499,6 +561,28 @@ export default function App() {
         ) : null
       })()}
 
+      {backendDead ? (
+        <div role="alert" className="flex shrink-0 items-center justify-between gap-2 border-b border-border bg-danger-soft px-4 py-2 text-sm text-danger">
+          <span>Backend not responding — restart the app. Your downloads are safe on disk.</span>
+          <span className="flex shrink-0 items-center gap-2">
+            <Button variant="secondary" size="sm" onClick={retryPolling}>
+              Retry connection
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => {
+                void reloadWebviewWindow('main').catch((e: unknown) =>
+                  setBannerError(e instanceof Error ? e.message : String(e)),
+                )
+              }}
+            >
+              Reload window
+            </Button>
+          </span>
+        </div>
+      ) : null}
+
       <div className="flex min-h-0 flex-1 gap-2 p-2">
         <CategorySidebar
           categories={categories}
@@ -591,6 +675,7 @@ export default function App() {
         open={showAdd}
         categories={categories}
         defaultAction={settings?.default_action ?? 'start_now'}
+        defaultFolder={settings?.default_download_folder ?? ''}
         initialUrl={pickedVideoUrl}
         onClose={() => {
           setShowAdd(false)

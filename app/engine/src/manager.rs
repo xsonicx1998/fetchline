@@ -27,7 +27,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -88,6 +88,19 @@ const RUN_STALL_TIMEOUT: Duration = Duration::from_secs(180);
 const MIN_SPLIT_REMAINING: u64 = 256 * 1024;
 const INITIAL_SEGMENTS: usize = 4;
 const MIN_SIZE_TO_SEGMENT: u64 = 1024 * 1024;
+
+/// Epoch milliseconds — the independent run watchdog's clock
+/// (§7.2, Round 56). Absolute (not run-relative) so a stale
+/// watchdog task from an earlier run of the same download can
+/// never mistake its own start time for the current run's
+/// progress: it always reads the current run's timestamp from
+/// the `running` map entry.
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 /// One segment's live progress, as reported to the UI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -254,6 +267,15 @@ struct Running {
     /// of the two. Unlimited when the download has no cap — the
     /// bucket then never waits, exactly like the global one at 0.
     per_download_limiter: Arc<RateLimiter>,
+    /// Epoch millis of the last byte progress, written by the
+    /// supervisor loop in `run_inner` whenever the downloaded
+    /// total grows and read by the independent run watchdog
+    /// (§7.2, Round 56). It lives in the map entry — not in a
+    /// variable captured by the run task — so the watchdog always
+    /// reads the CURRENT run's timestamp: a stale watchdog from
+    /// an earlier run of the same download can never abort a
+    /// newer run that is making progress.
+    last_progress_ms: Arc<AtomicU64>,
 }
 
 /// One retry wait: the backoff deadline of a segment that failed,
@@ -405,6 +427,16 @@ pub struct DownloadManager {
     /// refused ("already running") instead of running the scanner
     /// twice on one file.
     scanning: StdMutex<HashSet<String>>,
+    /// Independent run watchdog timeout in seconds (§7.2,
+    /// Round 56): how long a run may go without byte progress
+    /// before the watchdog task aborts it. Default
+    /// `RUN_STALL_TIMEOUT` (180 s) — the same budget the in-loop
+    /// watchdog uses. A diagnostics/test knob only: production
+    /// never changes it, and the setter clamps to >= 1 s so a
+    /// zero can never make the watchdog fire instantly. Tests
+    /// shorten it to prove the watchdog fires without waiting
+    /// three minutes.
+    run_watchdog_timeout: AtomicU64,
 }
 
 impl DownloadManager {
@@ -451,6 +483,7 @@ impl DownloadManager {
             update_check_running: AtomicBool::new(false),
             update_events,
             scanning: StdMutex::new(HashSet::new()),
+            run_watchdog_timeout: AtomicU64::new(RUN_STALL_TIMEOUT.as_secs()),
         })
     }
 
@@ -474,6 +507,23 @@ impl DownloadManager {
     /// Current global speed cap in bytes per second (0 = unlimited).
     pub fn speed_limit_bps(&self) -> u64 {
         self.limiter.rate_bps()
+    }
+
+    /// Independent run watchdog timeout in seconds (§7.2, Round
+    /// 56): how long a run may go without byte progress before
+    /// the watchdog task aborts it. Default 180 s
+    /// (`RUN_STALL_TIMEOUT`).
+    pub fn run_watchdog_timeout_secs(&self) -> u64 {
+        self.run_watchdog_timeout.load(Ordering::Relaxed)
+    }
+
+    /// Shorten (or restore) the run watchdog timeout. A
+    /// diagnostics/test knob only — production never calls it.
+    /// Clamped to >= 1 s so a zero can never make the watchdog
+    /// fire instantly on a healthy run.
+    pub fn set_run_watchdog_timeout_secs(&self, secs: u64) {
+        self.run_watchdog_timeout
+            .store(secs.max(1), Ordering::SeqCst);
     }
 
     /// Read settings + the active proxy from the database and apply
@@ -853,10 +903,32 @@ impl DownloadManager {
     /// an FTP proxy) and an NTLM proxy can answer a 407 with the
     /// handshake instead of a bare failure.
     async fn probe_url(&self, url: &str) -> Result<ProbeInfo> {
+        // Round 56 (§7.1d): probe duration is logged (throttled by
+        // the call itself — a probe is one network round trip, not
+        // a hot loop) so a slow or hanging probe is visible in
+        // startup.log instead of a silent Add-dialog spin. The
+        // error is logged too: the caller still gets the Err, but
+        // the log line is what survives a wedged UI.
+        let start = Instant::now();
         let auth = self.site_auth_for_url(url);
         let auth_ref = auth.as_ref().map(|(u, p)| (u.as_str(), p.as_str()));
         let proxy = self.active_proxy();
-        probe_with_proxy(&self.client(), url, auth_ref, proxy.as_ref()).await
+        let result = probe_with_proxy(&self.client(), url, auth_ref, proxy.as_ref()).await;
+        match &result {
+            Ok(info) => self.store.log(&format!(
+                "probe {} ok in {}ms (size {:?}, range {})",
+                url,
+                start.elapsed().as_millis(),
+                info.size,
+                info.accept_ranges
+            )),
+            Err(e) => self.store.log(&format!(
+                "probe {} failed in {}ms: {e}",
+                url,
+                start.elapsed().as_millis()
+            )),
+        }
+        result
     }
 
     /// Probe a URL with the browser's cookies for it, if any —
@@ -3503,14 +3575,26 @@ impl DownloadManager {
         ));
         let pause = Arc::new(AtomicBool::new(false));
         let retry = Arc::new(RetrySlot::new());
+        // Shared last-progress clock (§7.2, Round 56): the
+        // supervisor loop in `run_inner` stamps this whenever the
+        // downloaded total grows, and the independent watchdog
+        // task below reads it from the map entry. Initialised to
+        // the run's start, so a download that never receives its
+        // first byte still has a well-defined stall clock.
+        let last_progress_ms = Arc::new(AtomicU64::new(now_millis()));
         let this = Arc::clone(self);
         let id = id.to_string();
         let pause_clone = Arc::clone(&pause);
         let retry_clone = Arc::clone(&retry);
         let limiter_clone = Arc::clone(&per_download_limiter);
+        let progress_clone = Arc::clone(&last_progress_ms);
         let handle = tokio::spawn(async move {
-            this.run(id, pause_clone, retry_clone, limiter_clone).await;
+            this.run(id, pause_clone, retry_clone, limiter_clone, progress_clone)
+                .await;
         });
+        // The watchdog's id, cloned before the insert below moves
+        // `row.id` into the map key.
+        let watch_id = row.id.clone();
         self.running.lock().await.insert(
             row.id,
             Running {
@@ -3518,8 +3602,24 @@ impl DownloadManager {
                 handle,
                 retry,
                 per_download_limiter,
+                last_progress_ms,
             },
         );
+        // Round 56 (§7.2): the independent run watchdog — a
+        // separate task per run that watches the shared
+        // last-progress timestamp and aborts the run after
+        // `run_watchdog_timeout` of no progress. It is a different
+        // task from the run itself, so it keeps running even when
+        // the supervisor loop wedges (which is exactly what it is
+        // watching for). It reads the CURRENT map entry, so a stale
+        // watchdog from an earlier run of the same download can
+        // never abort a newer run that is making progress.
+        {
+            let watch_mgr = Arc::clone(self);
+            tokio::spawn(async move {
+                watch_mgr.run_watchdog(watch_id).await;
+            });
+        }
         Ok(())
     }
 
@@ -4109,9 +4209,20 @@ impl DownloadManager {
         pause: Arc<AtomicBool>,
         retry: Arc<RetrySlot>,
         per_download_limiter: Arc<RateLimiter>,
+        // Shared last-progress clock (§7.2, Round 56), passed
+        // through to `run_inner` so the supervisor loop can stamp
+        // it — the same Arc the `running` map entry and the
+        // watchdog task hold.
+        last_progress_ms: Arc<AtomicU64>,
     ) {
         let outcome = self
-            .run_inner(&id, &pause, &retry, &per_download_limiter)
+            .run_inner(
+                &id,
+                &pause,
+                &retry,
+                &per_download_limiter,
+                &last_progress_ms,
+            )
             .await;
         // The run is over for every outcome: paused, complete, error.
         // No segment is waiting any more, whatever the outcome was.
@@ -4142,12 +4253,105 @@ impl DownloadManager {
         }
     }
 
+    /// Independent run watchdog (§7.2, Round 56): a separate task
+    /// per run that watches the shared last-progress timestamp and
+    /// aborts the run after `run_watchdog_timeout` (default 180 s)
+    /// of no progress. It exists because the supervisor loop in
+    /// `run_inner` can itself wedge — the in-loop watchdog then
+    /// never fires either — while a task that only reads a
+    /// timestamp keeps running. It reads the CURRENT `running` map
+    /// entry on every check, so a stale watchdog from an earlier
+    /// run of the same download can never abort a newer run that
+    /// is making progress; and it returns as soon as the entry is
+    /// gone, so a finished run's watchdog exits on its own.
+    /// Suppressed while a segment waits out its retry backoff (a
+    /// waiting segment is not a wedged run), exactly like the
+    /// in-loop watchdog. The abort mirrors `cancel_download` —
+    /// pause flag, handle abort, retry cleared, error status,
+    /// snapshot — so a later Resume can restart the download.
+    /// Order matters: the map entry is removed FIRST (that is what
+    /// unblocks Resume/start), then the run is aborted, then the
+    /// row is marked error. If the store itself is wedged, the
+    /// status write blocks this task — but the entry removal and
+    /// the abort already happened, and `resume_download`'s
+    /// stale-row recovery then applies to the row.
+    /// No sound is played here: `emit_sound` reads the store, and
+    /// a watchdog that is aborting a wedged run must not block on
+    /// the store for a cosmetic event.
+    async fn run_watchdog(self: Arc<Self>, id: String) {
+        let timeout_secs = self.run_watchdog_timeout_secs();
+        let timeout = Duration::from_secs(timeout_secs);
+        // Check often enough to fire near the deadline without
+        // spinning: a sixth of the timeout, clamped to 1–10 s.
+        let check_every = ((timeout_secs / 6).max(1)).min(10);
+        loop {
+            tokio::time::sleep(Duration::from_secs(check_every)).await;
+            let entry = {
+                let running = self.running.lock().await;
+                match running.get(&id) {
+                    Some(r) => (
+                        r.last_progress_ms.load(Ordering::Relaxed),
+                        r.retry.info().is_some(),
+                    ),
+                    None => return, // run ended — nothing to watch
+                }
+            };
+            let (last_ms, retry_waiting) = entry;
+            if retry_waiting {
+                continue;
+            }
+            if now_millis().saturating_sub(last_ms) < timeout.as_millis() as u64 {
+                continue;
+            }
+            // Stalled. Read the row first (store) to decide whether
+            // an error status applies: a run whose row is already
+            // complete/paused/errored only has a leaked map entry,
+            // and touching its status would be wrong.
+            let row_status = self
+                .store
+                .get_download(&id)
+                .ok()
+                .flatten()
+                .map(|r| r.status);
+            let entry = self.running.lock().await.remove(&id);
+            let Some(r) = entry else { return };
+            if row_status.as_deref() == Some("downloading") {
+                r.pause.store(true, Ordering::SeqCst);
+                r.handle.abort();
+                r.retry.clear_wait();
+                let msg = format!(
+                    "No data arrived for {timeout_secs} seconds — the connection appears to have stalled"
+                );
+                if let Err(e) = self.store.set_status(&id, "error", Some(&msg)) {
+                    self.store.log(&format!(
+                        "run watchdog could not set error status for {id}: {e}"
+                    ));
+                }
+                self.emit_snapshot(&id, "error").await;
+                self.cookies.lock().unwrap().remove(&id);
+                self.store.log(&format!(
+                    "run watchdog aborted {id} after {timeout_secs}s without progress"
+                ));
+            } else {
+                // Stale entry for a finished/paused/errored run:
+                // drop it so it can never make the download look
+                // running, and abort its handle for good measure.
+                r.handle.abort();
+            }
+            return;
+        }
+    }
+
     async fn run_inner(
         self: &Arc<Self>,
         id: &str,
         pause: &Arc<AtomicBool>,
         retry: &Arc<RetrySlot>,
         per_download_limiter: &Arc<RateLimiter>,
+        // Shared last-progress clock (§7.2, Round 56): stamped
+        // whenever the downloaded total grows, read by the
+        // independent watchdog task.
+        last_progress_ms: &Arc<AtomicU64>,
     ) -> Result<()> {
         let row = self.store.get_download(id)?.ok_or_else(|| EngineError::NotFound(id.to_string()))?;
         let segments = self.store.get_segments(id)?;
@@ -4306,8 +4510,16 @@ impl DownloadManager {
                 _ = tokio::time::sleep(PROGRESS_INTERVAL) => {
                     let now = Instant::now();
                     let total = total_done(&states);
+                    // `last_byte_at` is the local clock for the
+                    // in-loop watchdog below; `last_progress_ms` is
+                    // the SHARED clock the independent watchdog
+                    // reads (§7.2, Round 56) — both are stamped
+                    // together whenever the total grows, so the two
+                    // watchdogs can never disagree about when
+                    // progress last happened.
                     if total > prev_total {
                         last_byte_at = now;
+                        last_progress_ms.store(now_millis(), Ordering::Relaxed);
                     }
                     let dt = now.duration_since(prev_instant).as_secs_f64();
                     if dt > 0.0 {
@@ -4508,11 +4720,27 @@ impl DownloadManager {
         } else {
             None
         };
-        let _ = self.store.checkpoint(id, total, speed_bps as i64, eta);
+        // Round 56 (§7.1d): a failed checkpoint used to be
+        // swallowed with `let _ =` — the download's progress was
+        // silently not persisted, and the live test could only see
+        // the frozen UI, never the cause. The error is now logged
+        // (throttled: a checkpoint runs every second, so a
+        // persistently failing store logs at most once per second
+        // — the checkpoint itself is the throttle) while the run
+        // continues: a checkpoint failure is diagnostic, not fatal.
+        if let Err(e) = self.store.checkpoint(id, total, speed_bps as i64, eta) {
+            self.store.log(&format!("checkpoint failed for {id}: {e}"));
+        }
         for s in states {
             let st = s.lock().unwrap();
             let status = if st.done >= segment_len_of(&st) { "done" } else { "active" };
-            let _ = self.store.update_segment(&st.row.id, st.done as i64, status);
+            if let Err(e) = self
+                .store
+                .update_segment(&st.row.id, st.done as i64, status)
+            {
+                self.store
+                    .log(&format!("checkpoint failed for segment {}: {e}", st.row.id));
+            }
         }
     }
 

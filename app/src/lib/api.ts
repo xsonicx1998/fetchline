@@ -32,6 +32,41 @@ import type {
   UpdateCheckResult,
 } from './types'
 
+/** Reject when an invoke does not settle in time (Round 56,
+ * §7.3): a hung backend must REJECT instead of pending forever,
+ * so the UI can declare "backend not responding" instead of
+ * piling up invokes. The original promise keeps running in the
+ * background — its result is ignored — which is the point: the
+ * UI moves on while the hung call stays hung. */
+export function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: number | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timer = window.setTimeout(() => reject(new Error(message)), ms)
+  })
+  return Promise.race([
+    promise.finally(() => {
+      if (timer !== undefined) window.clearTimeout(timer)
+    }),
+    timeout,
+  ])
+}
+
+/** Webview heartbeat (§7.4, Round 56): each window's JS pings
+ * this every 5 s with its label (`main`,
+ * `progress-<download id>`); Rust logs "heartbeat lost" when
+ * the pings stop for 30 s. */
+export async function webviewHeartbeat(label: string): Promise<void> {
+  return invoke('webview_heartbeat', { label })
+}
+
+/** Reload a window's webview (§7.4, Round 56): the recovery
+ * action the "Backend not responding" banner offers. The main
+ * window reloads in place; a progress window is closed and
+ * rebuilt from scratch. */
+export async function reloadWebviewWindow(label: string): Promise<void> {
+  return invoke('reload_webview_window', { label })
+}
+
 export async function listDownloads(): Promise<DownloadRow[]> {
   return invoke<DownloadRow[]>('list_downloads')
 }

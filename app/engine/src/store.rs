@@ -4,7 +4,7 @@
 //! `Mutex<Connection>` so the engine, the Tauri commands and the checkpoint
 //! timer can never interleave a transaction.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -365,6 +365,15 @@ pub struct QueueRow {
 
 pub struct Store {
     conn: Mutex<Connection>,
+    /// Optional diagnostics sink (set by the shell): a file path
+    /// that receives `[epoch-seconds] message` lines, in the same
+    /// format as the shell's `startup.log`. `None` (the default,
+    /// and every test that never sets it) means no logging.
+    /// The shell points it at `startup.log` next to the database,
+    /// so engine diagnostics land in the same file the live tests
+    /// already read. Best-effort: a failed write is swallowed,
+    /// never an error for the caller.
+    log_path: Mutex<Option<PathBuf>>,
 }
 
 impl Store {
@@ -404,7 +413,76 @@ impl Store {
         }
         conn.execute_batch(SCHEMA_SQL)?;
         Self::migrate(&conn)?;
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+            log_path: Mutex::new(None),
+        })
+    }
+
+    /// Point the diagnostics sink at `path` (the shell's
+    /// `startup.log` next to the database). Until this is called
+    /// `log()` is a no-op.
+    pub fn set_log_path(&self, path: PathBuf) {
+        if let Ok(mut slot) = self.log_path.lock() {
+            *slot = Some(path);
+        }
+    }
+
+    /// Append one `[epoch-seconds] message` line to the diagnostics
+    /// sink, when one is set. Best-effort and infallible by design:
+    /// logging must never fail a download, a probe or a checkpoint.
+    pub(crate) fn log(&self, msg: &str) {
+        let path = match self.log_path.lock() {
+            Ok(slot) => match slot.as_ref() {
+                Some(p) => p.clone(),
+                None => return,
+            },
+            Err(_) => return,
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            use std::io::Write;
+            let _ = f.write_all(format!("[{secs}] {msg}\n").as_bytes());
+        }
+    }
+
+    /// Lock the single connection, logging when the wait exceeds
+    /// 1 s. Every store method goes through here (not
+    /// `self.conn.lock()` directly), so a slow acquisition names
+    /// its call site — `#[track_caller]` makes `Location::caller`
+    /// the store method that waited, not this helper. A slow wait
+    /// means another thread is holding the lock across slow work;
+    /// the log line is what names the waiter on the next live
+    /// test. The log happens after acquiring (never while waiting),
+    /// and the file write is best-effort, so this cannot wedge
+    /// the lock it measures.
+    #[track_caller]
+    fn lock_conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        let start = std::time::Instant::now();
+        // The raw lock: this is the one place that may touch
+        // `self.conn` directly (the sed that rewrote the other
+        // call sites must never rewrite this line — it would
+        // recurse).
+        let guard = self.conn.lock().unwrap();
+        let waited = start.elapsed();
+        if waited > std::time::Duration::from_secs(1) {
+            self.log(&format!(
+                "store lock waited {}ms at {}",
+                waited.as_millis(),
+                std::panic::Location::caller()
+            ));
+        }
+        guard
     }
 
     /// Migrations for databases created before a schema change.
@@ -780,7 +858,10 @@ impl Store {
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA_SQL)?;
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+            log_path: Mutex::new(None),
+        })
     }
 
     pub fn new_id() -> String {
@@ -844,7 +925,7 @@ impl Store {
         }
         let id = Self::new_id();
         let referrer = referrer.map(str::trim).filter(|r| !r.is_empty());
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO pending_links (id, url, referrer, source, status, cookies) \
              VALUES (?1, ?2, ?3, ?4, 'pending', ?5)",
@@ -859,7 +940,7 @@ impl Store {
     /// Pending links, oldest first (the drain works in arrival
     /// order). `status` filters, or `None` for every row.
     pub fn list_pending_links(&self, status: Option<&str>) -> Result<Vec<PendingLinkRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, url, referrer, source, status, download_id, error, cookies, created_at \
              FROM pending_links WHERE (?1 IS NULL OR status = ?1) \
@@ -870,7 +951,7 @@ impl Store {
     }
 
     pub fn get_pending_link(&self, id: &str) -> Result<Option<PendingLinkRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, url, referrer, source, status, download_id, error, cookies, created_at \
              FROM pending_links WHERE id = ?1",
@@ -898,7 +979,7 @@ impl Store {
         if !matches!(status, "accepted" | "rejected") {
             return Err(EngineError::InvalidState(format!("Unknown pending-link status: {status}")));
         }
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let changed = conn.execute(
             "UPDATE pending_links SET status = ?1, download_id = ?2, error = ?3, cookies = NULL \
              WHERE id = ?4 AND status = 'pending'",
@@ -937,7 +1018,7 @@ impl Store {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(|s| serde_json::json!({"start_at": s}).to_string());
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO grabber_projects (id, name, start_url, filters_json, mode, schedule_json, status, \
              queue_id, on_complete_action, on_complete_program) \
@@ -960,7 +1041,7 @@ impl Store {
     }
 
     pub fn get_grabber_project(&self, id: &str) -> Result<Option<GrabberProjectRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, name, start_url, filters_json, mode, schedule_json, status, \
              pages_explored, files_matched, files_downloaded, files_failed, \
@@ -977,7 +1058,7 @@ impl Store {
 
     /// All grabber projects, newest first.
     pub fn list_grabber_projects(&self) -> Result<Vec<GrabberProjectRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, name, start_url, filters_json, mode, schedule_json, status, \
              pages_explored, files_matched, files_downloaded, files_failed, \
@@ -1005,7 +1086,7 @@ impl Store {
         matched_files: &[MatchedFile],
     ) -> Result<()> {
         let matched_json = serde_json::to_string(matched_files)?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let changed = conn.execute(
             "UPDATE grabber_projects SET status = ?1, error_message = ?2, \
              pages_explored = ?3, files_matched = ?4, files_downloaded = ?5, \
@@ -1033,7 +1114,7 @@ impl Store {
     /// `add_download` creates the row — the add path itself is
     /// untouched, so S07/S13/S08 behaviour does not change.
     pub fn set_download_grabber_project(&self, download_id: &str, project_id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE downloads SET grabber_project_id = ?1 WHERE id = ?2",
             params![project_id, download_id],
@@ -1044,7 +1125,7 @@ impl Store {
     // -- categories -------------------------------------------------------
 
     pub fn list_categories(&self) -> Result<Vec<CategoryRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, name, default_folder, file_extensions, is_builtin \
              FROM categories ORDER BY name",
@@ -1117,7 +1198,7 @@ impl Store {
         }
         let id = Self::new_id();
         let ext_json = serde_json::to_string(&clean)?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         match conn.execute(
             "INSERT INTO categories (id, name, default_folder, file_extensions, is_builtin) \
              VALUES (?1, ?2, ?3, ?4, 0)",
@@ -1146,7 +1227,7 @@ impl Store {
     /// `ON DELETE RESTRICT` would block it anyway, but the user gets a
     /// clear message instead of a database error.
     pub fn delete_category(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let (is_builtin, name): (i64, String) = conn
             .query_row(
                 "SELECT is_builtin, name FROM categories WHERE id = ?1",
@@ -1185,7 +1266,7 @@ impl Store {
 
     /// Move one download into another category.
     pub fn move_to_category(&self, download_id: &str, category_id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let exists: i64 = conn.query_row(
             "SELECT COUNT(*) FROM categories WHERE id = ?1",
             params![category_id],
@@ -1245,7 +1326,7 @@ impl Store {
             row.file_extensions = clean;
         }
         let ext_json = serde_json::to_string(&row.file_extensions)?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE categories SET default_folder = ?1, file_extensions = ?2, \
              updated_at = datetime('now') WHERE id = ?3",
@@ -1259,7 +1340,7 @@ impl Store {
     /// The singleton settings row (id = 1), with the schema defaults
     /// when the row is missing a value.
     pub fn get_settings(&self) -> Result<Settings> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let row = conn.query_row(
             "SELECT default_download_folder, max_connections, speed_limit_kbps, \
              language, theme, browser_integration, browser_start_drained, antivirus_command, \
@@ -1438,7 +1519,7 @@ impl Store {
         // and the UI always read the same clean values back.
         let file_types = serde_json::to_string(&clean_extensions(&s.file_types_auto))?;
         let excluded = serde_json::to_string(&clean_excluded_sites(&s.excluded_sites))?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE settings SET default_download_folder = ?1, max_connections = ?2, \
              speed_limit_kbps = ?3, language = ?4, theme = ?5, browser_integration = ?6, \
@@ -1498,7 +1579,7 @@ impl Store {
     /// itself must never fail because this write failed, so
     /// callers ignore its error.
     pub fn record_update_check(&self, at_iso: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE settings SET last_update_check_at = ?1, updated_at = datetime('now') WHERE id = 1",
             params![at_iso],
@@ -1513,7 +1594,7 @@ impl Store {
     /// in-memory database) reads as "no window open, nothing used"
     /// — never an error.
     pub fn get_quota_state(&self) -> Result<(Option<i64>, i64)> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let row = conn.query_row(
             "SELECT window_start_unix, bytes_used FROM quota_state WHERE id = 1",
             [],
@@ -1530,7 +1611,7 @@ impl Store {
     /// reset). `window_start_unix = None` means "no window open" —
     /// the next counted byte anchors a fresh one.
     pub fn set_quota_state(&self, window_start_unix: Option<i64>, bytes_used: i64) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO quota_state (id, window_start_unix, bytes_used) VALUES (1, ?1, ?2) \
              ON CONFLICT(id) DO UPDATE SET window_start_unix = excluded.window_start_unix, \
@@ -1559,7 +1640,7 @@ impl Store {
 
     /// How many downloads are paused waiting for the quota window.
     pub fn count_quota_paused(&self) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let n: i64 = conn.query_row(
             "SELECT COUNT(*) FROM downloads WHERE quota_paused = 1 AND status = 'paused'",
             [],
@@ -1570,7 +1651,7 @@ impl Store {
 
     /// Ids of the downloads paused by the quota (still `paused`).
     pub fn list_quota_paused_ids(&self) -> Result<Vec<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id FROM downloads WHERE quota_paused = 1 AND status = 'paused' \
              ORDER BY created_at ASC",
@@ -1584,7 +1665,7 @@ impl Store {
     /// so a rollover can never auto-resume a download the user
     /// paused by hand.
     pub fn set_quota_paused(&self, id: &str, paused: bool) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE downloads SET quota_paused = ?1 WHERE id = ?2",
             params![if paused { 1 } else { 0 }, id],
@@ -1614,7 +1695,7 @@ impl Store {
                 Some(k)
             }
         };
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let changed = conn.execute(
             "UPDATE downloads SET speed_limit_kbps = ?1 WHERE id = ?2",
             params![kbps, id],
@@ -1630,7 +1711,7 @@ impl Store {
     /// All saved site logins, by host. The password is never
     /// included — only whether one is stored.
     pub fn list_site_logins(&self) -> Result<Vec<SiteLoginRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, host, username, auth_type, \
              (password_enc IS NOT NULL AND password_enc != '') \
@@ -1656,7 +1737,7 @@ impl Store {
     /// login for `example.com` is not sent to `sub.example.com`.
     pub fn get_site_login_credentials(&self, host: &str) -> Result<Option<(String, String)>> {
         let host = clean_site_host(host).unwrap_or_else(|| host.trim().to_ascii_lowercase());
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let row = conn.query_row(
             "SELECT username, password_enc FROM site_logins WHERE host = ?1",
             params![host],
@@ -1689,7 +1770,7 @@ impl Store {
                 // Keep the stored value, if any.
                 match by_host {
                     Some(row) => {
-                        let conn = self.conn.lock().unwrap();
+                        let conn = self.lock_conn();
                         conn.query_row(
                             "SELECT password_enc FROM site_logins WHERE id = ?1",
                             params![row.id],
@@ -1712,7 +1793,7 @@ impl Store {
             .or_else(|| by_host.map(|r| r.id.clone()))
             .unwrap_or_else(Self::new_id);
         let username = input.username.trim().to_string();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO site_logins (id, host, username, password_enc, auth_type, updated_at) \
              VALUES (?1, ?2, ?3, ?4, 'basic', datetime('now')) \
@@ -1730,7 +1811,7 @@ impl Store {
 
     /// Delete a saved site login. Unknown ids are a not-found error.
     pub fn delete_site_login(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let changed = conn.execute("DELETE FROM site_logins WHERE id = ?1", params![id])?;
         if changed == 0 {
             return Err(EngineError::NotFound(id.to_string()));
@@ -1742,7 +1823,7 @@ impl Store {
 
     /// All three events' sound settings, in UI order.
     pub fn get_sound_settings(&self) -> Result<Vec<SoundSetting>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT event, enabled, file_path FROM sound_settings",
         )?;
@@ -1778,7 +1859,7 @@ impl Store {
     /// a `.wav` file; an empty file clears it.
     pub fn save_sound_setting(&self, input: &SoundSettingInput) -> Result<SoundSetting> {
         let file = validate_sound_setting(input)?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO sound_settings (event, enabled, file_path, updated_at) \
              VALUES (?1, ?2, ?3, datetime('now')) \
@@ -1798,7 +1879,7 @@ impl Store {
     /// The single proxy row, if one was ever saved. The password is
     /// never included — only whether one is stored.
     pub fn get_proxy_config(&self) -> Result<Option<ProxyConfigRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, name, type, host, port, username, use_for, bypass, enabled, \
              (password_enc IS NOT NULL AND password_enc != ''), auth \
@@ -1833,7 +1914,7 @@ impl Store {
     /// This is the only place the stored password is decrypted, and
     /// the result never crosses the Tauri bridge.
     pub fn get_active_proxy(&self) -> Result<Option<ProxyConfig>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let row = conn.query_row(
             "SELECT type, host, port, username, password_enc, use_for, bypass, auth \
              FROM proxy_configs WHERE enabled = 1 ORDER BY updated_at DESC LIMIT 1",
@@ -1886,7 +1967,7 @@ impl Store {
                 // Keep the stored value, if any.
                 match &existing {
                     Some(_) => {
-                        let conn = self.conn.lock().unwrap();
+                        let conn = self.lock_conn();
                         conn.query_row(
                             "SELECT password_enc FROM proxy_configs ORDER BY updated_at DESC LIMIT 1",
                             [],
@@ -1910,7 +1991,7 @@ impl Store {
                 .unwrap_or_else(|| crate::proxy::PROXY_AUTH_NEGOTIATE_AUTO.to_string()),
         };
         let id = existing.map(|r| r.id).unwrap_or_else(Self::new_id);
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO proxy_configs (id, name, type, host, port, username, password_enc, \
              use_for, enabled, bypass, auth, updated_at) \
@@ -1941,7 +2022,7 @@ impl Store {
     // -- queues -----------------------------------------------------------
 
     pub fn list_queues(&self) -> Result<Vec<QueueRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT q.id, q.name, q.type, q.is_main, q.schedule_type, q.start_at, q.stop_at, \
              q.start_on_startup, q.on_complete_action, q.on_complete_program, \
@@ -1988,7 +2069,7 @@ impl Store {
             return Err(EngineError::InvalidState("Give the queue a name".to_string()));
         }
         let id = Self::new_id();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         match conn.execute(
             "INSERT INTO queues (id, name, type, is_main, schedule_type) \
              VALUES (?1, ?2, 'download', 0, 'one_time')",
@@ -2138,7 +2219,7 @@ impl Store {
         // site grabber stores the same actions on its projects, so
         // the messages must stay identical in both places.
         crate::queue::validate_completion_action(on_complete_action, on_complete_program)?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let changed = conn.execute(
             "UPDATE queues SET schedule_type = ?1, start_at = ?2, stop_at = ?3, \
              start_on_startup = ?4, on_complete_action = ?5, on_complete_program = ?6, \
@@ -2173,7 +2254,7 @@ impl Store {
     /// finished download is exactly what belongs in it.
     pub fn add_to_queue(&self, download_id: &str, queue_id: &str) -> Result<()> {
         let status: Option<String> = {
-            let conn = self.conn.lock().unwrap();
+            let conn = self.lock_conn();
             conn.query_row(
                 "SELECT status FROM downloads WHERE id = ?1",
                 params![download_id],
@@ -2183,7 +2264,7 @@ impl Store {
             .map_err(EngineError::from)?
         };
         let queue_type: Option<String> = {
-            let conn = self.conn.lock().unwrap();
+            let conn = self.lock_conn();
             conn.query_row(
                 "SELECT schedule_type FROM queues WHERE id = ?1",
                 params![queue_id],
@@ -2201,7 +2282,7 @@ impl Store {
             }
             _ => {}
         }
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let queue_exists: i64 = conn.query_row(
             "SELECT COUNT(*) FROM queues WHERE id = ?1",
             params![queue_id],
@@ -2228,7 +2309,7 @@ impl Store {
 
     /// Take a download out of its queue (it stays in the main list).
     pub fn remove_from_queue(&self, download_id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let changed = conn.execute(
             "UPDATE downloads SET queue_id = NULL, queue_position = 0, updated_at = datetime('now') \
              WHERE id = ?1",
@@ -2242,7 +2323,7 @@ impl Store {
 
     /// Files of one queue, in queue order.
     pub fn list_queue_files(&self, queue_id: &str) -> Result<Vec<DownloadRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, url, final_url, filename, save_path, category_id, queue_id, \
              queue_position, size_bytes, downloaded_bytes, status, speed_bps, eta_seconds, \
@@ -2267,7 +2348,7 @@ impl Store {
         let row = files.remove(pos);
         let index = new_index.min(files.len());
         files.insert(index, row);
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         for (i, d) in files.iter().enumerate() {
             conn.execute(
                 "UPDATE downloads SET queue_position = ?1 WHERE id = ?2",
@@ -2293,7 +2374,7 @@ impl Store {
         accept_ranges: Option<bool>,
     ) -> Result<String> {
         let id = Self::new_id();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO downloads \
              (id, url, final_url, filename, save_path, category_id, size_bytes, etag, last_modified, accept_ranges, status) \
@@ -2308,7 +2389,7 @@ impl Store {
     /// the same file: the second download would race the first and
     /// overwrite it on completion.
     pub fn is_save_path_used(&self, save_path: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let n: i64 = conn.query_row(
             "SELECT COUNT(*) FROM downloads WHERE save_path = ?1 AND status != 'deleted'",
             params![save_path],
@@ -2321,7 +2402,7 @@ impl Store {
     /// (either as the URL as added, or the final URL after redirects).
     /// Download All flags such links and skips them by default.
     pub fn url_exists(&self, url: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let n: i64 = conn.query_row(
             "SELECT COUNT(*) FROM downloads \
              WHERE (url = ?1 OR final_url = ?1) AND status != 'deleted'",
@@ -2332,7 +2413,7 @@ impl Store {
     }
 
     pub fn get_download(&self, id: &str) -> Result<Option<DownloadRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, url, final_url, filename, save_path, category_id, queue_id, \
              queue_position, size_bytes, downloaded_bytes, status, speed_bps, eta_seconds, \
@@ -2348,7 +2429,7 @@ impl Store {
     }
 
     pub fn list_downloads(&self) -> Result<Vec<DownloadRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, url, final_url, filename, save_path, category_id, queue_id, \
              queue_position, size_bytes, downloaded_bytes, status, speed_bps, eta_seconds, \
@@ -2361,7 +2442,7 @@ impl Store {
     }
 
     pub fn set_status(&self, id: &str, status: &str, error: Option<&str>) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE downloads SET status = ?1, error_message = ?2, updated_at = datetime('now') \
              WHERE id = ?3",
@@ -2379,7 +2460,7 @@ impl Store {
     /// can resume. Called once at startup (the Tauri shell's
     /// `build_manager`); returns the number of rows reset.
     pub fn reconcile_stuck_downloads(&self) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let n = conn.execute(
             "UPDATE downloads SET status = 'paused', \
              error_message = 'Interrupted — resume to continue', \
@@ -2390,7 +2471,7 @@ impl Store {
     }
 
     pub fn mark_complete(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE downloads SET status = 'complete', completed_at = datetime('now'), \
              updated_at = datetime('now') WHERE id = ?1",
@@ -2429,7 +2510,7 @@ impl Store {
     /// completion time is the row's own `completed_at` when it has
     /// one, otherwise now.
     pub fn record_history(&self, row: &DownloadRow) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         Self::record_history_locked(&conn, row)
     }
 
@@ -2462,7 +2543,7 @@ impl Store {
     /// the query — `%` and `_` in the query are escaped so they
     /// match literally, never as LIKE wildcards.
     pub fn list_history(&self, query: &str) -> Result<Vec<HistoryRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let escaped = query.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
         let pattern = format!("%{escaped}%");
         let mut stmt = conn.prepare(
@@ -2477,7 +2558,7 @@ impl Store {
 
     /// One history row by its history id, or `None`.
     pub fn get_history_entry(&self, id: &str) -> Result<Option<HistoryRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, download_id, filename, url, final_url, size_bytes, folder, category_id, completed_at \
              FROM download_history WHERE id = ?1",
@@ -2492,7 +2573,7 @@ impl Store {
     /// Empty the whole history. The main downloads table is
     /// untouched — clearing history never deletes a download.
     pub fn clear_history(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute("DELETE FROM download_history", [])?;
         Ok(())
     }
@@ -2503,7 +2584,7 @@ impl Store {
     /// itself is untouched (still `complete`) — the scan is a
     /// report about the finished file, never a second status.
     pub fn set_scan_result(&self, id: &str, result: &crate::antivirus::ScanResult) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE downloads SET scan_status = ?1, scan_detail = ?2, scan_scanned_at = ?3, \
              updated_at = datetime('now') WHERE id = ?4",
@@ -2529,7 +2610,7 @@ impl Store {
     /// the file itself is moved by the caller, this only updates
     /// the row so the table keeps pointing at the real file).
     pub fn update_save_path(&self, id: &str, save_path: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE downloads SET save_path = ?1, updated_at = datetime('now') WHERE id = ?2",
             params![save_path, id],
@@ -2539,7 +2620,7 @@ impl Store {
 
     /// Persist the current byte counts (called every ~2 s and on pause).
     pub fn checkpoint(&self, id: &str, downloaded: i64, speed_bps: i64, eta: Option<i64>) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE downloads SET downloaded_bytes = ?1, speed_bps = ?2, eta_seconds = ?3, \
              updated_at = datetime('now') WHERE id = ?4",
@@ -2551,7 +2632,7 @@ impl Store {
     // -- segments ---------------------------------------------------------
 
     pub fn create_segments(&self, download_id: &str, ranges: &[(i64, Option<i64>)]) -> Result<Vec<SegmentRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut out = Vec::with_capacity(ranges.len());
         for (index, (start, end)) in ranges.iter().enumerate() {
             let id = Self::new_id();
@@ -2574,7 +2655,7 @@ impl Store {
     }
 
     pub fn get_segments(&self, download_id: &str) -> Result<Vec<SegmentRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, download_id, segment_index, start_byte, end_byte, downloaded_bytes, status \
              FROM segments WHERE download_id = ?1 ORDER BY segment_index",
@@ -2595,7 +2676,7 @@ impl Store {
 
     /// Update one segment's progress (and, when it finishes, its status).
     pub fn update_segment(&self, id: &str, downloaded: i64, status: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE segments SET downloaded_bytes = ?1, status = ?2, updated_at = datetime('now') \
              WHERE id = ?3",
@@ -2614,7 +2695,7 @@ impl Store {
         segment: &SegmentRow,
         mid: i64,
     ) -> Result<SegmentRow> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE segments SET end_byte = ?1 WHERE id = ?2",
             params![mid - 1, segment.id],
@@ -2646,14 +2727,14 @@ impl Store {
     /// Delete all segments of a download (used when a resume finds the
     /// remote file changed and the download must restart from zero).
     pub fn delete_segments(&self, download_id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute("DELETE FROM segments WHERE download_id = ?1", params![download_id])?;
         Ok(())
     }
 
     /// Reset a download to zero bytes (file changed on the server).
     pub fn reset_download(&self, id: &str, size: Option<i64>, etag: Option<&str>, last_modified: Option<&str>) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE downloads SET downloaded_bytes = 0, speed_bps = 0, eta_seconds = NULL, \
              error_message = NULL, size_bytes = ?1, etag = ?2, last_modified = ?3, \
@@ -2676,7 +2757,7 @@ impl Store {
         etag: Option<&str>,
         last_modified: Option<&str>,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE downloads SET size_bytes = COALESCE(?1, size_bytes), \
              etag = COALESCE(?2, etag), last_modified = COALESCE(?3, last_modified), \
@@ -2704,7 +2785,7 @@ impl Store {
         last_modified: Option<&str>,
         accept_ranges: bool,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let changed = conn.execute(
             "UPDATE downloads SET url = ?1, final_url = ?2, size_bytes = ?3, \
              etag = ?4, last_modified = ?5, accept_ranges = ?6, error_message = NULL, \
@@ -2731,7 +2812,7 @@ impl Store {
         failed: i64,
         skipped: i64,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let changed_rows = conn.execute(
             "UPDATE queues SET last_sync_at = ?1, last_sync_changed = ?2, \
              last_sync_unchanged = ?3, last_sync_removed = ?4, \

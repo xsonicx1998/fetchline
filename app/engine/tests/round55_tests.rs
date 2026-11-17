@@ -29,18 +29,18 @@ async fn set_max_retries(mgr: &DownloadManager, n: i64) {
     mgr.update_settings(&s).unwrap();
 }
 
-/// Round 55: the production client carries a 60 s total timeout —
-/// a stalled server must fail the probe instead of blocking the
-/// Add dialog for minutes (defect 3b).
+/// Round 55: the production client carries a total timeout — a
+/// stalled server must fail the probe instead of blocking the Add
+/// dialog for minutes (defect 3b). Round 56 (§7.5): 60 s → 30 s.
 #[test]
-fn total_timeout_is_60s_by_default() {
-    assert_eq!(CLIENT_TOTAL_TIMEOUT, Duration::from_secs(60));
+fn total_timeout_is_30s_by_default() {
+    assert_eq!(CLIENT_TOTAL_TIMEOUT, Duration::from_secs(30));
 }
 
 /// Round 55: a client built with a total timeout fails a server
 /// that accepts the connection and then never answers — the
 /// request errors as a timeout within seconds, instead of hanging
-/// forever. (The production 60 s value is pinned by the const
+/// forever. (The production 30 s value is pinned by the const
 /// test above; the 1 s value here keeps this test fast.)
 #[tokio::test]
 async fn total_timeout_fails_a_stalling_server() {

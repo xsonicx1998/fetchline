@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ChevronDown, ChevronUp, FileWarning, FolderOpen, Pause, Play, RotateCw, ShieldCheck, ShieldX, X } from 'lucide-react'
 import { completeActionLabel, formatBytes, formatEta, formatSpeed, progressPercent, statusLabel } from '../lib/format'
 import {
@@ -12,12 +12,14 @@ import {
   openFolder,
   pauseDownload,
   quarantineDownload,
+  reloadWebviewWindow,
   resumeDownload,
   retryNow,
   runAntivirusScan,
   setDownloadSpeedLimit,
   setProgressWindowCompact,
   updateQueue,
+  withTimeout,
 } from '../lib/api'
 import { recordSpeedSample, speedGraphPoints, speedGraphPolyline } from '../lib/speedGraph'
 import type { SpeedSample } from '../lib/speedGraph'
@@ -117,6 +119,16 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
    *  window should say so instead of showing the wrong empty
    *  state. Cleared by the next successful poll. */
   const [pollError, setPollError] = useState<string | null>(null)
+  /** Round 56 (§7.3): backend-not-responding guard, same as the
+   *  main window's — in-flight skip, 5 s poll timeout, and a
+   *  backend-dead state after ~10 s with no poll response, with
+   *  Retry / Reload. The refs mirror the state so the interval
+   *  callback never reads a stale closure. */
+  const [backendDead, setBackendDead] = useState(false)
+  const backendDeadRef = useRef(false)
+  const pollInFlight = useRef(false)
+  const pollStoppedRef = useRef(false)
+  const lastPollOkAt = useRef(Date.now())
   const [live, setLive] = useState<ProgressEvent | null>(null)
   const [samples, setSamples] = useState<SpeedSample[]>([])
   const [compact, setCompact] = useState(false)
@@ -203,15 +215,25 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
   useEffect(() => {
     let stopped = false
     async function poll() {
+      // In-flight guard (§7.3): skip the tick while a poll is
+      // still running — a hung invoke must not pile up a new one
+      // every 500 ms.
+      if (pollInFlight.current) return
+      pollInFlight.current = true
       try {
-        const rows = await listDownloads()
+        const rows = await withTimeout(listDownloads(), 5000, 'Backend did not respond within 5 seconds')
         if (stopped) return
         const row = rows.find((d) => d.id === downloadId) ?? null
         setDownload(row)
         setLoaded(true)
         setPollError(null)
+        lastPollOkAt.current = Date.now()
+        if (backendDeadRef.current) {
+          backendDeadRef.current = false
+          setBackendDead(false)
+        }
         if (row) {
-          const snap = await getProgressSnapshot(downloadId)
+          const snap = await withTimeout(getProgressSnapshot(downloadId), 5000, 'Backend did not respond within 5 seconds')
           if (stopped) return
           if (snap && snap.id === downloadId) setLive(snap)
         }
@@ -222,15 +244,58 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
         // so instead of claiming the download was removed.
         setPollError(e instanceof Error ? e.message : String(e))
         setLoaded(true)
+      } finally {
+        pollInFlight.current = false
       }
     }
     void poll()
-    const timer = window.setInterval(() => void poll(), 500)
+    const timer = window.setInterval(() => {
+      if (pollStoppedRef.current) return
+      void poll()
+      // Backend-dead detection (§7.3): no successful poll for
+      // ~10 s — stop issuing invokes and show the banner. A poll
+      // still in flight is not a dead backend (its 5 s timeout
+      // has not fired yet), so the check waits for it. The
+      // interval itself keeps ticking (its ticks no-op) so Retry
+      // needs no timer recreation.
+      if (
+        !pollInFlight.current &&
+        Date.now() - lastPollOkAt.current > 10_000 &&
+        !backendDeadRef.current
+      ) {
+        backendDeadRef.current = true
+        pollStoppedRef.current = true
+        setBackendDead(true)
+      }
+    }, 500)
     return () => {
       stopped = true
       window.clearInterval(timer)
     }
   }, [downloadId])
+
+  /** Resume polling after the backend-dead banner (§7.3): clear
+   *  the stop flag and reset the staleness clock. The interval
+   *  is still alive (its ticks no-op while stopped), so the next
+   *  tick — at most 500 ms away — polls on its own. If the
+   *  backend is still dead the banner comes back after ~10 s. */
+  function retryPolling() {
+    pollStoppedRef.current = false
+    backendDeadRef.current = false
+    setBackendDead(false)
+    lastPollOkAt.current = Date.now()
+  }
+
+  /** Reload this window (§7.4): closes the progress window and
+   *  rebuilds it from scratch, which also replaces a dead
+   *  renderer process with a fresh one. A failure surfaces as
+   *  the window's action error instead of pretending the window
+   *  recovered. */
+  function reloadWindow() {
+    void reloadWebviewWindow(`progress-${downloadId}`).catch((e: unknown) =>
+      setActionError(e instanceof Error ? e.message : String(e)),
+    )
+  }
 
   // Fresh samples when the window shows another download (it
   // never does in practice — one window, one download — but the
@@ -451,7 +516,17 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
             ? `The window could not reach the app: ${pollError} The download itself is not affected.`
             : 'This download is no longer in the list — it was removed from the main window.'}
         </p>
-        <div className="mt-6 flex justify-end">
+        <div className="mt-6 flex justify-end gap-2">
+          {backendDead ? (
+            <>
+              <Button variant="secondary" onClick={retryPolling}>
+                Retry connection
+              </Button>
+              <Button variant="secondary" onClick={reloadWindow}>
+                Reload window
+              </Button>
+            </>
+          ) : null}
           <Button variant="primary" onClick={() => window.close()}>
             Close
           </Button>
@@ -491,6 +566,19 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
 
   return (
     <div className="flex h-full flex-col p-6 text-text">
+      {backendDead ? (
+        <div role="alert" className="mb-4 flex shrink-0 items-center justify-between gap-2 rounded-md border border-border bg-danger-soft px-3 py-2 text-sm text-danger">
+          <span>Backend not responding — restart the app. Your downloads are safe on disk.</span>
+          <span className="flex shrink-0 items-center gap-2">
+            <Button variant="secondary" size="sm" onClick={retryPolling}>
+              Retry connection
+            </Button>
+            <Button variant="secondary" size="sm" onClick={reloadWindow}>
+              Reload window
+            </Button>
+          </span>
+        </div>
+      ) : null}
       <div className="mb-4 flex items-start justify-between gap-4">
         <div className="min-w-0">
           <h1 className="truncate text-lg font-semibold" title={download.filename}>
