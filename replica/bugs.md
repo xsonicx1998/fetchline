@@ -4951,6 +4951,50 @@ rate-limited for the shared egress IP) — the log was NOT read.
     user decision — the watchdogs log + abort only). No pushes,
     no GitHub/CI, no workflow files touched.
 
+## Round 58 — Fix round for the r57 live defects (invoke wedge persists, progress window still blank, Start dead / 1 GB add 60 s timeout, "Backend did not respond" banner) — 2026-11-17
+
+Investigation (`~/workspace/round58-investigation.md`, read-only): the diagnosis moves
+from a tokio-runtime wedge to a **main-thread wedge in WebView2 window creation**.
+`WebviewWindowBuilder::build()` blocks the calling worker in `rx.recv()` until the
+main thread finishes; on the main thread wry's `InnerWebView::new` creates the
+container HWND, then calls `create_environment` and `create_controller`, each ending
+in `webview2_com::wait_with_pump(rx)` with **no timeout**. Tauri shares the WebView2
+environment only for new-window requests, so every progress window pays a full
+environment creation. If the browser process never starts a controller, the main
+thread never returns: no invoke is dispatched or answered, the window cannot close,
+and the worker is lost. One mechanism fits all six retest observations (banner =
+IPC outage not backend outage; Start dead vs Save works = timing of an
+intermittent wedge; 1 GB = invoke never reached the probe, which is bounded 30 s
+and size-independent; blank window = empty container HWND, title updates via
+native calls without a renderer; unclosable window = event loop stuck).
+**Correction to the Round 57 report:** "renderer death PROVEN in the log" was
+overstated (heartbeat ping is an invoke — it also stops on a runtime wedge).
+**Correction to this round's own investigation (§5.3/§9.4):** the probe-on-typing
+invoke (`probeBusy` / `getDownloadInfo`) does NOT exist in this codebase — grep
+finds zero occurrences. The Add dialog has no probe-on-typing effect; both buttons
+share the `busy` flag and the same `add_download` invoke (differing only by
+`queue: startNow ? null : 'queue-main'`), so the Start-vs-Save asymmetry has no
+dialog-level explanation — it is the intermittent wedge's timing. The §8 log
+checks (`add_download` entry/exit) decide the 1 GB story instead.
+Fix (§9.1–§9.5, `lib.rs` + `AddDownloadDialog.tsx`): progress windows reuse the
+main window's WebView2 environment via `WebviewWindowBuilder::with_environment`
+(verified public API, tauri 2.12.5; env from main window `with_webview` →
+`PlatformWebview::environment()`, 5 s bounded `recv_timeout`, fallback logged);
+auto-reload guarded — no rebuild of a never-created window (`created_ok` flag),
+cap 2 attempts per outage then `auto-reload abandoned`, rebuild on a detached
+`std::thread` so a hung rebuild cannot silence the monitor; `window.url()`
+getter deleted from `build_progress_window` (builder's URL logged instead, plus
+`build()` elapsed time with a >5 s slow-creation warning); main-thread watchdog
+(`std::thread`, `is_visible()` round-trip, logs `main thread stalled for 10s`
+once per outage + resume); stale comment fixed (dialog 60 s is deliberately
+longer than the engine's 30 s probe bound, not "matching" it). Deliberately NOT
+in this round: engine-stall fix (engine never stalled), auto-restart (pending
+user decision), probe change, worker increase. `npm run build` passes; `cargo
+fmt` clean in the edited regions. Tauri shell never compiles on this VM — the
+VPS build is the first compile. Decisive log check (§8.1): `progress window
+progress-<id> created: <url>` present = creation completed (renderer branch),
+absent = main-thread wedge confirmed.
+
 ## Known limitations, not bugs (round-24 additions)
 
 - The Tauri shell never compiles or runs on this VM, so a

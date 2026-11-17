@@ -52,7 +52,26 @@ pub struct WebviewHeartbeat {
     /// wedged runtime cannot turn a recovery into a reload loop.
     /// 0 = never auto-reloaded.
     pub last_auto_reload_ms: u64,
+    /// Whether the window's creation completed (§9.2, Round 58):
+    /// set true only after `build()` returns in
+    /// `build_progress_window`. A window whose creation never
+    /// finished (main thread wedged in `wait_with_pump`) must
+    /// never be auto-reloaded — rebuilding it would re-enter the
+    /// same hang. Reset to false before every build; the main
+    /// window's entry is set true in `setup` (it already exists
+    /// by then).
+    pub created_ok: bool,
+    /// Auto-reload attempts for the current outage (§9.2, Round
+    /// 58): capped at `AUTO_RELOAD_MAX_ATTEMPTS`, then the window
+    /// is abandoned. Reset to 0 when the window's pings resume
+    /// (the outage ends).
+    pub auto_reload_attempts: u32,
 }
+
+/// Maximum auto-reload attempts per window per outage (§9.2,
+/// Round 58): a rebuild loop against a wedged main thread only
+/// makes things worse.
+const AUTO_RELOAD_MAX_ATTEMPTS: u32 = 2;
 
 impl WebviewHeartbeat {
     fn new(now_ms: u64) -> Self {
@@ -61,6 +80,8 @@ impl WebviewHeartbeat {
             lost_logged: false,
             started_logged: false,
             last_auto_reload_ms: 0,
+            created_ok: false,
+            auto_reload_attempts: 0,
         }
     }
 }
@@ -366,14 +387,19 @@ fn reload_webview_now(
 }
 
 /// Maybe auto-reload a window whose renderer is dead (§9.1b,
-/// Round 57): the heartbeat monitor and the `ProcessFailed`
-/// handler call this, never the banner. At most one auto-reload
-/// per 5 min per window (`AUTO_RELOAD_COOLDOWN_MS`), so a wedged
-/// runtime cannot cause a reload loop. Returns `Ok(true)` when a
-/// reload actually ran. Every decision is logged — a skipped
-/// reload is as diagnostic as a run one. Never restarts the
-/// process (auto-restart is a pending user decision, not
-/// implemented here).
+/// Round 57; guarded §9.2, Round 58): the heartbeat monitor and
+/// the `ProcessFailed` handler call this, never the banner. At most
+/// one auto-reload per 5 min per window (`AUTO_RELOAD_COOLDOWN_MS`)
+/// and at most `AUTO_RELOAD_MAX_ATTEMPTS` per outage, so a wedged
+/// runtime cannot cause a reload loop. A window whose creation
+/// never completed is never rebuilt — rebuilding it would re-enter
+/// the same main-thread hang that killed the first creation. The
+/// rebuild itself runs on a detached `std::thread`, not the
+/// monitor thread: a hung rebuild must not silence heartbeat
+/// monitoring. Returns `Ok(true)` when a rebuild was dispatched.
+/// Every decision is logged — a skipped reload is as diagnostic
+/// as a run one. Never restarts the process (auto-restart is a
+/// pending user decision, not implemented here).
 fn maybe_auto_reload(
     app: &AppHandle,
     manager: &Arc<DownloadManager>,
@@ -390,6 +416,26 @@ fn maybe_auto_reload(
         let hb = map
             .entry(label.to_string())
             .or_insert_with(|| WebviewHeartbeat::new(now));
+        // Round 58 (§9.2): a window whose creation never
+        // completed must not be rebuilt — the rebuild would block
+        // in the same unbounded `wait_with_pump` that wedged the
+        // first creation.
+        if !hb.created_ok {
+            log_startup(
+                log,
+                &format!("webview {label} auto-reload skipped (window creation never completed)"),
+            );
+            return Ok(false);
+        }
+        if hb.auto_reload_attempts >= AUTO_RELOAD_MAX_ATTEMPTS {
+            log_startup(
+                log,
+                &format!(
+                    "webview {label} auto-reload abandoned ({AUTO_RELOAD_MAX_ATTEMPTS} attempts)"
+                ),
+            );
+            return Ok(false);
+        }
         if now.saturating_sub(hb.last_auto_reload_ms) < AUTO_RELOAD_COOLDOWN_MS {
             log_startup(
                 log,
@@ -398,6 +444,7 @@ fn maybe_auto_reload(
             return Ok(false);
         }
         hb.last_auto_reload_ms = now;
+        hb.auto_reload_attempts += 1;
         // The lock is released before the reload runs: the reload
         // itself registers a new heartbeat entry (progress windows).
     }
@@ -405,16 +452,38 @@ fn maybe_auto_reload(
         log,
         &format!("webview {label} auto-reloading (renderer dead)"),
     );
-    match reload_webview_now(app, manager, label, heartbeats) {
-        Ok(()) => {
-            log_startup(log, &format!("webview {label} auto-reload done"));
-            Ok(true)
+    // Round 58 (§9.2): the rebuild runs on its own thread. The
+    // monitor thread (or the `ProcessFailed` handler) must keep
+    // running while a rebuild is stuck in window creation — the
+    // "done"/"FAILED" lines are written by the rebuild thread.
+    let app_thread = app.clone();
+    let manager_thread = Arc::clone(manager);
+    let label_thread = label.to_string();
+    let heartbeats_thread = Arc::clone(heartbeats);
+    std::thread::spawn(move || {
+        match reload_webview_now(
+            &app_thread,
+            &manager_thread,
+            &label_thread,
+            &heartbeats_thread,
+        ) {
+            Ok(()) => {
+                let log = startup_log_path_from_app(&app_thread);
+                log_startup(
+                    log.as_deref(),
+                    &format!("webview {label_thread} auto-reload done"),
+                );
+            }
+            Err(e) => {
+                let log = startup_log_path_from_app(&app_thread);
+                log_startup(
+                    log.as_deref(),
+                    &format!("webview {label_thread} auto-reload FAILED: {e}"),
+                );
+            }
         }
-        Err(e) => {
-            log_startup(log, &format!("webview {label} auto-reload FAILED: {e}"));
-            Err(e)
-        }
-    }
+    });
+    Ok(true)
 }
 
 /// Register WebView2's `ProcessFailed` event on a window's webview
@@ -525,6 +594,38 @@ fn register_process_failed(
 ) {
 }
 
+/// Round 58 (§9.1): the main window's WebView2 environment, so a
+/// progress window can share it instead of creating a fresh
+/// environment on the main thread. A fresh environment creation
+/// waits unbounded in wry's `wait_with_pump` — the Round 58
+/// main-thread wedge — so a progress window must not pay for one.
+/// The wait for the `with_webview` closure is bounded at 5 s: a
+/// wedged main thread only costs a fresh environment, never a hung
+/// worker. `None` means "fall back to a fresh environment" and is
+/// logged by the caller. Windows only.
+#[cfg(target_os = "windows")]
+fn main_webview_environment(
+    app: &AppHandle,
+    log: Option<&std::path::Path>,
+) -> Option<webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment> {
+    let main = app.get_webview_window("main")?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    // `with_webview` runs the closure on the main thread.
+    let _ = main.with_webview(move |platform_webview| {
+        let _ = tx.send(platform_webview.environment());
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(env) => Some(env),
+        Err(_) => {
+            log_startup(
+                log,
+                "progress window: main WebView2 environment unavailable — creating a fresh environment",
+            );
+            None
+        }
+    }
+}
+
 /// Build one progress window for a download. The window loads the
 /// same frontend bundle, so `main.tsx` renders the progress view
 /// instead of the main window. Shared by `open_progress_window`
@@ -532,9 +633,11 @@ fn register_process_failed(
 /// builds a fresh one — §7.4, Round 56).
 /// Round 56 (§7.1f): the log line now goes out BEFORE `build()`
 /// (the r55 log had no creation line at all, so a live test could
-/// not tell whether the call was even reached), and the window's
-/// resolved URL is logged after creation — a URL that is wrong
-/// here is a different bug from a webview that never paints.
+/// not tell whether the call was even reached), and the builder's
+/// URL is logged after creation. Round 58 (§9.3): the window's
+/// resolved URL is no longer read back — the `url()` getter blocks
+/// a worker with no timeout, and the URL is an input, not a
+/// discovery.
 /// Round 57 (§9.3): A/B test — the window used to load
 /// `index.html#progress=<id>`, and the r55/r56 live tests both
 /// showed a blank white window with a correct title. The fragment
@@ -564,7 +667,34 @@ fn build_progress_window(
         log,
         &format!("creating progress window {label}: index.html (id via init script)"),
     );
-    match WebviewWindowBuilder::new(app, &label, url)
+    // Round 58 (§9.2): mark creation as not-yet-completed BEFORE
+    // `build()` — a `build()` that never returns must leave the
+    // flag false, so the monitor never auto-reloads a window whose
+    // creation never finished.
+    if let Ok(mut map) = heartbeats.lock() {
+        let hb = map
+            .entry(label.clone())
+            .or_insert_with(|| WebviewHeartbeat::new(epoch_ms()));
+        hb.created_ok = false;
+    }
+    // Round 58 (§9.1): share the main window's WebView2
+    // environment instead of creating a fresh one per window.
+    // A fresh environment creation waits unbounded on the main
+    // thread (`wait_with_pump`) — the Round 58 wedge. Windows
+    // only; other platforms build exactly as before.
+    #[cfg(target_os = "windows")]
+    let shared_environment = main_webview_environment(app, log);
+    #[cfg(target_os = "windows")]
+    if shared_environment.is_some() {
+        log_startup(
+            log,
+            &format!("progress window {label}: sharing main WebView2 environment"),
+        );
+    }
+    // Round 58 (§9.5b): time the `build()` — a build taking >5 s
+    // is diagnostic of a slow or wedged window creation.
+    let build_started = std::time::Instant::now();
+    let mut builder = WebviewWindowBuilder::new(app, &label, url)
         .initialization_script(init_script)
         .title(progress_window_title(
             row.downloaded_bytes as u64,
@@ -575,32 +705,52 @@ fn build_progress_window(
         .min_inner_size(520.0, 320.0)
         .resizable(true)
         .center()
-        .devtools(true)
-        .build()
-    {
+        .devtools(true);
+    #[cfg(target_os = "windows")]
+    if let Some(env) = shared_environment {
+        builder = builder.with_environment(env);
+    }
+    match builder.build() {
         Ok(window) => {
-            let url = window
-                .url()
-                .map(|u| u.to_string())
-                .unwrap_or_else(|e| format!("url error: {e}"));
-            log_startup(log, &format!("progress window {label} created: {url}"));
+            let elapsed_ms = build_started.elapsed().as_millis();
+            // Round 58 (§9.3): the window's URL is no longer read
+            // back with the `url()` getter — that getter blocks a
+            // worker with no timeout, and the URL is an input, not
+            // a discovery: the builder loaded `index.html`.
+            log_startup(
+                log,
+                &format!("progress window {label} created: index.html in {elapsed_ms}ms"),
+            );
+            if elapsed_ms > 5_000 {
+                log_startup(
+                    log,
+                    &format!(
+                        "progress window {label} build took {}ms — slow creation",
+                        elapsed_ms
+                    ),
+                );
+            }
             // Register the heartbeat entry at creation (§9.1b): a
             // window whose JS never runs at all (renderer dead
             // from the start) would otherwise never ping, so the
             // monitor would have nothing to watch and never log
             // "lost". The first ping updates the stamp; the entry
-            // here only starts the clock.
+            // here only starts the clock. Mark creation complete
+            // (§9.2): the monitor may auto-reload this window.
             if let Ok(mut map) = heartbeats.lock() {
-                map.entry(label.clone())
+                let hb = map
+                    .entry(label.clone())
                     .or_insert_with(|| WebviewHeartbeat::new(epoch_ms()));
+                hb.created_ok = true;
             }
             register_process_failed(app, &label, heartbeats, manager);
             Ok(window)
         }
         Err(e) => {
+            let elapsed_ms = build_started.elapsed().as_millis();
             log_startup(
                 log,
-                &format!("progress window {label} FAILED to create: {e}"),
+                &format!("progress window {label} FAILED to create after {elapsed_ms}ms: {e}"),
             );
             Err(e.to_string())
         }
@@ -1665,6 +1815,10 @@ pub fn run() {
                                     &format!("webview {label} heartbeat resumed"),
                                 );
                                 hb.lost_logged = false;
+                                // Round 58 (§9.2): the outage is
+                                // over — the next one gets a fresh
+                                // auto-reload budget.
+                                hb.auto_reload_attempts = 0;
                             }
                         }
                     }
@@ -1678,6 +1832,55 @@ pub fn run() {
                     }
                 });
             }
+            // Round 58 (§9.5a): main-thread watchdog — a plain
+            // std::thread that asks the main thread for a trivial
+            // window property every 5 s and logs when the main
+            // thread stops answering within 10 s. `is_visible()`
+            // round-trips the main thread via a user message, so
+            // a main thread wedged in window creation (unbounded
+            // `wait_with_pump`) shows up here as a timestamped
+            // stall instead of silence. Diagnostic only — it
+            // cannot un-wedge the main thread. Each check runs
+            // the getter on a helper thread: a wedged main thread
+            // blocks that helper forever (one leaked thread per
+            // stalled check), never the watchdog itself.
+            if let Some(watchdog_log) = startup_log_path_from_app(app.handle()) {
+                let watchdog_app = app.handle().clone();
+                std::thread::spawn(move || {
+                    let mut stalled = false;
+                    let mut stall_since_ms = 0u64;
+                    loop {
+                        std::thread::sleep(Duration::from_secs(5));
+                        let Some(window) = watchdog_app.get_webview_window("main") else {
+                            continue;
+                        };
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        std::thread::spawn(move || {
+                            let _ = window.is_visible();
+                            let _ = tx.send(());
+                        });
+                        match rx.recv_timeout(Duration::from_secs(10)) {
+                            Ok(()) => {
+                                if stalled {
+                                    let secs = epoch_ms().saturating_sub(stall_since_ms) / 1000;
+                                    startup_log_line(
+                                        &watchdog_log,
+                                        &format!("main thread resumed after {secs}s"),
+                                    );
+                                    stalled = false;
+                                }
+                            }
+                            Err(_) => {
+                                if !stalled {
+                                    stall_since_ms = epoch_ms();
+                                    startup_log_line(&watchdog_log, "main thread stalled for 10s");
+                                    stalled = true;
+                                }
+                            }
+                        }
+                    }
+                });
+            }
             // Round 57 (§9.1b/c): the main window gets the same
             // treatment as a progress window — a heartbeat entry
             // at startup (so a main window whose JS never runs is
@@ -1685,8 +1888,14 @@ pub fn run() {
             // ping) and a `ProcessFailed` registration. `manager`
             // is still owned here (it moves into AppState below).
             if let Ok(mut map) = webview_heartbeats.lock() {
-                map.entry("main".to_string())
+                let hb = map
+                    .entry("main".to_string())
                     .or_insert_with(|| WebviewHeartbeat::new(epoch_ms()));
+                // Round 58 (§9.2): the main window already exists
+                // (setup runs after it is created), so its
+                // creation completed — the monitor may auto-reload
+                // it if its renderer dies.
+                hb.created_ok = true;
             }
             register_process_failed(app.handle(), "main", &webview_heartbeats, &manager);
             app.manage(AppState {

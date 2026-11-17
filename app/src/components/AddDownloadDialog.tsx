@@ -135,8 +135,13 @@ export function AddDownloadDialog({
       },
     )
     // Round 55 (defect 3b): the submit must not hang silently —
-    // the probe used to stall for minutes with no error. 60 s
-    // matches the engine's total timeout on the probe client.
+    // the probe used to stall for minutes with no error. 60 s is
+    // deliberately longer than the engine's 30 s total timeout on
+    // the probe client (CLIENT_TOTAL_TIMEOUT in
+    // app/engine/src/proxy.rs), so the probe + store + start have
+    // time to settle before the dialog reports a timeout.
+    // (Round 58: the old comment claimed 60 s "matches" the
+    // engine timeout — it never did; the engine bound is 30 s.)
     // On timeout the dialog stays open with the error and the user
     // can retry or close; the first attempt keeps running and its
     // late outcome is reported by the handler above.
