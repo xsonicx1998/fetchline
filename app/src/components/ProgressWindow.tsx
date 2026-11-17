@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { ChevronDown, ChevronUp, FileWarning, FolderOpen, Pause, Play, RotateCw, ShieldCheck, ShieldX, X } from 'lucide-react'
 import { completeActionLabel, formatBytes, formatEta, formatSpeed, progressPercent, statusLabel } from '../lib/format'
 import {
@@ -414,7 +415,7 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
     setActionError(null)
     try {
       await quarantineDownload(downloadId)
-      window.close()
+      getCurrentWindow().close()
     } catch (e) {
       setActionError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -429,7 +430,7 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
     setActionError(null)
     try {
       await deleteDownload(downloadId, true)
-      window.close()
+      getCurrentWindow().close()
     } catch (e) {
       setActionError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -527,7 +528,7 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
               </Button>
             </>
           ) : null}
-          <Button variant="primary" onClick={() => window.close()}>
+          <Button variant="primary" onClick={() => getCurrentWindow().close()}>
             Close
           </Button>
         </div>
@@ -601,7 +602,7 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
           />
           <button
             type="button"
-            onClick={() => window.close()}
+            onClick={() => getCurrentWindow().close()}
             aria-label="Close"
             className="rounded-md p-1 text-text-muted hover:bg-surface-2"
           >
@@ -960,7 +961,7 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
             Cancel
           </Button>
         ) : null}
-        <Button variant="ghost" onClick={() => window.close()}>
+        <Button variant="ghost" onClick={() => getCurrentWindow().close()}>
           Close
         </Button>
       </div>

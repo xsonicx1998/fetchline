@@ -807,7 +807,7 @@ fn build_progress_window(
 /// Open (or focus, when it already exists) the separate progress
 /// window for a download. Errors when the download does not exist.
 #[tauri::command]
-fn open_progress_window(
+async fn open_progress_window(
     app: AppHandle,
     state: State<'_, AppState>,
     download_id: String,
@@ -901,7 +901,7 @@ fn webview_heartbeat(state: State<'_, AppState>, label: String) -> Result<(), St
 /// that fails (dead renderer) returns the error — the caller
 /// shows it instead of pretending the window recovered.
 #[tauri::command]
-fn reload_webview_window(
+async fn reload_webview_window(
     app: AppHandle,
     state: State<'_, AppState>,
     label: String,
@@ -1645,6 +1645,13 @@ pub fn run() {
             let log = startup_log_path_from_app(app.handle());
             let log = log.as_deref();
             log_startup(log, "setup start");
+            // Round 61 (§13 confirm): log the main thread id so it
+            // can be compared against the Round 60 "build() entered
+            // on thread" lines — setup runs on the main thread.
+            log_startup(
+                log,
+                &format!("main thread id: {:?}", std::thread::current().id()),
+            );
             // Round 56 (§7.1b): runtime-independent heartbeat — a
             // plain std::thread (NOT a tokio task) appending a line
             // to startup.log every 30 s, plus one at startup. If
