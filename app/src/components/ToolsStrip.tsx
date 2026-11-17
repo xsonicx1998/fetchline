@@ -1,9 +1,8 @@
-import { Clapperboard, Clipboard, Globe, History, ListOrdered, RefreshCw, Timer } from 'lucide-react'
+import { Clapperboard, Clipboard, Globe, ListOrdered, RefreshCw, Timer } from 'lucide-react'
 
 interface ToolsStripProps {
   onQueue: () => void
   onScheduler: () => void
-  onHistory: () => void
   onVideoGrabber: () => void
   onSiteGrabber: () => void
   onRefreshAddress: () => void
@@ -16,14 +15,14 @@ interface ToolsStripProps {
 /** Round 62 — the slim TOOLS strip under the toolbar (approved
  *  mockup): the features that used to live only in menus are
  *  visible in the main window itself — Queue, Scheduler,
- *  History, Video Grabber, Site Grabber, Refresh Address and
- *  Clipboard monitoring (with its ON/OFF state). No settings
+ *  Video Grabber, Site Grabber, Refresh Address and Clipboard
+ *  monitoring (with its ON/OFF state). History is NOT here
+ *  (Round 63): it already lives in the sidebar. No settings
  *  gear here: Settings is reached from the Options menu, so a
  *  gear would be redundant. */
 export function ToolsStrip({
   onQueue,
   onScheduler,
-  onHistory,
   onVideoGrabber,
   onSiteGrabber,
   onRefreshAddress,
@@ -41,9 +40,6 @@ export function ToolsStrip({
       </StripButton>
       <StripButton onClick={onScheduler} icon={<Timer className="h-3.5 w-3.5" aria-hidden="true" />}>
         Scheduler
-      </StripButton>
-      <StripButton onClick={onHistory} icon={<History className="h-3.5 w-3.5" aria-hidden="true" />}>
-        History
       </StripButton>
       <StripButton
         onClick={onVideoGrabber}

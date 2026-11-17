@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { FileDown, Pause, Play, Power, RotateCw } from 'lucide-react'
+import { File, FileDown, FolderOpen, Pause, Play, Power, RotateCw } from 'lucide-react'
 import { formatBytes, formatEta, formatSpeed, progressPercent, statusLabel } from '../lib/format'
 import {
   cancelDownload,
@@ -9,6 +9,8 @@ import {
   getProgressSnapshot,
   getSettings,
   listDownloads,
+  openFile,
+  openFolder,
   pauseDownload,
   reloadWebviewWindow,
   resumeDownload,
@@ -63,13 +65,17 @@ function partInfo(
  *  same as the main window), square like IDM — landscape, wider
  *  than tall, ~660x480. Two tabs: "Download status" and one
  *  merged "Options" tab (speed limiter + close program /
- *  shut down computer after download). The 60 s speed graph and
- *  the "Hide details" toggle are gone (speed is text only), the
- *  per-part bars are an IDM-style table, and the old completion
- *  choices (open file/folder, antivirus scan) are removed from
- *  this window — they live in the main window now. Closing the
- *  window NEVER cancels the download: the engine keeps running
- *  and the window is only a view of it.
+ *  shut down computer after download); the tabs sit at the top,
+ *  directly under the title bar (Round 63), like the user's
+ *  mockup. The 60 s speed graph and the "Hide details" toggle
+ *  are gone (speed is text only), the per-part bars are an
+ *  IDM-style table, and the antivirus scan choice is gone — on
+ *  completion the footer offers Open file / Open folder
+ *  (Round 63). Closing the window NEVER cancels the download:
+ *  the engine keeps running and the window is only a view of
+ *  it. The footer Cancel button is gone (Round 63): Pause is
+ *  the only action while downloading, and the title-bar X
+ *  still closes the window.
  *
  *  Live feed: the window polls `list_downloads` (the row) and
  *  `get_progress_snapshot` (the latest progress event) every
@@ -358,6 +364,28 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
     }
   }
 
+  /** Round 63 — on completion the footer offers Open file /
+   *  Open folder (the engine commands already exist; the main
+   *  window uses them too). A failure surfaces as the window's
+   *  action error instead of pretending the file opened. */
+  async function handleOpenFile() {
+    setActionError(null)
+    try {
+      await openFile(downloadId)
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  async function handleOpenFolder() {
+    setActionError(null)
+    try {
+      await openFolder(downloadId)
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
   async function handleCancel() {
     setActionError(null)
     try {
@@ -457,6 +485,30 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
   return (
     <div className="flex h-full flex-col text-text">
       <TitleBar title={title} />
+      {/* Round 63 — the tabs sit at the TOP, directly under the
+          title bar (like the user's mockup), pinned above the
+          scrollable content instead of below it. */}
+      <div role="tablist" aria-label="Download details" className="flex shrink-0 gap-1 border-b border-border px-4">
+        {(
+          [
+            ['status', 'Download status'],
+            ['options', 'Options'],
+          ] as const
+        ).map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            role="tab"
+            aria-selected={tab === value}
+            onClick={() => openTab(value)}
+            className={`-mb-px border-b-2 px-3 py-2 text-sm font-semibold ${
+              tab === value ? 'border-accent text-accent' : 'border-transparent text-text-muted hover:text-text'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
       <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4">
         {backendDead ? (
           <div role="alert" className="flex shrink-0 items-center justify-between gap-2 rounded-md border border-border bg-danger-soft px-3 py-2 text-sm text-danger">
@@ -516,8 +568,7 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
           <div>
             <dt className="text-text-muted">Downloaded</dt>
             <dd className="mt-0.5 font-mono">
-              {formatBytes(downloaded)}
-              {percent !== null ? ` (${percent}%)` : ''}
+              {size ? `${formatBytes(downloaded)} / ${formatBytes(size)}` : formatBytes(downloaded)}
             </dd>
           </div>
           <div>
@@ -534,33 +585,18 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
           </div>
         </dl>
 
-        <div role="tablist" aria-label="Download details" className="flex shrink-0 gap-1 border-b border-border">
-          {(
-            [
-              ['status', 'Download status'],
-              ['options', 'Options'],
-            ] as const
-          ).map(([value, label]) => (
-            <button
-              key={value}
-              type="button"
-              role="tab"
-              aria-selected={tab === value}
-              onClick={() => openTab(value)}
-              className={`-mb-px border-b-2 px-3 py-2 text-sm font-semibold ${
-                tab === value ? 'border-accent text-accent' : 'border-transparent text-text-muted hover:text-text'
-              }`}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-
         {tab === 'status' ? (
           <>
             {segments.length > 0 ? (
               <div>
-                <p className="mb-1 text-sm font-semibold">Parts</p>
+                <div className="mb-1 flex items-baseline justify-between gap-2">
+                  <p className="text-sm font-semibold">
+                    Parts ({segments.length} connection{segments.length === 1 ? '' : 's'})
+                  </p>
+                  <p className="text-xs text-accent">
+                    {segments.filter((s) => s.status === 'done').length}/{segments.length} completed
+                  </p>
+                </div>
                 <div className="max-h-[140px] overflow-y-auto rounded-md border border-border">
                   <table className="w-full border-collapse text-sm" aria-label="Download parts">
                     <thead className="sticky top-0 bg-surface">
@@ -586,10 +622,6 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
                     </tbody>
                   </table>
                 </div>
-                <p className="mt-1 text-xs text-text-muted">
-                  {segments.length} part{segments.length === 1 ? '' : 's'} — the count depends on
-                  what the server supports, up to 16.
-                </p>
               </div>
             ) : null}
 
@@ -622,10 +654,6 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
                 {download.error_message}
               </p>
             ) : null}
-
-            <p className="truncate font-mono text-xs text-text-muted" title={download.save_path}>
-              {download.save_path}
-            </p>
           </>
         ) : null}
 
@@ -707,7 +735,10 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
         </p>
       ) : null}
 
-      <div className="flex shrink-0 flex-wrap justify-end gap-2 border-t border-border p-3">
+      <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-border p-3">
+        <p className="mr-auto min-w-0 truncate font-mono text-xs text-text-muted" title={download.save_path}>
+          {download.save_path}
+        </p>
         {download.status === 'downloading' ? (
           <Button variant="secondary" onClick={handlePause}>
             <Pause className="h-4 w-4" aria-hidden="true" /> Pause
@@ -718,10 +749,15 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
             <Play className="h-4 w-4" aria-hidden="true" /> Resume
           </Button>
         ) : null}
-        {download.status === 'downloading' || download.status === 'paused' ? (
-          <Button variant="danger" onClick={handleCancel}>
-            Cancel
-          </Button>
+        {download.status === 'complete' ? (
+          <>
+            <Button variant="primary" onClick={() => void handleOpenFile()}>
+              <File className="h-4 w-4" aria-hidden="true" /> Open file
+            </Button>
+            <Button variant="secondary" onClick={() => void handleOpenFolder()}>
+              <FolderOpen className="h-4 w-4" aria-hidden="true" /> Open folder
+            </Button>
+          </>
         ) : null}
         <Button variant="ghost" onClick={() => getCurrentWindow().close()}>
           Close

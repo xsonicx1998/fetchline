@@ -91,3 +91,31 @@ body {
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;
 }
+
+/* Round 63 — theme scrollbars everywhere (main table, parts
+ *  table, sidebar, any scrollable area): purple thumb on a
+ *  dark track, cyan on hover; thin. Firefox uses
+ *  scrollbar-color / scrollbar-width; Chromium/Edge use the
+ *  ::-webkit-scrollbar pseudo-elements. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-accent) var(--color-bg);
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: var(--color-bg);
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--color-accent);
+  border-radius: 999px;
+  border: 2px solid var(--color-bg);
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--color-info);
+}
+*::-webkit-scrollbar-corner {
+  background: var(--color-bg);
+}

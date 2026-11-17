@@ -652,7 +652,6 @@ export default function App() {
           else setShowAddQueue(true)
         }}
         onScheduler={() => openScheduler()}
-        onHistory={() => selectFilter('history')}
         onVideoGrabber={() => setShowVideoGrabber(true)}
         onSiteGrabber={() => setShowSiteGrabber(true)}
         onRefreshAddress={() => selected && setRefreshTarget(selected)}
@@ -734,9 +733,10 @@ export default function App() {
         {/* Round 47: the main area is a rounded panel with a thin
             glowing border, as in the reference — inset from the
             toolbar/footer by the row's gap/padding, like the
-            sidebar panel. The translucent surface lets the neon
-            waves show through behind the table while the rows stay
-            readable (the thead is opaque). */}
+            sidebar panel. Round 63: the neon-waves backdrop is
+            gone (flat dark #0B0F24 now), so the translucent
+            surface just reads as a slightly lighter dark; the
+            rows stay readable (the thead is opaque). */}
         <main className="min-w-0 flex-1 overflow-auto rounded-xl border border-border bg-surface/40 shadow-panel">
           {selectedFilter === 'history' ? (
             <HistoryView

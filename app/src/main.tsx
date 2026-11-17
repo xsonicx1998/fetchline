@@ -4,7 +4,6 @@ import App from './App'
 import { ProgressWindow } from './components/ProgressWindow'
 import { webviewHeartbeat } from './lib/api'
 import './index.css'
-import './background.css'
 
 /** A progress window loads the same bundle and renders the
  *  progress view instead of the main window (S03). The download
