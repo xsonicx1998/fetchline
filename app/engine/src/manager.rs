@@ -254,7 +254,10 @@ struct SegState {
 
 struct Running {
     pause: Arc<AtomicBool>,
-    handle: tokio::task::JoinHandle<()>,
+    /// The run task's handle, shared with the thread watchdog
+    /// (§9.2f, Round 57): an `Arc` so both the `running` map entry
+    /// and the watchdog's registry entry can abort the same task.
+    handle: Arc<tokio::task::JoinHandle<()>>,
     /// The run's retry wait (S03): a segment that failed writes its
     /// backoff deadline here, the supervisor reads it into every
     /// progress event, and "Retry now" sets the flag to cut the wait
@@ -276,6 +279,23 @@ struct Running {
     /// an earlier run of the same download can never abort a
     /// newer run that is making progress.
     last_progress_ms: Arc<AtomicU64>,
+}
+
+/// What the truly-independent thread watchdog (§9.2f, Round 57)
+/// watches for one download: the same shared state the tokio run
+/// watchdog reads, but owned by a plain `std::thread` instead of
+/// a tokio task — so it keeps running when the tokio runtime
+/// itself is wedged. One entry per running download, in
+/// `DownloadManager::thread_watchdogs`; the entry is removed when
+/// the run ends (see `run`), when the tokio watchdog fires, or
+/// when this thread fires, so a stale entry can never abort a
+/// newer run of the same download (the thread checks
+/// `Arc::ptr_eq` against the CURRENT entry before acting).
+struct ThreadWatchEntry {
+    last_progress_ms: Arc<AtomicU64>,
+    retry: Arc<RetrySlot>,
+    pause: Arc<AtomicBool>,
+    handle: Arc<tokio::task::JoinHandle<()>>,
 }
 
 /// One retry wait: the backoff deadline of a segment that failed,
@@ -374,6 +394,14 @@ pub struct DownloadManager {
     /// numbers.
     last_progress: Arc<StdMutex<HashMap<String, ProgressEvent>>>,
     running: AsyncMutex<HashMap<String, Running>>,
+    /// Truly-independent thread watchdogs (§9.2f, Round 57): one
+    /// `ThreadWatchEntry` per running download, watched by a plain
+    /// `std::thread` — NOT a tokio task — so it keeps running when
+    /// the tokio runtime itself is wedged (the Round 56 tokio
+    /// watchdog is a task on the same runtime it watches, and
+    /// freezes with it). Keyed by download id; the thread exits
+    /// when its entry is removed or replaced.
+    thread_watchdogs: StdMutex<HashMap<String, Arc<ThreadWatchEntry>>>,
     /// Stop flags of queues currently being drained, by queue id.
     /// The runner task detaches on spawn and removes its own entry
     /// when it ends, so no handle needs keeping.
@@ -471,6 +499,7 @@ impl DownloadManager {
             events,
             last_progress: Arc::new(StdMutex::new(HashMap::new())),
             running: AsyncMutex::new(HashMap::new()),
+            thread_watchdogs: StdMutex::new(HashMap::new()),
             queue_runs: AsyncMutex::new(HashMap::new()),
             sync_runs: AsyncMutex::new(HashMap::new()),
             grabber_runs: AsyncMutex::new(HashMap::new()),
@@ -3588,13 +3617,22 @@ impl DownloadManager {
         let retry_clone = Arc::clone(&retry);
         let limiter_clone = Arc::clone(&per_download_limiter);
         let progress_clone = Arc::clone(&last_progress_ms);
-        let handle = tokio::spawn(async move {
+        let handle = Arc::new(tokio::spawn(async move {
             this.run(id, pause_clone, retry_clone, limiter_clone, progress_clone)
                 .await;
-        });
+        }));
         // The watchdog's id, cloned before the insert below moves
         // `row.id` into the map key.
         let watch_id = row.id.clone();
+        // Round 57 (§9.2f): the thread watchdog's entry — the same
+        // shared state as the `running` map entry, built before the
+        // insert moves the originals in.
+        let thread_entry = Arc::new(ThreadWatchEntry {
+            last_progress_ms: Arc::clone(&last_progress_ms),
+            retry: Arc::clone(&retry),
+            pause: Arc::clone(&pause),
+            handle: Arc::clone(&handle),
+        });
         self.running.lock().await.insert(
             row.id,
             Running {
@@ -3605,6 +3643,10 @@ impl DownloadManager {
                 last_progress_ms,
             },
         );
+        self.thread_watchdogs
+            .lock()
+            .unwrap()
+            .insert(watch_id.clone(), Arc::clone(&thread_entry));
         // Round 56 (§7.2): the independent run watchdog — a
         // separate task per run that watches the shared
         // last-progress timestamp and aborts the run after
@@ -3616,8 +3658,24 @@ impl DownloadManager {
         // never abort a newer run that is making progress.
         {
             let watch_mgr = Arc::clone(self);
+            let thread_id = watch_id.clone();
             tokio::spawn(async move {
                 watch_mgr.run_watchdog(watch_id).await;
+            });
+            // Round 57 (§9.2f): the truly-independent watchdog —
+            // a plain `std::thread`, NOT a tokio task. The Round
+            // 56 tokio watchdog is a task on the same runtime it
+            // watches: when the runtime wedges (two simultaneous
+            // blocking calls on the VPS's 2 workers), its timers
+            // never fire either. This thread sleeps on the OS, so
+            // it keeps checking while the runtime is frozen. On a
+            // stall it logs + aborts the run exactly like the
+            // tokio watchdog — it never restarts the process
+            // (auto-restart is a pending user decision).
+            let thread_mgr = Arc::clone(self);
+            let timeout_secs = self.run_watchdog_timeout_secs();
+            std::thread::spawn(move || {
+                Self::thread_watchdog(thread_mgr, thread_id, thread_entry, timeout_secs);
             });
         }
         Ok(())
@@ -4195,6 +4253,10 @@ impl DownloadManager {
         let _ = std::fs::remove_file(part_path(&row.save_path));
         self.store.set_status(id, "deleted", None)?;
         self.running.lock().await.remove(id);
+        // Round 57 (§9.2f): a cancelled run has no thread
+        // watchdog any more — the thread exits on its own when
+        // its entry disappears.
+        self.thread_watchdogs.lock().unwrap().remove(id);
         // Browser cookies (S13 finish): a deleted download keeps no
         // session behind.
         self.cookies.lock().unwrap().remove(id);
@@ -4228,6 +4290,12 @@ impl DownloadManager {
         // No segment is waiting any more, whatever the outcome was.
         retry.clear_wait();
         self.running.lock().await.remove(&id);
+        // Round 57 (§9.2f): the thread watchdog's entry goes with
+        // the run — without this the thread would keep watching a
+        // finished run (and, on a later stall of a NEW run of the
+        // same download, could mistake the old entry for the
+        // current one; the `ptr_eq` check below is the backstop).
+        self.thread_watchdogs.lock().unwrap().remove(&id);
         if let Err(e) = outcome {
             let _ = self.store.set_status(&id, "error", Some(&e.to_string()));
             self.emit_snapshot(&id, "error").await;
@@ -4314,6 +4382,10 @@ impl DownloadManager {
                 .flatten()
                 .map(|r| r.status);
             let entry = self.running.lock().await.remove(&id);
+            // Round 57 (§9.2f): the thread watchdog's entry goes
+            // with the run, so the thread exits instead of firing
+            // a second time on a run this watchdog already aborted.
+            self.thread_watchdogs.lock().unwrap().remove(&id);
             let Some(r) = entry else { return };
             if row_status.as_deref() == Some("downloading") {
                 r.pause.store(true, Ordering::SeqCst);
@@ -4338,6 +4410,96 @@ impl DownloadManager {
                 // running, and abort its handle for good measure.
                 r.handle.abort();
             }
+            return;
+        }
+    }
+
+    /// Truly-independent run watchdog (§9.2f, Round 57): a plain
+    /// `std::thread` (NOT a tokio task) that watches one run's
+    /// shared last-progress timestamp and aborts the run after
+    /// `timeout_secs` of no progress. It exists because the tokio
+    /// run watchdog (§7.2) is a task on the same runtime it
+    /// watches — when the runtime wedges, its timers never fire
+    /// either, and the r56 live test showed exactly that (a stall
+    /// at 7–8% with no watchdog line in the log). This thread
+    /// sleeps on the OS, so it keeps checking while the runtime is
+    /// frozen. The stall action mirrors the tokio watchdog — pause
+    /// flag, handle abort, retry cleared, error status — so a
+    /// later Resume can restart the download. It never restarts
+    /// the process (auto-restart is a pending user decision): it
+    /// logs + aborts only. It logs FIRST (the store write below
+    /// may itself block if the store is the wedge point — the log
+    /// line is the one fact this thread exists to record, and it
+    /// must not depend on the store). No progress event is
+    /// emitted: `emit_snapshot` is async and needs the very
+    /// runtime that is wedged — the DB status (which the main
+    /// table polls) is the source of truth here. Suppressed while
+    /// a segment waits out its retry backoff, exactly like the
+    /// tokio watchdog. The thread exits when its registry entry is
+    /// removed (run ended, cancelled, or the tokio watchdog fired)
+    /// or replaced (a newer run of the same download started —
+    /// the `ptr_eq` check, re-checked immediately before acting,
+    /// so a stale thread can never abort a newer run).
+    fn thread_watchdog(
+        mgr: Arc<Self>,
+        id: String,
+        entry: Arc<ThreadWatchEntry>,
+        timeout_secs: u64,
+    ) {
+        // Check often enough to fire near the deadline without
+        // spinning: a sixth of the timeout, clamped to 1–10 s —
+        // the same cadence as the tokio watchdog.
+        let check_every = ((timeout_secs / 6).max(1)).min(10);
+        loop {
+            std::thread::sleep(Duration::from_secs(check_every));
+            // Stale? A newer run of the same download replaced
+            // this entry, or the run ended and removed it — the
+            // thread exits either way.
+            {
+                let map = mgr.thread_watchdogs.lock().unwrap();
+                match map.get(&id) {
+                    Some(current) if Arc::ptr_eq(current, &entry) => {}
+                    _ => return,
+                }
+            }
+            if entry.retry.info().is_some() {
+                continue; // retry backoff — not a wedge
+            }
+            if now_millis().saturating_sub(entry.last_progress_ms.load(Ordering::Relaxed))
+                < timeout_secs * 1000
+            {
+                continue;
+            }
+            // Stalled — but re-check the entry first: a new run
+            // of the same download may have started since the
+            // check above, and aborting its handle or marking its
+            // row error would be wrong.
+            {
+                let map = mgr.thread_watchdogs.lock().unwrap();
+                match map.get(&id) {
+                    Some(current) if Arc::ptr_eq(current, &entry) => {}
+                    _ => return,
+                }
+            }
+            mgr.store.log(&format!(
+                "thread watchdog aborted {id} after {timeout_secs}s without progress (tokio watchdog did not fire)"
+            ));
+            {
+                let mut map = mgr.thread_watchdogs.lock().unwrap();
+                map.remove(&id);
+            }
+            entry.pause.store(true, Ordering::SeqCst);
+            entry.handle.abort();
+            entry.retry.clear_wait();
+            let msg = format!(
+                "No data arrived for {timeout_secs} seconds — the connection appears to have stalled"
+            );
+            if let Err(e) = mgr.store.set_status(&id, "error", Some(&msg)) {
+                mgr.store.log(&format!(
+                    "thread watchdog could not set error status for {id}: {e}"
+                ));
+            }
+            mgr.cookies.lock().unwrap().remove(&id);
             return;
         }
     }
@@ -4554,6 +4716,16 @@ impl DownloadManager {
                         while tasks.join_next().await.is_some() {}
                         self.checkpoint(id, &states, 0).await;
                         retry.clear_wait();
+                        // Round 57 (§9.4): log the firing
+                        // explicitly — the r56 live test had a
+                        // stalled run with no watchdog line at all,
+                        // and the log could not say whether the
+                        // in-loop watchdog, the tokio watchdog, or
+                        // neither had run.
+                        self.store.log(&format!(
+                            "in-loop watchdog fired for {id} after {}s without progress",
+                            RUN_STALL_TIMEOUT.as_secs()
+                        ));
                         return Err(EngineError::InvalidState(format!(
                             "No data arrived for {} seconds — the connection appears to have stalled",
                             RUN_STALL_TIMEOUT.as_secs()
@@ -4713,35 +4885,65 @@ impl DownloadManager {
     }
 
     async fn checkpoint(&self, id: &str, states: &[Arc<StdMutex<SegState>>], speed_bps: u64) {
+        // Snapshot the in-memory state first (fast, no IO): the
+        // totals and per-segment progress the store write needs.
         let total: i64 = states.iter().map(|s| s.lock().unwrap().done as i64).sum();
-        let size = self.store.get_download(id).ok().flatten().and_then(|r| r.size_bytes);
-        let eta = if speed_bps > 0 {
-            size.map(|s| (s - total).max(0) / speed_bps as i64)
-        } else {
-            None
-        };
-        // Round 56 (§7.1d): a failed checkpoint used to be
-        // swallowed with `let _ =` — the download's progress was
-        // silently not persisted, and the live test could only see
-        // the frozen UI, never the cause. The error is now logged
-        // (throttled: a checkpoint runs every second, so a
-        // persistently failing store logs at most once per second
-        // — the checkpoint itself is the throttle) while the run
-        // continues: a checkpoint failure is diagnostic, not fatal.
-        if let Err(e) = self.store.checkpoint(id, total, speed_bps as i64, eta) {
-            self.store.log(&format!("checkpoint failed for {id}: {e}"));
-        }
-        for s in states {
-            let st = s.lock().unwrap();
-            let status = if st.done >= segment_len_of(&st) { "done" } else { "active" };
-            if let Err(e) = self
-                .store
-                .update_segment(&st.row.id, st.done as i64, status)
-            {
-                self.store
-                    .log(&format!("checkpoint failed for segment {}: {e}", st.row.id));
+        let segs: Vec<(String, i64, &'static str)> = states
+            .iter()
+            .map(|s| {
+                let st = s.lock().unwrap();
+                let status = if st.done >= segment_len_of(&st) {
+                    "done"
+                } else {
+                    "active"
+                };
+                (st.row.id.clone(), st.done as i64, status)
+            })
+            .collect();
+        // Round 57 (§9.2b): the store calls run on a blocking
+        // thread, NOT on a tokio worker. `Store` is a synchronous
+        // SQLite wrapper around a `std::sync::Mutex<Connection>`
+        // — every checkpoint used to run inline on the worker
+        // that drives the supervisor loop, and a store call that
+        // blocks (a contended or wedged connection) occupied
+        // that worker for its whole duration. The await below
+        // only parks the supervisor task (the worker is free
+        // while the blocking thread writes); a checkpoint failure
+        // stays diagnostic, not fatal, exactly as before.
+        let store = Arc::clone(&self.store);
+        let id = id.to_string();
+        let _ = tokio::task::spawn_blocking(move || {
+            let size = store
+                .get_download(&id)
+                .ok()
+                .flatten()
+                .and_then(|r| r.size_bytes);
+            let eta = if speed_bps > 0 {
+                size.map(|s| (s - total).max(0) / speed_bps as i64)
+            } else {
+                None
+            };
+            // Round 56 (§7.1d): a failed checkpoint used to be
+            // swallowed with `let _ =` — the download's progress
+            // was silently not persisted, and the live test could
+            // only see the frozen UI, never the cause. The error
+            // is now logged (throttled: a checkpoint runs every
+            // second, so a persistently failing store logs at most
+            // once per second — the checkpoint itself is the
+            // throttle) while the run continues: a checkpoint
+            // failure is diagnostic, not fatal.
+            if let Err(e) = store.checkpoint(&id, total, speed_bps as i64, eta) {
+                store.log(&format!("checkpoint failed for {id}: {e}"));
             }
-        }
+            for (seg_id, done, status) in segs {
+                if let Err(e) = store.update_segment(&seg_id, done, status) {
+                    store.log(&format!(
+                        "checkpoint failed for segment {seg_id}: {e}"
+                    ));
+                }
+            }
+        })
+        .await;
     }
 
     async fn emit(

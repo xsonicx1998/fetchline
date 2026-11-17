@@ -4852,6 +4852,105 @@ rate-limited for the shared egress IP) — the log was NOT read.
     fragment removal) — those wait for the step-0 / retest
     evidence.
 
+## Round 57 — Fix round for the r56 live defects (7–8% stall with no watchdog line, both webviews blank white) — 2026-11-17
+
+  User approval (2026-11-17 ~12:19 EET): "نفذ خطة الجولة 57" on
+  the §9 plan in `~/workspace/round57-investigation.md`. The r56
+  VPS retest (07:00 EET) failed all 4 checks in the UI: 20 MB
+  stalled at 19.1/20 MB then 7%, 10 MB stalled at 8% on a fresh
+  engine, Stop/Resume dead, 1 GB never started, progress window
+  blank white — and the log showed "webview main heartbeat lost"
+  twice with NO watchdog line at all. The investigation (12:03
+  EET) corrected two things told to the user before: "ALL 4
+  FAILED" is a UI verdict, not an engine verdict (the DB/disk
+  check was never done, so the engine state is unknown), and
+  "renderer death PROVEN in the log" is overstated (the heartbeat
+  ping is an invoke, so it also stops on a runtime wedge; one hung
+  ping silences all later pings). It also found the reload command
+  used the wrong primitive (`eval("window.location.reload()")`
+  needs live JS + IPC — exactly what's dead when a reload is
+  needed) and that the 180 s watchdog is a tokio task on the same
+  runtime it watches. This round implements §9.1–§9.4 only.
+
+  - **§9.1 Renderer recovery (shell + frontend):** the reload
+    command now uses the native `WebviewWindow::reload()` (Tauri
+    2.12.5 → wry `ICoreWebView2::Reload()`), no JS, no tokio;
+    progress windows still close + rebuild. New `reload_webview_now`
+    (the shared primitive) + `maybe_auto_reload` (cooldown-gated).
+    The heartbeat monitor thread now AUTO-RELOADS a window whose
+    pings stop for 30 s — once per outage, max one auto-reload per
+    5 min per window (`AUTO_RELOAD_COOLDOWN_MS`), every decision
+    logged; the lock is released before the reload runs (the reload
+    takes the same lock for its cooldown). `ProcessFailed` is
+    registered directly on every webview via wry's
+    `WebViewExtWindows::webview()` + `webview2-com 0.39`
+    (`ProcessFailedEventHandler::create` +
+    `ICoreWebView2::add_ProcessFailed`, mirroring wry's own
+    `PermissionRequested` registration) — the binding was verified
+    from the crate's published docs (docs.rs) + vendored wry
+    0.57.2, NOT skipped. On the event it logs `webview <label>
+    renderer process failed (<kind>)` and triggers the same
+    cooldown-gated native reload. Heartbeat entries are now
+    registered at window creation (main in `setup`, progress in
+    `build_progress_window`), so a window whose JS never runs at
+    all is watched from the start instead of never appearing in
+    the map. The ping flaw is fixed in `main.tsx`: the ping races
+    a 5 s timeout so `pingInFlight` always clears.
+  - **§9.2 Runtime-wedge hardening (engine + shell):** the
+    clipboard read runs on `spawn_blocking` behind an
+    `Arc<StdMutex<Clipboard>>` with `try_lock` (a stuck RDP
+    clipboard channel skips the tick instead of queuing) +
+    `MissedTickBehavior::Delay`; the supervisor's `checkpoint()`
+    store calls run on `spawn_blocking` (snapshot in memory
+    first, then one blocking write); the Tauri runtime is built
+    with 4 workers via `tauri::async_runtime::set` (mitigation
+    only, commented as such — the Runtime is leaked
+    deliberately, because `set` keeps only the handle and
+    dropping it would shut the runtime down). `refreshAll` in
+    App.tsx is complete: `refreshQueues`,
+    `refreshGrabberProjects` and the new `refreshQueueFiles`
+    all have the 5 s `withTimeout` + a shared in-flight guard.
+    `list_downloads` logs its entry (sampled, same as the exit)
+    so a hung call leaves an entry-without-exit trace.
+  - **§9.2f Truly-independent watchdog (engine):** `Running.handle`
+    is now `Arc<JoinHandle<()>>`, shared with a new
+    `ThreadWatchEntry` per run in `DownloadManager::
+    thread_watchdogs`. A plain `std::thread` per run watches the
+    same last-progress timestamp (same 1–10 s cadence, same
+    retry-backoff suppression) and on a stall logs FIRST
+    ("thread watchdog aborted … (tokio watchdog did not fire)"),
+    then aborts the run and marks the row error, mirroring the
+    tokio watchdog — it never restarts the process. The thread
+    exits when its registry entry is removed (run ended,
+    cancelled, tokio watchdog fired) or replaced (newer run —
+    `Arc::ptr_eq`, re-checked immediately before acting). No
+    progress event is emitted: `emit_snapshot` is async and
+    needs the very runtime that is wedged — the DB status is the
+    source of truth.
+  - **§9.3 Progress-window A/B test (shell + frontend):** the
+    progress window now loads plain `index.html` with the id via
+    `WebviewWindowBuilder::initialization_script`
+    (`window.__PROGRESS_ID__`); `main.tsx` reads it, falling back
+    to the `#progress=<id>` fragment. The fragment path stays
+    working.
+  - **§9.4 Diagnostics (engine):** the in-loop watchdog logs
+    "in-loop watchdog fired …" explicitly before returning its
+    error.
+  - **Tests:** 2 new engine tests (round57_tests.rs): the thread
+    watchdog aborts a stalled run while the tokio runtime is
+    wedged (2-worker runtime, both workers blocked by sync
+    sleeps; the log shows the THREAD watchdog fired and the
+    tokio one did not); a slow 4 MiB download completes with no
+    watchdog line at all. Suite 459/459 on Linux (457 + 2 new);
+    `npm run build` passes. The Tauri shell never compiles on
+    this VM, so `lib.rs` is verified by reading only + `rustfmt`
+    parse — the VPS build is its first compile. Deliberately NOT
+    in this round: the §9.5 engine-stall fix (it depends on the
+    live DB/disk check results, not yet available when this was
+    written — do not write it blind) and auto-restart (a pending
+    user decision — the watchdogs log + abort only). No pushes,
+    no GitHub/CI, no workflow files touched.
+
 ## Known limitations, not bugs (round-24 additions)
 
 - The Tauri shell never compiles or runs on this VM, so a

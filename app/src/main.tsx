@@ -6,14 +6,19 @@ import { webviewHeartbeat } from './lib/api'
 import './index.css'
 import './background.css'
 
-/** A progress window loads the same bundle with
- *  `#progress=<download id>` in the URL (set by the
- *  `open_progress_window` Tauri command) and renders the progress
- *  view instead of the main window (S03). Download ids are UUIDs,
- *  so only hex + hyphens are accepted here — anything else falls
- *  back to the main window rather than opening a window for a
- *  made-up id. */
+/** A progress window loads the same bundle and renders the
+ *  progress view instead of the main window (S03). The download
+ *  id comes from the initialization script (`window.
+ *  __PROGRESS_ID__`, set by the `open_progress_window` Tauri
+ *  command before any document script runs — Round 57 §9.3, the
+ *  A/B test for the blank progress window) or, as a fallback,
+ *  from `#progress=<download id>` in the URL. Download ids are
+ *  UUIDs, so only hex + hyphens are accepted here — anything
+ *  else falls back to the main window rather than opening a
+ *  window for a made-up id. */
 function progressDownloadId(): string | null {
+  const fromInit = (window as unknown as { __PROGRESS_ID__?: unknown }).__PROGRESS_ID__
+  if (typeof fromInit === 'string' && /^[0-9a-fA-F-]+$/.test(fromInit)) return fromInit
   const match = /^#progress=([0-9a-fA-F-]+)$/.exec(window.location.hash)
   return match ? match[1] : null
 }
@@ -41,9 +46,20 @@ const windowLabel = progressId !== null ? `progress-${progressId}` : 'main'
   window.setInterval(() => {
     if (pingInFlight) return
     pingInFlight = true
-    void webviewHeartbeat(windowLabel)
+    // Round 57 (§9.1d): race the ping against a 5 s timeout so
+    // `pingInFlight` always clears — one hung ping used to
+    // silence all later pings (the `.finally()` never ran for a
+    // hung invoke), so the monitor read "lost" forever and a
+    // recovered window never logged "resumed". The timeout is
+    // cleared when the ping settles first.
+    let timer = 0
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = window.setTimeout(() => reject(new Error('heartbeat ping timed out')), 5000)
+    })
+    void Promise.race([webviewHeartbeat(windowLabel), timeout])
       .catch(() => undefined)
       .finally(() => {
+        window.clearTimeout(timer)
         pingInFlight = false
       })
   }, 5000)

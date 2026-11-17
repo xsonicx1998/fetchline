@@ -23,3 +23,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = [] }
 tokio = { version = "1", features = ["full"] }
+
+# Round 57 (§9.1c): the `ProcessFailed` registration in lib.rs
+# needs the raw WebView2 bindings — `wry::WebViewExtWindows` for
+# the `ICoreWebView2` and `webview2-com` for the event handler.
+# Windows-only: the Linux build never sees them. Both crates are
+# already in Cargo.lock at these versions (via Tauri/wry), so this
+# adds no new download on the VPS build.
+[target.'cfg(windows)'.dependencies]
+wry = "0.57"
+webview2-com = "0.39"

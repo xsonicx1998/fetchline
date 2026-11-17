@@ -121,6 +121,15 @@ export default function App() {
   const [backendDead, setBackendDead] = useState(false)
   const backendDeadRef = useRef(false)
   const refreshInFlight = useRef(false)
+  /** Round 57 (§9.2d): the secondary polls (`refreshQueues`,
+   *  `refreshGrabberProjects`, `getQueueFiles`) had neither the
+   *  5 s timeout nor the in-flight guard the main poll got in
+   *  Round 56 — a wedged backend piled up one hung invoke per
+   *  second for each of them too, and `refreshAll` awaited them
+   *  in sequence, so one hung call stalled every later refresh.
+   *  One shared guard for all three (they always run together
+   *  from `refreshAll`); a skipped tick is just a skipped tick. */
+  const secondaryRefreshInFlight = useRef(false)
   const pollStoppedRef = useRef(false)
   const lastPollOkAt = useRef(Date.now())
   const [settings, setSettings] = useState<Settings | null>(null)
@@ -159,21 +168,49 @@ export default function App() {
   }, [])
 
   const refreshQueues = useCallback(async () => {
+    // In-flight guard + 5 s timeout (§9.2d, Round 57): the same
+    // protection the main poll got in Round 56 — a hung invoke
+    // must reject instead of pending forever and piling up.
+    if (secondaryRefreshInFlight.current) return
+    secondaryRefreshInFlight.current = true
     try {
-      setQueues(await listQueues())
+      setQueues(await withTimeout(listQueues(), 5000, 'Backend did not respond within 5 seconds'))
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      secondaryRefreshInFlight.current = false
     }
   }, [])
 
   const refreshGrabberProjects = useCallback(async () => {
+    // In-flight guard + 5 s timeout (§9.2d, Round 57) — see
+    // `refreshQueues` above.
+    if (secondaryRefreshInFlight.current) return
+    secondaryRefreshInFlight.current = true
     try {
-      setGrabberProjects(await listGrabberProjects())
+      setGrabberProjects(await withTimeout(listGrabberProjects(), 5000, 'Backend did not respond within 5 seconds'))
     } catch {
       // The tree's grabber section stays empty outside the
       // desktop app; the rest of the window keeps working.
+    } finally {
+      secondaryRefreshInFlight.current = false
     }
   }, [])
+
+  const refreshQueueFiles = useCallback(async () => {
+    if (selectedQueue === null) return
+    // In-flight guard + 5 s timeout (§9.2d, Round 57) — see
+    // `refreshQueues` above.
+    if (secondaryRefreshInFlight.current) return
+    secondaryRefreshInFlight.current = true
+    try {
+      setQueueFiles(await withTimeout(getQueueFiles(selectedQueue), 5000, 'Backend did not respond within 5 seconds'))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      secondaryRefreshInFlight.current = false
+    }
+  }, [selectedQueue])
 
   const refreshCategories = useCallback(async () => {
     try {
@@ -221,14 +258,8 @@ export default function App() {
     await refresh()
     await refreshQueues()
     await refreshGrabberProjects()
-    if (selectedQueue !== null) {
-      try {
-        setQueueFiles(await getQueueFiles(selectedQueue))
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e))
-      }
-    }
-  }, [refresh, refreshQueues, refreshGrabberProjects, selectedQueue])
+    await refreshQueueFiles()
+  }, [refresh, refreshQueues, refreshGrabberProjects, refreshQueueFiles])
 
   useEffect(() => {
     if (!pollStoppedRef.current) void refresh()

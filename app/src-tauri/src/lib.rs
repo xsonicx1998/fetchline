@@ -47,6 +47,22 @@ pub struct WebviewHeartbeat {
     pub lost_logged: bool,
     /// Whether the first "heartbeat started" line is logged.
     pub started_logged: bool,
+    /// Epoch millis of the last automatic reload (§9.1b, Round
+    /// 57): at most one auto-reload per 5 min per window, so a
+    /// wedged runtime cannot turn a recovery into a reload loop.
+    /// 0 = never auto-reloaded.
+    pub last_auto_reload_ms: u64,
+}
+
+impl WebviewHeartbeat {
+    fn new(now_ms: u64) -> Self {
+        Self {
+            last_seen_ms: now_ms,
+            lost_logged: false,
+            started_logged: false,
+            last_auto_reload_ms: 0,
+        }
+    }
 }
 
 /// Epoch milliseconds — the heartbeat monitor's clock.
@@ -301,21 +317,234 @@ fn progress_window_title(downloaded_bytes: u64, size_bytes: Option<u64>, filenam
     }
 }
 
+/// Minimum gap between two automatic webview reloads of the same
+/// window (§9.1b, Round 57): 5 min. A wedged runtime must never
+/// turn a recovery into a reload loop. The banner's manual Reload
+/// is NOT gated by this — the user asked for it explicitly.
+const AUTO_RELOAD_COOLDOWN_MS: u64 = 5 * 60 * 1000;
+
+/// Reload a window's webview right now (§9.1a, Round 57) — the
+/// recovery primitive the banner, the heartbeat monitor and the
+/// `ProcessFailed` handler all share. Main window: the NATIVE
+/// `WebviewWindow::reload()` (Tauri 2.12.5 → wry
+/// `ICoreWebView2::Reload()`), which needs neither live JS nor a
+/// live IPC channel — the old `eval("window.location.reload()")`
+/// needed exactly the two things that are dead when a reload is
+/// needed, so it could never fix a dead renderer. A progress
+/// window is closed and rebuilt from scratch, which also replaces
+/// a dead renderer process with a fresh one. No cooldown here:
+/// this is the explicit (or already-gated) reload. Errors are
+/// the caller's to report.
+fn reload_webview_now(
+    app: &AppHandle,
+    manager: &Arc<DownloadManager>,
+    label: &str,
+    heartbeats: &Arc<StdMutex<HashMap<String, WebviewHeartbeat>>>,
+) -> Result<(), String> {
+    if label == "main" {
+        let window = app
+            .get_webview_window("main")
+            .ok_or_else(|| "No main window open".to_string())?;
+        return window.reload().map_err(|e| e.to_string());
+    }
+    let Some(download_id) = label.strip_prefix("progress-") else {
+        return Err(format!("Unknown window label: {label}"));
+    };
+    let Some(window) = app.get_webview_window(label) else {
+        return Err(format!(
+            "No progress window open for download {download_id}"
+        ));
+    };
+    window.close().map_err(|e| e.to_string())?;
+    let log = startup_log_path_from_app(app);
+    log_startup(
+        log.as_deref(),
+        &format!("progress window {label} closed for reload"),
+    );
+    build_progress_window(app, manager, download_id, heartbeats)?;
+    Ok(())
+}
+
+/// Maybe auto-reload a window whose renderer is dead (§9.1b,
+/// Round 57): the heartbeat monitor and the `ProcessFailed`
+/// handler call this, never the banner. At most one auto-reload
+/// per 5 min per window (`AUTO_RELOAD_COOLDOWN_MS`), so a wedged
+/// runtime cannot cause a reload loop. Returns `Ok(true)` when a
+/// reload actually ran. Every decision is logged — a skipped
+/// reload is as diagnostic as a run one. Never restarts the
+/// process (auto-restart is a pending user decision, not
+/// implemented here).
+fn maybe_auto_reload(
+    app: &AppHandle,
+    manager: &Arc<DownloadManager>,
+    label: &str,
+    heartbeats: &Arc<StdMutex<HashMap<String, WebviewHeartbeat>>>,
+) -> Result<bool, String> {
+    let now = epoch_ms();
+    let log = startup_log_path_from_app(app);
+    let log = log.as_deref();
+    {
+        let Ok(mut map) = heartbeats.lock() else {
+            return Ok(false);
+        };
+        let hb = map
+            .entry(label.to_string())
+            .or_insert_with(|| WebviewHeartbeat::new(now));
+        if now.saturating_sub(hb.last_auto_reload_ms) < AUTO_RELOAD_COOLDOWN_MS {
+            log_startup(
+                log,
+                &format!("webview {label} auto-reload skipped (cooldown)"),
+            );
+            return Ok(false);
+        }
+        hb.last_auto_reload_ms = now;
+        // The lock is released before the reload runs: the reload
+        // itself registers a new heartbeat entry (progress windows).
+    }
+    log_startup(
+        log,
+        &format!("webview {label} auto-reloading (renderer dead)"),
+    );
+    match reload_webview_now(app, manager, label, heartbeats) {
+        Ok(()) => {
+            log_startup(log, &format!("webview {label} auto-reload done"));
+            Ok(true)
+        }
+        Err(e) => {
+            log_startup(log, &format!("webview {label} auto-reload FAILED: {e}"));
+            Err(e)
+        }
+    }
+}
+
+/// Register WebView2's `ProcessFailed` event on a window's webview
+/// (§9.1c, Round 57). wry 0.57 surfaces no renderer-failure event
+/// at all — a dead renderer is invisible to the app, which is how
+/// both windows sat blank white for half an hour in the r55 test
+/// with nothing in the log. The registration goes through wry's
+/// `WebViewExtWindows` trait (`Webview::with_webview` hands the
+/// closure the platform webview; `webview()` returns the raw
+/// `ICoreWebView2`) and the `webview2-com 0.39` crate
+/// (`ProcessFailedEventHandler::create` +
+/// `ICoreWebView2::add_ProcessFailed`), mirroring wry's own
+/// `PermissionRequested` registration in wry 0.57.2
+/// (webview2/mod.rs). On the event: log the failure kind and
+/// trigger the same native reload the heartbeat monitor uses
+/// (§9.1b, cooldown-gated — the unresponsive kind fires every
+/// few seconds while it lasts). The handler runs on a WebView2
+/// thread, so the recovery is best-effort and never panics. A
+/// `BrowserProcessExited` kind means the whole WebView is closed
+/// (Microsoft: the app must recreate it) — the log line names
+/// it, and the progress-window rebuild path does recreate it;
+/// the main window has no equivalent in-app recovery.
+/// Windows only; other platforms get the no-op below.
+#[cfg(target_os = "windows")]
+fn register_process_failed(
+    app: &AppHandle,
+    label: &str,
+    heartbeats: &Arc<StdMutex<HashMap<String, WebviewHeartbeat>>>,
+    manager: &Arc<DownloadManager>,
+) {
+    let Some(window) = app.get_webview_window(label) else {
+        return;
+    };
+    let label_owned = label.to_string();
+    let app_owned = app.clone();
+    let heartbeats_owned = Arc::clone(heartbeats);
+    let manager_owned = Arc::clone(manager);
+    // `with_webview` runs the closure on the main thread and hands
+    // it the platform webview. Best-effort throughout: a failed
+    // registration only means the heartbeat monitor is the sole
+    // detector — a window creation must never fail over it.
+    let _ = window.with_webview(move |platform_webview| {
+        use wry::WebViewExtWindows;
+        let core = platform_webview.webview();
+        let handler =
+            webview2_com::ProcessFailedEventHandler::create(Box::new(move |_sender, args| {
+                use webview2_com::Microsoft::Web::WebView2::Win32::{
+                    COREWEBVIEW2_PROCESS_FAILED_KIND,
+                    COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED,
+                    COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED,
+                    COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED,
+                    COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE,
+                };
+                let kind = args.as_ref().and_then(|a| {
+                    let mut k = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
+                    unsafe { a.ProcessFailedKind(&mut k) }.ok().map(|_| k)
+                });
+                let kind_str = match kind {
+                    Some(k) if k == COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED => {
+                        "browser process exited"
+                    }
+                    Some(k) if k == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED => {
+                        "render process exited"
+                    }
+                    Some(k)
+                        if k == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE =>
+                    {
+                        "render process unresponsive"
+                    }
+                    Some(k)
+                        if k == COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED =>
+                    {
+                        "frame render process exited"
+                    }
+                    _ => "unknown",
+                };
+                if let Some(log_path) = startup_log_path_from_app(&app_owned) {
+                    startup_log_line(
+                        &log_path,
+                        &format!("webview {label_owned} renderer process failed ({kind_str})"),
+                    );
+                }
+                let _ =
+                    maybe_auto_reload(&app_owned, &manager_owned, &label_owned, &heartbeats_owned);
+                Ok(())
+            }));
+        let mut token: i64 = 0;
+        unsafe {
+            let _ = core.add_ProcessFailed(&handler, &mut token);
+        }
+    });
+}
+
+/// No-op on non-Windows platforms: their webviews never had this
+/// failure mode in the live tests, and the crates above are
+/// Windows-only dependencies.
+#[cfg(not(target_os = "windows"))]
+fn register_process_failed(
+    _app: &AppHandle,
+    _label: &str,
+    _heartbeats: &Arc<StdMutex<HashMap<String, WebviewHeartbeat>>>,
+    _manager: &Arc<DownloadManager>,
+) {
+}
+
 /// Build one progress window for a download. The window loads the
-/// same frontend bundle with `#progress=<id>` in the URL, so
-/// `main.tsx` renders the progress view instead of the main
-/// window. Shared by `open_progress_window` and by
-/// `reload_webview_window` (which closes a dead window and builds
-/// a fresh one — §7.4, Round 56).
+/// same frontend bundle, so `main.tsx` renders the progress view
+/// instead of the main window. Shared by `open_progress_window`
+/// and by `reload_webview_window` (which closes a dead window and
+/// builds a fresh one — §7.4, Round 56).
 /// Round 56 (§7.1f): the log line now goes out BEFORE `build()`
 /// (the r55 log had no creation line at all, so a live test could
 /// not tell whether the call was even reached), and the window's
 /// resolved URL is logged after creation — a URL that is wrong
 /// here is a different bug from a webview that never paints.
+/// Round 57 (§9.3): A/B test — the window used to load
+/// `index.html#progress=<id>`, and the r55/r56 live tests both
+/// showed a blank white window with a correct title. The fragment
+/// is one suspect (a navigation the webview never finishes), so
+/// this build loads the PLAIN `index.html` and passes the id
+/// through an initialization script instead:
+/// `window.__PROGRESS_ID__` is set before any document script
+/// runs, and `main.tsx` reads it (falling back to the hash). The
+/// fragment path stays working as the fallback, so an old window
+/// or a missed script still renders the progress view.
 fn build_progress_window(
     app: &AppHandle,
-    manager: &DownloadManager,
+    manager: &Arc<DownloadManager>,
     download_id: &str,
+    heartbeats: &Arc<StdMutex<HashMap<String, WebviewHeartbeat>>>,
 ) -> Result<WebviewWindow, String> {
     let log = startup_log_path_from_app(app);
     let log = log.as_deref();
@@ -324,12 +553,14 @@ fn build_progress_window(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Download not found: {download_id}"))?;
     let label = progress_window_label(download_id);
-    let url = WebviewUrl::App(format!("index.html#progress={download_id}").into());
+    let url = WebviewUrl::App("index.html".into());
+    let init_script = format!("window.__PROGRESS_ID__ = {download_id:?};");
     log_startup(
         log,
-        &format!("creating progress window {label}: index.html#progress={download_id}"),
+        &format!("creating progress window {label}: index.html (id via init script)"),
     );
     match WebviewWindowBuilder::new(app, &label, url)
+        .initialization_script(init_script)
         .title(progress_window_title(
             row.downloaded_bytes as u64,
             row.size_bytes.map(|s| s as u64),
@@ -348,6 +579,17 @@ fn build_progress_window(
                 .map(|u| u.to_string())
                 .unwrap_or_else(|e| format!("url error: {e}"));
             log_startup(log, &format!("progress window {label} created: {url}"));
+            // Register the heartbeat entry at creation (§9.1b): a
+            // window whose JS never runs at all (renderer dead
+            // from the start) would otherwise never ping, so the
+            // monitor would have nothing to watch and never log
+            // "lost". The first ping updates the stamp; the entry
+            // here only starts the clock.
+            if let Ok(mut map) = heartbeats.lock() {
+                map.entry(label.clone())
+                    .or_insert_with(|| WebviewHeartbeat::new(epoch_ms()));
+            }
+            register_process_failed(app, &label, heartbeats, manager);
             Ok(window)
         }
         Err(e) => {
@@ -383,7 +625,7 @@ fn open_progress_window(
         log_startup(log, &format!("progress window {label} already open — focused"));
         return Ok(());
     }
-    build_progress_window(&app, &state.manager, &download_id)?;
+    build_progress_window(&app, &state.manager, &download_id, &state.webview_heartbeats)?;
     Ok(())
 }
 
@@ -439,25 +681,21 @@ fn webview_heartbeat(state: State<'_, AppState>, label: String) -> Result<(), St
             hb.last_seen_ms = now;
         }
         None => {
-            map.insert(
-                label,
-                WebviewHeartbeat {
-                    last_seen_ms: now,
-                    lost_logged: false,
-                    started_logged: false,
-                },
-            );
+            map.insert(label, WebviewHeartbeat::new(now));
         }
     }
     Ok(())
 }
 
-/// Reload a window's webview (§7.4, Round 56): the recovery
-/// action the "Backend not responding" banner offers. The main
-/// window is reloaded in place (`window.location.reload()` —
-/// recreating it would lose the app's window state); a progress
-/// window is closed and rebuilt from scratch, which also
-/// replaces a dead renderer process with a fresh one. A reload
+/// Reload a window's webview (§7.4, Round 56; §9.1a, Round 57):
+/// the recovery action the "Backend not responding" banner
+/// offers. The main window is reloaded in place with the NATIVE
+/// `WebviewWindow::reload()` — the old `eval("window.location.
+/// reload()")` needed live JS + live IPC, exactly what is dead
+/// when a reload is needed; a progress window is closed and
+/// rebuilt from scratch, which also replaces a dead renderer
+/// process with a fresh one. This is the user-initiated reload,
+/// so the 5 min auto-reload cooldown does NOT apply. A reload
 /// that fails (dead renderer) returns the error — the caller
 /// shows it instead of pretending the window recovered.
 #[tauri::command]
@@ -469,26 +707,7 @@ fn reload_webview_window(
     let log = startup_log_path_from_app(&app);
     let log = log.as_deref();
     log_startup(log, &format!("reload requested for webview {label}"));
-    if label == "main" {
-        let window = app
-            .get_webview_window("main")
-            .ok_or_else(|| "No main window open".to_string())?;
-        return window
-            .eval("window.location.reload()")
-            .map_err(|e| e.to_string());
-    }
-    let Some(download_id) = label.strip_prefix("progress-") else {
-        return Err(format!("Unknown window label: {label}"));
-    };
-    let Some(window) = app.get_webview_window(&label) else {
-        return Err(format!(
-            "No progress window open for download {download_id}"
-        ));
-    };
-    window.close().map_err(|e| e.to_string())?;
-    log_startup(log, &format!("progress window {label} closed for reload"));
-    build_progress_window(&app, &state.manager, download_id)?;
-    Ok(())
+    reload_webview_now(&app, &state.manager, &label, &state.webview_heartbeats)
 }
 
 /// Antivirus hook (S14): run the configured scanner against a
@@ -595,12 +814,21 @@ fn trace_command_exit(
 async fn list_downloads(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<DownloadRow>, String> {
     let n = LIST_DOWNLOADS_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
     let started = std::time::Instant::now();
+    let log = startup_log_path_from_app(&app);
+    // Round 57 (§9.2e): log the ENTRY as well as the exit (same
+    // sampling) — a hung call leaves an entry-without-exit trace,
+    // which is the only way to tell a wedged invoke from a poll
+    // that simply never ran. The entry line carries the call
+    // number so it pairs with its exit line.
+    if n % 100 == 0 {
+        log_startup(log.as_deref(), &format!("cmd list_downloads #{n} entry"));
+    }
     let result = state.manager.list_downloads().map_err(|e| e.to_string());
     // Sampled (§7.1e): every 100th call, or any call slower than
     // 1 s — a wedged invoke shows up as a missing sampled exit.
     if n % 100 == 0 || started.elapsed() > Duration::from_secs(1) {
         trace_command_exit(
-            startup_log_path_from_app(&app).as_deref(),
+            log.as_deref(),
             "list_downloads",
             n,
             started,
@@ -1176,6 +1404,31 @@ pub fn run() {
             &format!("webview version: ERROR {e:?}"),
         ),
     }
+    // Round 57 (§9.2c): give the Tauri runtime 4 workers instead
+    // of the default 2 on this 2-vCPU VPS. MITIGATION ONLY — it
+    // raises the number of simultaneous blocking calls needed to
+    // wedge the runtime from 2 to 4; it is not immunity, and the
+    // clipboard read (§9.2a) and the checkpoint calls (§9.2b) are
+    // moved off the workers anyway. Installed before the Builder
+    // creates the runtime. `set` keeps only the handle, so the
+    // Runtime itself must be leaked — dropping it would shut the
+    // runtime down (see `tauri::async_runtime::set`'s docs).
+    // Leaking is the correct lifetime here: it runs until the
+    // process exits, like the default runtime Tauri builds.
+    match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => {
+            tauri::async_runtime::set(rt.handle().clone());
+            std::mem::forget(rt);
+        }
+        Err(e) => startup_log_line(
+            &startup_log_path_early(),
+            &format!("custom runtime build failed, using default: {e}"),
+        ),
+    }
     // Round 56 (§7.1b): build the app first, then run it, so a
     // clean shutdown logs its own line. `app.run()` returns only
     // when the app exits — the line after it is the shutdown
@@ -1301,8 +1554,8 @@ pub fn run() {
             let clipboard_manager = Arc::clone(&manager);
             let clipboard_log = startup_log_path_from_app(app.handle());
             tauri::async_runtime::spawn(async move {
-                let mut clipboard = match arboard::Clipboard::new() {
-                    Ok(c) => c,
+                let clipboard = match arboard::Clipboard::new() {
+                    Ok(c) => Arc::new(StdMutex::new(c)),
                     Err(e) => {
                         log_startup(
                             clipboard_log.as_deref(),
@@ -1312,9 +1565,36 @@ pub fn run() {
                     }
                 };
                 let mut interval = tokio::time::interval(Duration::from_secs(1));
+                // A slow clipboard must not burst a backlog of
+                // reads when it recovers — one delayed tick, then
+                // the next second.
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {
                     interval.tick().await;
-                    let Ok(text) = clipboard.get_text() else {
+                    // Round 57 (§9.2a): the clipboard read runs
+                    // on a blocking thread, NOT on a tokio worker.
+                    // `arboard::Clipboard::get_text()` is a
+                    // synchronous call that crosses the RDP
+                    // clipboard channel on the VPS — a slow or
+                    // stuck channel used to occupy one of the
+                    // runtime's 2 workers every second, and two
+                    // simultaneous blocking calls freeze the whole
+                    // runtime (commands, timers, watchdogs). A
+                    // blocking thread can stall without taking a
+                    // worker with it; the 1 s tick just skips
+                    // that round. `try_lock`: a previous read
+                    // still stuck in the channel means this tick
+                    // is skipped instead of queuing behind it.
+                    let clipboard_clone = Arc::clone(&clipboard);
+                    let text = tokio::task::spawn_blocking(move || {
+                        let Ok(mut clip) = clipboard_clone.try_lock() else {
+                            return None;
+                        };
+                        clip.get_text().ok()
+                    })
+                    .await
+                    .unwrap_or(None);
+                    let Some(text) = text else {
                         continue;
                     };
                     if let Ok(Some(offer)) = clipboard_manager.check_clipboard_offer(&text) {
@@ -1339,40 +1619,71 @@ pub fn run() {
                 Arc::new(StdMutex::new(HashMap::new()));
             if let Some(monitor_log) = startup_log_path_from_app(app.handle()) {
                 let monitor_heartbeats = Arc::clone(&webview_heartbeats);
+                let monitor_app = app.handle().clone();
+                let monitor_manager = Arc::clone(&manager);
                 std::thread::spawn(move || loop {
                     std::thread::sleep(Duration::from_secs(5));
                     let now = epoch_ms();
-                    let Ok(mut map) = monitor_heartbeats.lock() else {
-                        continue;
-                    };
-                    for (label, hb) in map.iter_mut() {
-                        if !hb.started_logged {
-                            startup_log_line(
-                                &monitor_log,
-                                &format!("webview {label} heartbeat started"),
-                            );
-                            hb.started_logged = true;
+                    // Round 57 (§9.1b): windows whose heartbeat
+                    // just went lost this check — collected under
+                    // the lock, reloaded after it is released.
+                    // `maybe_auto_reload` takes the same lock for
+                    // its cooldown, so calling it while holding
+                    // the lock would deadlock. One auto-reload per
+                    // outage (the `lost_logged` flag), at most one
+                    // per 5 min per window (the cooldown inside
+                    // `maybe_auto_reload`).
+                    let mut to_reload: Vec<String> = Vec::new();
+                    if let Ok(mut map) = monitor_heartbeats.lock() {
+                        for (label, hb) in map.iter_mut() {
+                            if !hb.started_logged {
+                                startup_log_line(
+                                    &monitor_log,
+                                    &format!("webview {label} heartbeat started"),
+                                );
+                                hb.started_logged = true;
+                            }
+                            let silent_ms = now.saturating_sub(hb.last_seen_ms);
+                            if silent_ms > 30_000 && !hb.lost_logged {
+                                startup_log_line(
+                                    &monitor_log,
+                                    &format!(
+                                        "webview {label} heartbeat lost (last seen {}s ago)",
+                                        silent_ms / 1000
+                                    ),
+                                );
+                                hb.lost_logged = true;
+                                to_reload.push(label.clone());
+                            } else if silent_ms <= 30_000 && hb.lost_logged {
+                                startup_log_line(
+                                    &monitor_log,
+                                    &format!("webview {label} heartbeat resumed"),
+                                );
+                                hb.lost_logged = false;
+                            }
                         }
-                        let silent_ms = now.saturating_sub(hb.last_seen_ms);
-                        if silent_ms > 30_000 && !hb.lost_logged {
-                            startup_log_line(
-                                &monitor_log,
-                                &format!(
-                                    "webview {label} heartbeat lost (last seen {}s ago)",
-                                    silent_ms / 1000
-                                ),
-                            );
-                            hb.lost_logged = true;
-                        } else if silent_ms <= 30_000 && hb.lost_logged {
-                            startup_log_line(
-                                &monitor_log,
-                                &format!("webview {label} heartbeat resumed"),
-                            );
-                            hb.lost_logged = false;
-                        }
+                    }
+                    for label in to_reload {
+                        let _ = maybe_auto_reload(
+                            &monitor_app,
+                            &monitor_manager,
+                            &label,
+                            &monitor_heartbeats,
+                        );
                     }
                 });
             }
+            // Round 57 (§9.1b/c): the main window gets the same
+            // treatment as a progress window — a heartbeat entry
+            // at startup (so a main window whose JS never runs is
+            // watched from the start, not only after its first
+            // ping) and a `ProcessFailed` registration. `manager`
+            // is still owned here (it moves into AppState below).
+            if let Ok(mut map) = webview_heartbeats.lock() {
+                map.entry("main".to_string())
+                    .or_insert_with(|| WebviewHeartbeat::new(epoch_ms()));
+            }
+            register_process_failed(app.handle(), "main", &webview_heartbeats, &manager);
             app.manage(AppState {
                 manager,
                 webview_heartbeats,
