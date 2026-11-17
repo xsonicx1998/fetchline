@@ -1,25 +1,16 @@
 #!/usr/bin/env python3
 """Regenerate Sonic Manager's icon files from the project's own artwork.
 
-Source (Round 45): ``app/src-tauri/icons/logo.svg`` — the user's
-asset-pack logo: a purple-gradient rounded square with a black
-lightning bolt (cyan outline) plus "Sonic Manager" text. The SVG is
-text, so it lives in the repository like any other file. The icon
-uses only the square mark (the left 96x96 of the 420x96 viewBox);
-the text is left out — it would be unreadable at icon sizes.
+Source (Round 62): ``app/src-tauri/icons/logo.png`` — the user's
+chosen logo (Sonic quills + download arrow in the blue-to-pink
+theme gradient, 1024x1024 square, from the image he sent
+2026-11-17). It is used as-is: the whole square is the mark.
 
-The mark is rendered with Pillow only (no SVG rasterizer, no numpy):
-the diagonal gradient is drawn as anti-diagonal lines of constant
-x+y, the rounded square is a mask, and the bolt is the SVG path's
-polygon (filled dark, cyan outline drawn as thick joined lines).
-THIS mark only — if the logo SVG ever changes shape, this function
-must change with it. Verified by eye against the pack's reference
-image when it was written.
-
-Fallback: if ``logo.svg`` is missing, the old ``logo.jpg`` (the
-2026-11-15 neon red/blue speed mark) is used as before. If neither
-exists, this script fails loudly instead of silently producing a
-wrong icon.
+Fallback: if ``logo.png`` is missing, the old ``logo.svg`` mark
+(the purple-gradient rounded square with a black lightning bolt)
+is rendered as before (Round 45); if that is missing too, the old
+``logo.jpg`` is used. If none exists, this script fails loudly
+instead of silently producing a wrong icon.
 
 Why this script exists: the PNG/ICO icon files are binary, so they are not
 stored in the repository. Run this once after cloning (or let CI run it)
@@ -50,6 +41,7 @@ except ImportError:
     sys.exit(1)
 
 ROOT = Path(__file__).resolve().parent.parent
+LOGO_PNG = ROOT / "app" / "src-tauri" / "icons" / "logo.png"
 LOGO_SVG = ROOT / "app" / "src-tauri" / "icons" / "logo.svg"
 LOGO_JPG = ROOT / "app" / "src-tauri" / "icons" / "logo.jpg"
 
@@ -122,7 +114,17 @@ def main() -> None:
     tauri_dir.mkdir(parents=True, exist_ok=True)
     ext_dir.mkdir(parents=True, exist_ok=True)
 
-    if LOGO_SVG.is_file():
+    if LOGO_PNG.is_file():
+        # Round 62: the user's chosen logo is the source — a
+        # 1024x1024 square, used as-is (resized only if it is not
+        # already the target size).
+        logo = Image.open(LOGO_PNG).convert("RGBA")
+        if logo.size != (SIZE, SIZE):
+            print(f"warning: logo is {logo.size}, resizing to {SIZE}x{SIZE}", file=sys.stderr)
+            logo = logo.resize((SIZE, SIZE), Image.LANCZOS)
+        source = logo
+        print(f"used chosen logo {LOGO_PNG}")
+    elif LOGO_SVG.is_file():
         source = render_mark(SIZE)
         print(f"rendered mark from {LOGO_SVG}")
     elif LOGO_JPG.is_file():
@@ -133,7 +135,7 @@ def main() -> None:
         source = logo.resize((SIZE, SIZE), Image.LANCZOS).convert("RGBA")
     else:
         print(
-            f"logo source missing: neither {LOGO_SVG} nor {LOGO_JPG} exists",
+            f"logo source missing: none of {LOGO_PNG}, {LOGO_SVG}, {LOGO_JPG} exists",
             file=sys.stderr,
         )
         sys.exit(1)

@@ -4,12 +4,16 @@ interface ProgressBarProps {
   status?: 'downloading' | 'complete' | 'error' | 'paused'
   /** Thin inline bar (table) or the taller dialog bar. */
   size?: 'thin' | 'tall'
+  /** Round 62: the Sonic gradient fill (purple → pink) instead
+   *  of the solid accent — the progress window's big bar and the
+   *  table's inline bars. */
+  gradient?: boolean
   label?: string
 }
 
 /** Progress bar primitive (components.md). Never colour-only: the
  *  percentage is always printed as text next to it. */
-export function ProgressBar({ percent, status = 'downloading', size = 'thin', label }: ProgressBarProps) {
+export function ProgressBar({ percent, status = 'downloading', size = 'thin', gradient = false, label }: ProgressBarProps) {
   const fill =
     status === 'complete'
       ? 'bg-success'
@@ -17,7 +21,9 @@ export function ProgressBar({ percent, status = 'downloading', size = 'thin', la
         ? 'bg-danger'
         : status === 'paused'
           ? 'bg-text-faint'
-          : 'bg-accent'
+          : gradient
+            ? 'bg-[linear-gradient(90deg,#8b20ff,#f02dcd)]'
+            : 'bg-accent'
   return (
     <div className="flex items-center gap-2">
       <div

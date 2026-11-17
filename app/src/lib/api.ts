@@ -9,6 +9,7 @@ import type {
   CategoryRow,
   ClipboardOffer,
   DetectedVideo,
+  DownloadCompletionOptions,
   DownloadRow,
   GrabberProjectRow,
   HistoryRow,
@@ -153,10 +154,41 @@ export async function openProgressWindow(id: string): Promise<void> {
   return invoke('open_progress_window', { downloadId: id })
 }
 
-/** Resize a progress window between its full view (speed graph,
- *  parts, scan details) and its compact view (S03). */
-export async function setProgressWindowCompact(id: string, compact: boolean): Promise<void> {
-  return invoke('set_progress_window_compact', { downloadId: id, compact })
+/** Round 62 — per-download completion options (progress window
+ *  Options tab): "Close program after download" and "Shut down
+ *  computer after download". Stored in memory on the Rust side;
+ *  the window acts on them when its download completes. */
+export async function setDownloadCompletionOptions(
+  id: string,
+  options: DownloadCompletionOptions,
+): Promise<void> {
+  return invoke('set_download_completion_options', {
+    downloadId: id,
+    closeAfter: options.close_after,
+    shutdownAfter: options.shutdown_after,
+  })
+}
+
+export async function getDownloadCompletionOptions(id: string): Promise<DownloadCompletionOptions> {
+  return invoke<DownloadCompletionOptions>('get_download_completion_options', { downloadId: id })
+}
+
+/** Round 62 — exit the whole app ("Close program after
+ *  download"). */
+export async function exitApp(): Promise<void> {
+  return invoke('exit_app')
+}
+
+/** Round 62 — shut the PC down now ("Shut down computer after
+ *  download", after the window's 30 s countdown). Windows only. */
+export async function shutdownComputer(): Promise<void> {
+  return invoke('shutdown_computer')
+}
+
+/** Round 62 — free bytes on the volume holding `path` (main
+ *  window status bar). Windows only; rejects elsewhere. */
+export async function getFreeDiskSpace(path: string): Promise<number> {
+  return invoke<number>('get_free_disk_space', { path })
 }
 
 /** The latest progress event for a download (S03) — the progress

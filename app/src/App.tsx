@@ -9,6 +9,7 @@ import {
   dismissClipboardOffer,
   executeQueueAction,
   getCategories,
+  getFreeDiskSpace,
   getPendingAction,
   getQueueFiles,
   getQuotaStatus,
@@ -29,9 +30,10 @@ import {
   startQueue,
   stopQueue,
   syncQueueNow,
+  updateSettings,
   withTimeout,
 } from './lib/api'
-import { formatSpeed } from './lib/format'
+import { formatBytes, formatSpeed } from './lib/format'
 import type { CategoryRow, ClipboardOffer, DownloadRow, GrabberProjectRow, PendingAction, QueueRow, QuotaStatus, Settings, UpdateCheckResult } from './lib/types'
 import { AddCategoryDialog } from './components/AddCategoryDialog'
 import { AddDownloadDialog } from './components/AddDownloadDialog'
@@ -43,22 +45,29 @@ import { ClipboardOfferDialog } from './components/ClipboardOfferDialog'
 import { DownloadAllDialog } from './components/DownloadAllDialog'
 import { DownloadTable } from './components/DownloadTable'
 import { HistoryView } from './components/HistoryView'
+import { MenuBar, type MenuBarActions } from './components/MenuBar'
 import { QueueActionDialog } from './components/QueueActionDialog'
 import { RefreshAddressDialog } from './components/RefreshAddressDialog'
 import { SchedulerDialog } from './components/SchedulerDialog'
 import { SettingsDialog } from './components/SettingsDialog'
 import { SiteGrabberDialog } from './components/SiteGrabberDialog'
+import { TitleBar } from './components/TitleBar'
 import { Toolbar } from './components/Toolbar'
+import { ToolsStrip } from './components/ToolsStrip'
 import { UpdateDialog } from './components/UpdateDialog'
 import { VideoGrabberDialog } from './components/VideoGrabberDialog'
 
-/** S01 — main window (Round 45): the user's asset pack — big-icon
- *  toolbar, categories tree on the left, file table. No menu bar:
- *  the reference has none (title bar only, which the native
- *  Windows title bar provides); its actions live on the toolbar,
- *  in the Grabber dropdown, on the table's right-click menu and in
- *  Settings. Dark only — the light theme was deleted at the user's
- *  instruction.
+/** S01 — main window (Round 62): the approved clean design. The
+ *  window is frameless (`decorations: false` in tauri.conf.json)
+ *  with its own dark title bar (new logo + "Sonic Manager"),
+ *  then the menu bar (File, Tasks, View, Downloads, Options,
+ *  Help), the slim toolbar (gradient Add URL, Resume, Pause,
+ *  Stop, Delete, search), the TOOLS strip (Queue, Scheduler,
+ *  History, Video Grabber, Site Grabber, Refresh Address,
+ *  Clipboard), the categories tree on the left and the file
+ *  table. Dark only — the light theme was deleted at the user's
+ *  instruction. No settings gear anywhere: Settings is reached
+ *  from the Options menu.
  *  The list is refreshed once a second and that refresh is the
  *  live path for the table — the `download-progress` listener that
  *  used to patch rows between polls is gone (BUG-044: it never
@@ -150,6 +159,13 @@ export default function App() {
   const [updateCheckError, setUpdateCheckError] = useState<string | null>(null)
   const [checkingUpdate, setCheckingUpdate] = useState(false)
   const [showUpdateDialog, setShowUpdateDialog] = useState(false)
+  /** Round 62 — the toolbar search box filters the table by
+   *  filename (case-insensitive substring). */
+  const [searchQuery, setSearchQuery] = useState('')
+  /** Round 62 — free bytes on the download drive, for the
+   *  status bar ("C: 21.2 GB free"). Null outside the desktop
+   *  app / off Windows, where the command rejects. */
+  const [freeSpace, setFreeSpace] = useState<{ drive: string; bytes: number } | null>(null)
 
   const refreshSettings = useCallback(async () => {
     try {
@@ -359,6 +375,30 @@ export default function App() {
     document.documentElement.setAttribute('data-theme', 'dark')
   }, [])
 
+  /** Round 62 — status-bar free space: the drive of the default
+   *  download folder, polled every 30 s (and once when the
+   *  settings load). Off Windows the command rejects and the
+   *  figure stays hidden. */
+  useEffect(() => {
+    const folder = settings?.default_download_folder || 'C:\\'
+    const drive = /^([A-Za-z]:)/.exec(folder)?.[1] ?? 'C:'
+    let stopped = false
+    async function pollFreeSpace() {
+      try {
+        const bytes = await getFreeDiskSpace(folder)
+        if (!stopped) setFreeSpace({ drive, bytes })
+      } catch {
+        if (!stopped) setFreeSpace(null)
+      }
+    }
+    void pollFreeSpace()
+    const timer = window.setInterval(() => void pollFreeSpace(), 30_000)
+    return () => {
+      stopped = true
+      window.clearInterval(timer)
+    }
+  }, [settings?.default_download_folder])
+
   /** Manual update check (Settings > Check for updates). Runs even
    *  when the weekly setting is off; a failure shows the error
    *  in the dialog instead of a silent nothing. */
@@ -373,6 +413,22 @@ export default function App() {
       setUpdateCheckError(e instanceof Error ? e.message : String(e))
     } finally {
       setCheckingUpdate(false)
+    }
+  }
+
+  /** Round 62 — the TOOLS strip's Clipboard toggle: flip the
+   *  monitoring setting and refresh, so the strip's ON/OFF
+   *  indicator follows the real setting. */
+  async function toggleClipboardMonitoring() {
+    if (!settings) return
+    try {
+      const updated = await updateSettings({
+        ...settings,
+        clipboard_monitoring: !settings.clipboard_monitoring,
+      })
+      setSettings(updated)
+    } catch (e) {
+      actionError(e)
     }
   }
 
@@ -391,13 +447,17 @@ export default function App() {
     [downloads, selectedId],
   )
   const visible = useMemo(() => {
-    if (selectedQueue !== null) return queueFiles
-    if (selectedFilter === 'unfinished') return downloads.filter((d) => d.status !== 'complete')
-    if (selectedFilter === 'finished') return downloads.filter((d) => d.status === 'complete')
-    if (selectedFilter === 'grabber') return downloads.filter((d) => d.grabber_project_id === selectedGrabberId)
-    if (selectedCategory === null) return downloads
-    return downloads.filter((d) => d.category_id === selectedCategory)
-  }, [downloads, selectedCategory, selectedQueue, selectedFilter, selectedGrabberId, queueFiles])
+    let rows: DownloadRow[]
+    if (selectedQueue !== null) rows = queueFiles
+    else if (selectedFilter === 'unfinished') rows = downloads.filter((d) => d.status !== 'complete')
+    else if (selectedFilter === 'finished') rows = downloads.filter((d) => d.status === 'complete')
+    else if (selectedFilter === 'grabber') rows = downloads.filter((d) => d.grabber_project_id === selectedGrabberId)
+    else if (selectedCategory === null) rows = downloads
+    else rows = downloads.filter((d) => d.category_id === selectedCategory)
+    const query = searchQuery.trim().toLowerCase()
+    if (query) rows = rows.filter((d) => d.filename.toLowerCase().includes(query))
+    return rows
+  }, [downloads, selectedCategory, selectedQueue, selectedFilter, selectedGrabberId, queueFiles, searchQuery])
   /** The queue Start/Stop/Sync act on: the selected queue, else
    *  the main queue. */
   const activeQueueRow = useMemo(
@@ -547,27 +607,60 @@ export default function App() {
     add: () => setShowAdd(true),
     resume: () => selected && void run(() => resumeDownload(selected.id)),
     stop: () => selected && void run(() => pauseDownload(selected.id)),
+    deleteSelected: () => selected && requestRemove(selected),
+  }
+
+  const menuActions: MenuBarActions = {
+    add: () => setShowAdd(true),
+    downloadAll: () => setShowDownloadAll(true),
+    batch: () => setShowBatch(true),
+    resume: () => selected && void run(() => resumeDownload(selected.id)),
+    stop: () => selected && void run(() => pauseDownload(selected.id)),
     stopAll: () => void handleStopAll(),
     deleteSelected: () => selected && requestRemove(selected),
     deleteCompleted: () => void handleDeleteCompleted(),
-    settings: () => setShowSettings(true),
-    scheduler: () => openScheduler(),
+    showHistory: () => selectFilter('history'),
+    refresh: () => void refreshAll(),
     startQueue: () => activeQueueRow && void run(() => startQueue(activeQueueRow.id)),
     stopQueue: () => activeQueueRow && void run(() => stopQueue(activeQueueRow.id)),
+    scheduler: () => openScheduler(),
     videoGrabber: () => setShowVideoGrabber(true),
     siteGrabber: () => setShowSiteGrabber(true),
-    downloadAll: () => setShowDownloadAll(true),
-    batch: () => setShowBatch(true),
+    settings: () => setShowSettings(true),
+    checkUpdates: () => void runManualUpdateCheck(),
   }
 
   return (
     <div className="flex h-full flex-col text-text">
-      <Toolbar
-        actions={toolbarActions}
+      <TitleBar title="Sonic Manager" />
+      <MenuBar
+        actions={menuActions}
         selected={selected}
         queue={activeQueueRow}
         hasDownloading={runningCount > 0}
         hasComplete={hasComplete}
+      />
+      <Toolbar
+        actions={toolbarActions}
+        selected={selected}
+        searchQuery={searchQuery}
+        onSearchChange={setSearchQuery}
+      />
+      <ToolsStrip
+        onQueue={() => {
+          if (activeQueueRow) selectQueue(activeQueueRow.id)
+          else setShowAddQueue(true)
+        }}
+        onScheduler={() => openScheduler()}
+        onHistory={() => selectFilter('history')}
+        onVideoGrabber={() => setShowVideoGrabber(true)}
+        onSiteGrabber={() => setShowSiteGrabber(true)}
+        onRefreshAddress={() => selected && setRefreshTarget(selected)}
+        canRefreshAddress={
+          selected !== null && (selected.status === 'paused' || selected.status === 'error')
+        }
+        clipboardOn={settings?.clipboard_monitoring ?? false}
+        onToggleClipboard={() => void toggleClipboardMonitoring()}
       />
 
       {(() => {
@@ -658,7 +751,6 @@ export default function App() {
           ) : (
             <DownloadTable
               downloads={visible}
-              queues={queues}
               categories={categories}
               selectedId={selectedId}
               onSelect={setSelectedId}
@@ -674,11 +766,10 @@ export default function App() {
 
       <footer className="flex h-7 shrink-0 items-center justify-between border-t border-border bg-surface px-4 text-xs text-text-muted">
         <span>
-          {downloads.length} download{downloads.length === 1 ? '' : 's'} ·{' '}
+          {runningCount} downloading · {runningCount > 0 ? formatSpeed(totalSpeed) : '—'} ·{' '}
           {downloads.filter((d) => d.status === 'complete').length} finished
         </span>
         <span className="flex items-center gap-3">
-          <span>{runningCount > 0 ? `Total speed ${formatSpeed(totalSpeed)}` : 'Ready'}</span>
           {quotaStatus?.enabled && quotaStatus.limit_mb != null ? (
             <button
               type="button"
@@ -691,14 +782,11 @@ export default function App() {
                 : `Quota ${(quotaStatus.used_bytes / 1_048_576).toFixed(1)}/${quotaStatus.limit_mb} MB`}
             </button>
           ) : null}
-          <button
-            type="button"
-            onClick={() => setShowSettings(true)}
-            title="Open settings"
-            className="rounded-md px-1 py-0.5 hover:bg-surface-2 hover:text-text"
-          >
-            {settings?.speed_limit_kbps ? `Limit ${settings.speed_limit_kbps} KB/s` : 'No speed limit'}
-          </button>
+          {freeSpace ? (
+            <span>
+              {freeSpace.drive} {formatBytes(freeSpace.bytes)} free
+            </span>
+          ) : null}
         </span>
       </footer>
 

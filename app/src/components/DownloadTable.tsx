@@ -1,13 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
-import { formatBytes, formatDateTime, formatEta, formatSpeed, progressPercent } from '../lib/format'
-import type { CategoryRow, DownloadRow, QueueRow } from '../lib/types'
+import { formatBytes, formatEta, formatSpeed, progressPercent } from '../lib/format'
+import type { CategoryRow, DownloadRow } from '../lib/types'
 import { PackIcon } from './PackIcon'
-import { ProgressRing } from './ProgressRing'
+import { ProgressBar } from './ProgressBar'
 import { StatusBadge } from './StatusBadge'
 
 interface DownloadTableProps {
   downloads: DownloadRow[]
-  queues: QueueRow[]
   categories: CategoryRow[]
   selectedId: string | null
   onSelect: (id: string) => void
@@ -35,19 +34,19 @@ function descriptionFor(d: DownloadRow): string {
 }
 
 /** S01 — the main download table (components.md: DownloadTable),
- *  IDM's columns: File Name, Q (queue), Size, Status, Time left,
- *  Transfer rate, Last Try, Description. The progress ring lives
- *  in the File Name cell and the percent shows next to the status
- *  while a download runs, so nothing the old table showed is lost
- *  (the old Category column is one click away in the sidebar
- *  filter; the old progress bar is the ring). Empty, filled,
- *  downloading, paused, complete and error states. Rows are
- *  draggable onto a category or a queue in the sidebar.
- *  Right-click opens the row menu (Round 45): Open folder and
- *  Move to category used to live in the menu bar's File and
- *  Downloads menus — the menu bar is gone, so they live here. */
-export function DownloadTable({ downloads, queues, categories, selectedId, onSelect, onOpenProgress, onAdd, onOpenFolder, onMoveToCategory, onRefreshAddress }: DownloadTableProps) {
-  const queueName = (id: string | null) => (id === null ? '—' : (queues.find((q) => q.id === id)?.name ?? '—'))
+ *  Round 62 columns: File Name, Size, Status, Transfer rate,
+ *  Time left. A downloading / paused row shows its gradient
+ *  progress bar inline under the filename and its percent next
+ *  to the status pill, so the live state is in the row itself.
+ *  The old Q / Last Try / Description columns are gone (the
+ *  rejected IDM-heavy variant had them); the description text
+ *  — error message, quota pause, scan threat — survives as the
+ *  status cell's tooltip. Empty, filled, downloading, paused,
+ *  complete and error states. Rows are draggable onto a category
+ *  or a queue in the sidebar. Right-click opens the row menu:
+ *  Open progress window, Open folder, Refresh download address,
+ *  Move to category. */
+export function DownloadTable({ downloads, categories, selectedId, onSelect, onOpenProgress, onAdd, onOpenFolder, onMoveToCategory, onRefreshAddress }: DownloadTableProps) {
   const [menu, setMenu] = useState<{ x: number; y: number; download: DownloadRow } | null>(null)
   const menuRef = useRef<HTMLDivElement | null>(null)
 
@@ -103,13 +102,10 @@ export function DownloadTable({ downloads, queues, categories, selectedId, onSel
         <thead className="sticky top-0 bg-surface">
           <tr className="border-b border-border text-left text-xs font-semibold uppercase text-text-muted">
             <th scope="col" className="px-3 py-2">File Name</th>
-            <th scope="col" className="px-3 py-2" title="Queue">Q</th>
             <th scope="col" className="px-3 py-2">Size</th>
             <th scope="col" className="px-3 py-2">Status</th>
-            <th scope="col" className="px-3 py-2">Time left</th>
             <th scope="col" className="px-3 py-2">Transfer rate</th>
-            <th scope="col" className="px-3 py-2">Last Try</th>
-            <th scope="col" className="px-3 py-2">Description</th>
+            <th scope="col" className="px-3 py-2">Time left</th>
           </tr>
         </thead>
         <tbody>
@@ -117,6 +113,7 @@ export function DownloadTable({ downloads, queues, categories, selectedId, onSel
             const percent = progressPercent(d.downloaded_bytes, d.size_bytes)
             const selected = d.id === selectedId
             const description = descriptionFor(d)
+            const showBar = percent !== null && (d.status === 'downloading' || d.status === 'paused')
             return (
               <tr
                 key={d.id}
@@ -136,27 +133,27 @@ export function DownloadTable({ downloads, queues, categories, selectedId, onSel
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') onOpenProgress(d.id)
                 }}
-                className={`h-10 cursor-pointer border-b border-border ${selected ? 'bg-accent-soft' : 'hover:bg-surface'}`}
+                className={`cursor-pointer border-b border-border ${selected ? 'bg-accent-soft' : 'hover:bg-surface'}`}
                 aria-selected={selected}
               >
                 <td className="max-w-0 px-3 py-2" title={d.filename}>
-                  <span className="flex items-center gap-2">
-                    <ProgressRing
-                      percent={percent}
-                      status={d.status === 'complete' ? 'complete' : d.status === 'error' ? 'error' : d.status === 'paused' ? 'paused' : 'downloading'}
-                      size={24}
-                      label={`Progress of ${d.filename}`}
-                    />
-                    <span className="min-w-0 flex-1 truncate font-medium">{d.filename}</span>
-                  </span>
-                </td>
-                <td className="whitespace-nowrap px-3 py-2 text-sm text-text-muted" title={queueName(d.queue_id)}>
-                  {queueName(d.queue_id)}
+                  <span className="block truncate font-medium">{d.filename}</span>
+                  {showBar ? (
+                    <span className="mt-1 block">
+                      <ProgressBar
+                        percent={percent}
+                        gradient
+                        size="thin"
+                        status={d.status === 'paused' ? 'paused' : 'downloading'}
+                        label={`Progress of ${d.filename}`}
+                      />
+                    </span>
+                  ) : null}
                 </td>
                 <td className="whitespace-nowrap px-3 py-2 font-mono text-sm text-text-muted">
                   {formatBytes(d.size_bytes)}
                 </td>
-                <td className="whitespace-nowrap px-3 py-2">
+                <td className="whitespace-nowrap px-3 py-2" title={description || undefined}>
                   <span className="flex items-center gap-1.5">
                     <StatusBadge status={d.status} />
                     {percent !== null && (d.status === 'downloading' || d.status === 'paused') ? (
@@ -165,16 +162,10 @@ export function DownloadTable({ downloads, queues, categories, selectedId, onSel
                   </span>
                 </td>
                 <td className="whitespace-nowrap px-3 py-2 font-mono text-sm text-text-muted">
-                  {d.status === 'downloading' ? formatEta(d.eta_seconds) : '—'}
-                </td>
-                <td className="whitespace-nowrap px-3 py-2 font-mono text-sm text-text-muted">
                   {d.status === 'downloading' ? formatSpeed(d.speed_bps) : '—'}
                 </td>
                 <td className="whitespace-nowrap px-3 py-2 font-mono text-sm text-text-muted">
-                  {formatDateTime(d.updated_at)}
-                </td>
-                <td className="max-w-0 truncate px-3 py-2 text-sm text-text-muted" title={description || undefined}>
-                  {description}
+                  {d.status === 'downloading' ? formatEta(d.eta_seconds) : '—'}
                 </td>
               </tr>
             )

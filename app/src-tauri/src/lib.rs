@@ -21,10 +21,7 @@ use fetchline_engine::{
     SiteLoginInput, SiteLoginRow, SoundSetting, SoundSettingInput, Store, SyncResult,
     UpdateCheckResult,
 };
-use tauri::{
-    AppHandle, Emitter, LogicalSize, Manager, Size, State, WebviewUrl, WebviewWindow,
-    WebviewWindowBuilder,
-};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 /// Shared state: one manager for the whole app lifetime.
 pub struct AppState {
@@ -36,6 +33,22 @@ pub struct AppState {
     /// pings stop for 30 s is logged as lost — the renderer may
     /// be dead even though the window still exists.
     pub webview_heartbeats: Arc<StdMutex<HashMap<String, WebviewHeartbeat>>>,
+    /// Per-download completion options (Round 62): set from the
+    /// progress window's Options tab ("Close program after
+    /// download", "Shut down computer after download"). In
+    /// memory only — they apply to the current run of the
+    /// download; an app restart forgets them, which is the
+    /// honest scope (the options are chosen while the download
+    /// runs, and they fire when it completes).
+    pub download_completion: Arc<StdMutex<HashMap<String, DownloadCompletionOptions>>>,
+}
+
+/// Per-download completion options (Round 62) — see
+/// `AppState::download_completion`.
+#[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+pub struct DownloadCompletionOptions {
+    pub close_after: bool,
+    pub shutdown_after: bool,
 }
 
 /// One window's JS heartbeat state (§7.4, Round 56).
@@ -736,8 +749,16 @@ fn build_progress_window(
             row.size_bytes.map(|s| s as u64),
             &row.filename,
         ))
-        .inner_size(600.0, 680.0)
-        .min_inner_size(520.0, 320.0)
+        // Round 62: the redesigned window is frameless (the
+        // frontend draws its own title bar, same as the main
+        // window) and square like IDM — landscape, wider than
+        // tall, ~660x480. Resize-from-edges and rounded corners
+        // are verified on the VPS, not here (no Windows on this
+        // VM); decorations(false) + a draggable title bar is the
+        // Tauri 2 way to get them.
+        .decorations(false)
+        .inner_size(660.0, 480.0)
+        .min_inner_size(560.0, 380.0)
         .resizable(true)
         .center()
         .devtools(true);
@@ -831,23 +852,125 @@ async fn open_progress_window(
     Ok(())
 }
 
-/// Resize a progress window between its full view (speed graph,
-/// parts, scan details) and its compact view (file, bar, speed,
-/// buttons). Called by the window's own "Hide details" toggle.
+/// Round 62 — per-download completion options (progress window
+/// Options tab): "Close program after download" and "Shut down
+/// computer after download". Stored in memory in AppState; the
+/// progress window reads them back on mount so a reopened window
+/// shows the checked state. The window itself acts on them when
+/// the download completes (it is the only view that knows the
+/// options were checked for this run).
 #[tauri::command]
-fn set_progress_window_compact(
-    app: AppHandle,
+fn set_download_completion_options(
+    state: State<'_, AppState>,
     download_id: String,
-    compact: bool,
+    close_after: bool,
+    shutdown_after: bool,
 ) -> Result<(), String> {
-    let label = progress_window_label(&download_id);
-    let window = app
-        .get_webview_window(&label)
-        .ok_or_else(|| format!("No progress window open for download {download_id}"))?;
-    let (width, height) = if compact { (600.0, 300.0) } else { (600.0, 680.0) };
-    window
-        .set_size(Size::Logical(LogicalSize::new(width, height)))
-        .map_err(|e| e.to_string())
+    let Ok(mut map) = state.download_completion.lock() else {
+        return Err("completion options are unavailable".to_string());
+    };
+    map.insert(
+        download_id,
+        DownloadCompletionOptions {
+            close_after,
+            shutdown_after,
+        },
+    );
+    Ok(())
+}
+
+#[tauri::command]
+fn get_download_completion_options(
+    state: State<'_, AppState>,
+    download_id: String,
+) -> Result<DownloadCompletionOptions, String> {
+    let Ok(map) = state.download_completion.lock() else {
+        return Ok(DownloadCompletionOptions::default());
+    };
+    Ok(map.get(&download_id).copied().unwrap_or_default())
+}
+
+/// Round 62 — "Close program after download": exit the whole app.
+/// The progress window calls this when its download completes
+/// with the option checked.
+#[tauri::command]
+fn exit_app(app: AppHandle) -> Result<(), String> {
+    app.exit(0);
+    Ok(())
+}
+
+/// Round 62 — "Shut down computer after download": the Windows
+/// shutdown command, the same call the engine's queue "shutdown"
+/// action makes (engine queue.rs). Windows only; anywhere else
+/// it is an error and the window says so instead of pretending
+/// the PC will shut down.
+#[tauri::command]
+fn shutdown_computer() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("shutdown")
+            .args(["/s", "/t", "0"])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("Shutting down the computer is only available on Windows".to_string())
+    }
+}
+
+/// Round 62 — free bytes on the volume holding `path` (the main
+/// window's status bar shows the download drive's free space).
+/// Windows only, via GetDiskFreeSpaceExW from kernel32 (a small
+/// extern block — no extra crate); anywhere else it is an error
+/// and the UI hides the figure.
+#[tauri::command]
+fn get_free_disk_space(path: String) -> Result<u64, String> {
+    #[cfg(target_os = "windows")]
+    {
+        free_disk_space_windows(&path)
+            .ok_or_else(|| format!("Could not read free space for {path}"))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+        Err("Free disk space is only available on Windows".to_string())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn free_disk_space_windows(path: &str) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    let wide: Vec<u16> = std::ffi::OsStr::new(path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut free_bytes: u64 = 0;
+    let mut total_bytes: u64 = 0;
+    let mut total_free_bytes: u64 = 0;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetDiskFreeSpaceExW(
+            lp_directory_name: *const u16,
+            lp_free_bytes_available: *mut u64,
+            lp_total_number_of_bytes: *mut u64,
+            lp_total_number_of_free_bytes: *mut u64,
+        ) -> i32;
+    }
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut free_bytes as *mut u64,
+            &mut total_bytes as *mut u64,
+            &mut total_free_bytes as *mut u64,
+        )
+    };
+    if ok == 0 {
+        None
+    } else {
+        Some(free_bytes)
+    }
 }
 
 /// The latest progress event for a download (see
@@ -1992,6 +2115,7 @@ pub fn run() {
             app.manage(AppState {
                 manager,
                 webview_heartbeats,
+                download_completion: Arc::new(StdMutex::new(HashMap::new())),
             });
             // Round 56 (§7.4): log the main window's resolved URL
             // after creation — the same diagnostic as the progress
@@ -2021,7 +2145,11 @@ pub fn run() {
             retry_now,
             open_folder,
             open_progress_window,
-            set_progress_window_compact,
+            set_download_completion_options,
+            get_download_completion_options,
+            exit_app,
+            shutdown_computer,
+            get_free_disk_space,
             get_progress_snapshot,
             webview_heartbeat,
             reload_webview_window,

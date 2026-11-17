@@ -1,117 +1,85 @@
 import { useEffect, useRef, useState } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { ChevronDown, ChevronUp, FileWarning, FolderOpen, Pause, Play, RotateCw, ShieldCheck, ShieldX, X } from 'lucide-react'
-import { completeActionLabel, formatBytes, formatEta, formatSpeed, progressPercent, statusLabel } from '../lib/format'
+import { FileDown, Pause, Play, Power, RotateCw } from 'lucide-react'
+import { formatBytes, formatEta, formatSpeed, progressPercent, statusLabel } from '../lib/format'
 import {
   cancelDownload,
-  deleteDownload,
+  exitApp,
+  getDownloadCompletionOptions,
   getProgressSnapshot,
-  getQueue,
   getSettings,
   listDownloads,
-  openFile,
-  openFolder,
   pauseDownload,
-  quarantineDownload,
   reloadWebviewWindow,
   resumeDownload,
   retryNow,
-  runAntivirusScan,
+  setDownloadCompletionOptions,
   setDownloadSpeedLimit,
-  setProgressWindowCompact,
-  updateQueue,
+  shutdownComputer,
   withTimeout,
 } from '../lib/api'
-import { recordSpeedSample, speedGraphPoints, speedGraphPolyline } from '../lib/speedGraph'
-import type { SpeedSample } from '../lib/speedGraph'
-import type { DownloadRow, ProgressEvent, QueueCompleteAction, QueueRow, QueueScheduleType, ScanResult, Settings } from '../lib/types'
+import type { DownloadCompletionOptions, DownloadRow, ProgressEvent, SegmentProgress, Settings } from '../lib/types'
 import { Button } from './Button'
 import { ProgressBar } from './ProgressBar'
-import { ProgressRing } from './ProgressRing'
 import { StatusBadge } from './StatusBadge'
+import { TitleBar } from './TitleBar'
 
-type ProgressTab = 'status' | 'limiter' | 'completion'
+type ProgressTab = 'status' | 'options'
 
-/** S14 — the scan result line, shared by the status tab's finished
- *  block and the completion tab (which also carries the actions). */
-function ScanStatus({ scan }: { scan: ScanResult | null }) {
-  if (scan?.status === 'clean') {
-    return (
-      <p role="status" className="mt-2 flex items-start gap-2 text-sm">
-        <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-success" aria-hidden="true" />
-        <span>Antivirus scan: clean — no threat found.</span>
-      </p>
-    )
-  }
-  if (scan?.status === 'infected') {
-    return (
-      <div role="alert" className="mt-2 flex items-start gap-2 text-sm text-danger">
-        <ShieldX className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-        <span>
-          Antivirus scan: threat found
-          {scan.detail ? ` — ${scan.detail}` : '.'} The file was not opened. Delete it or
-          quarantine it from the Options on completion tab.
-        </span>
-      </div>
-    )
-  }
-  if (scan?.status === 'scan_failed') {
-    return (
-      <p role="status" className="mt-2 flex items-start gap-2 text-sm text-warning">
-        <FileWarning className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-        <span>Antivirus scan failed{scan.detail ? ` — ${scan.detail}` : '.'}</span>
-      </p>
-    )
-  }
-  if (scan?.status === 'timed_out') {
-    return (
-      <p role="status" className="mt-2 flex items-start gap-2 text-sm text-warning">
-        <FileWarning className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-        <span>Antivirus scan timed out{scan.detail ? ` — ${scan.detail}` : '.'}</span>
-      </p>
-    )
-  }
-  if (scan?.status === 'scanning') {
-    return (
-      <p role="status" className="mt-2 text-sm text-text-muted">
-        Scanning with your antivirus scanner…
-      </p>
-    )
-  }
-  if (scan?.status === 'not_configured') {
-    return (
-      <p className="mt-2 text-sm text-text-muted">
-        No antivirus scanner is configured — the file was not scanned. Set one up in
-        Settings &gt; Downloads.
-      </p>
-    )
-  }
-  return <p className="mt-2 text-sm text-text-muted">Scan result not available yet.</p>
+/** Round 62 — one part's IDM status line (N. | Downloaded |
+ *  Info). The engine only reports two segment states — `done`
+ *  and `active` (manager.rs) — so the five IDM words are
+ *  DERIVED from what the snapshot carries, and the mapping is
+ *  the honest one:
+ *  - done → "Done" (cyan)
+ *  - the download is not running (paused / failed / finished)
+ *    and the part is not done → "No" (red, bold): it is not
+ *    downloading right now
+ *  - the download is in its retry backoff and the part is not
+ *    done → "Disconnect" (pink): the connection dropped
+ *  - running, part not done, zero bytes yet → "Send GET..."
+ *    (amber): still connecting, nothing received
+ *  - running, part not done, bytes flowing → "Receiving
+ *    data..." (purple)
+ *  The engine cannot tell "connecting" from "waiting for a
+ *  slot" for a zero-byte part, so "Send GET..." is the
+ *  best-supported reading, not a measured connection state. */
+function partInfo(
+  segment: SegmentProgress,
+  downloadStatus: string,
+  retrying: boolean,
+): { label: string; className: string } {
+  if (segment.status === 'done') return { label: 'Done', className: 'text-info' }
+  if (downloadStatus !== 'downloading') return { label: 'No', className: 'font-bold text-[#ff3b30]' }
+  if (retrying) return { label: 'Disconnect', className: 'text-danger' }
+  if (segment.downloaded_bytes <= 0) return { label: 'Send GET...', className: 'text-warning' }
+  return { label: 'Receiving data...', className: 'text-accent' }
 }
 
-/** S03 — the download progress WINDOW. A separate OS window per
- *  download (opened by the `open_progress_window` Tauri command),
- *  titled "<percent>% <filename>". Same content as the old in-app
- *  overlay had — live speed, ETA, per-part bars, 60 s speed graph,
- *  retry countdown, Open folder on completion — plus the IDM-style
- *  labelled rows (source, size, downloaded, transfer rate, time
- *  left, resume capability) and a "Hide details" toggle that
- *  collapses it to a compact view. Closing the window NEVER
- *  cancels the download: the engine keeps running and the window
- *  is only a view of it.
+/** S03 — the download progress WINDOW, redesigned in Round 62
+ *  from the user's AI mockup. A separate OS window per download
+ *  (opened by the `open_progress_window` Tauri command), titled
+ *  "<percent>% <filename>", frameless (its own dark title bar,
+ *  same as the main window), square like IDM — landscape, wider
+ *  than tall, ~660x480. Two tabs: "Download status" and one
+ *  merged "Options" tab (speed limiter + close program /
+ *  shut down computer after download). The 60 s speed graph and
+ *  the "Hide details" toggle are gone (speed is text only), the
+ *  per-part bars are an IDM-style table, and the old completion
+ *  choices (open file/folder, antivirus scan) are removed from
+ *  this window — they live in the main window now. Closing the
+ *  window NEVER cancels the download: the engine keeps running
+ *  and the window is only a view of it.
  *
  *  Live feed: the window polls `list_downloads` (the row) and
  *  `get_progress_snapshot` (the latest progress event) every
  *  500 ms. Polling is deliberate — the `download-progress`
  *  listener was removed in Round 39 and polling is this window's
- *  verified live feed (the main window's listeners work again
- *  since Round 40 added the capability file, but this window
- *  keeps polling by design). The 500 ms poll is also what feeds
- *  the speed graph, so the graph actually builds here (in the old
- *  overlay it never got a sample in production).
- *  The window title is updated from Rust, in the progress-event
- *  forwarder — the frontend cannot set its own title for the
- *  same capability reason. */
+ *  verified live feed. The window title is updated from Rust,
+ *  in the progress-event forwarder — the frontend cannot set
+ *  its own title for the same capability reason. The custom
+ *  title bar shows the same live "<percent>% - <filename>"
+ *  from the poll. */
 export function ProgressWindow({ downloadId }: { downloadId: string }) {
   const [download, setDownload] = useState<DownloadRow | null>(null)
   const [loaded, setLoaded] = useState(false)
@@ -131,29 +99,35 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
   const pollStoppedRef = useRef(false)
   const lastPollOkAt = useRef(Date.now())
   const [live, setLive] = useState<ProgressEvent | null>(null)
-  const [samples, setSamples] = useState<SpeedSample[]>([])
-  const [compact, setCompact] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
   const [retryBusy, setRetryBusy] = useState(false)
-  const [folderBusy, setFolderBusy] = useState(false)
-  const [scanBusy, setScanBusy] = useState<string | null>(null)
-  /** IDM's three tabs (Round 44): Download status, Speed Limiter,
-   *  Options on completion. */
   const [tab, setTab] = useState<ProgressTab>('status')
-  /** Settings (for the global speed cap shown on the limiter tab)
-   *  and the download's queue (for the completion tab's editor). */
+  /** Settings (for the global speed cap shown on the Options
+   *  tab). */
   const [settings, setSettings] = useState<Settings | null>(null)
-  const [queue, setQueue] = useState<QueueRow | null>(null)
-  /** Speed Limiter tab: the cap input, seeded from the row when
+  /** Options tab: the speed-cap input, seeded from the row when
    *  the tab opens; empty = no per-download cap. */
   const [capInput, setCapInput] = useState('')
   const [capBusy, setCapBusy] = useState(false)
-  /** Options on completion tab: the queue's completion action
-   *  editor, seeded from the queue row when the tab opens. */
-  const [completionAction, setCompletionAction] = useState<QueueCompleteAction>('none')
-  const [completionProgram, setCompletionProgram] = useState('')
-  const [completionBusy, setCompletionBusy] = useState(false)
-  const [completionSaved, setCompletionSaved] = useState(false)
+  /** Options tab: the per-download completion options. Loaded
+   *  from Rust on mount, persisted on every change — a
+   *  reopened window shows the checked state. */
+  const [closeAfter, setCloseAfter] = useState(false)
+  const [shutdownAfter, setShutdownAfter] = useState(false)
+  const closeAfterRef = useRef(false)
+  const shutdownAfterRef = useRef(false)
+  /** The 30 s shutdown countdown, in seconds left; null when
+   *  no shutdown is pending. */
+  const [shutdownCountdown, setShutdownCountdown] = useState<number | null>(null)
+  const [shutdownBusy, setShutdownBusy] = useState(false)
+  /** Completion bookkeeping: the previous polled status (the
+   *  completion actions fire only on a transition into
+   *  'complete' observed while this window is open — a
+   *  download that was already complete when the window opened
+   *  does not fire them), and whether this completion already
+   *  acted (so the 500 ms poll cannot fire it twice). */
+  const prevStatusRef = useRef<string | null>(null)
+  const completionActedRef = useRef(false)
 
   // The window runs the same bundle as the main window. Dark only
   // (Round 45): the stored theme is ignored, the attribute stays
@@ -165,51 +139,42 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
         setSettings(s)
       })
       .catch(() => undefined)
-  }, [])
-
-  // The queue this download belongs to (if any) — the completion
-  // tab edits its on-completion action. Depend on the queue id
-  // string, not the whole row: the 500 ms poll replaces the row
-  // object every tick, and refetching on every tick would reseed
-  // the completion editor while the user types in it.
-  const queueId = download?.queue_id ?? null
-  useEffect(() => {
-    if (!queueId) {
-      setQueue(null)
-      return
-    }
-    let stopped = false
-    void getQueue(queueId)
-      .then((row) => {
-        if (!stopped) setQueue(row)
+    void getDownloadCompletionOptions(downloadId)
+      .then((opts) => {
+        setCloseAfter(opts.close_after)
+        setShutdownAfter(opts.shutdown_after)
       })
       .catch(() => undefined)
-    return () => {
-      stopped = true
-    }
-  }, [queueId])
+  }, [downloadId])
 
-  // Seed the completion editor from the queue row when the tab
-  // opens or the row arrives (after the fetch, or after a save —
-  // the saved values are the ones just entered, so reseeding is
-  // harmless). The limiter input is seeded only on tab open (in
-  // openTab): the poll replaces the row every 500 ms, so seeding
-  // it from the row on every change would clobber typing.
   useEffect(() => {
-    if (tab === 'completion' && queue) {
-      setCompletionAction(queue.on_complete_action as QueueCompleteAction)
-      setCompletionProgram(queue.on_complete_program ?? '')
-    }
-  }, [tab, queue])
+    closeAfterRef.current = closeAfter
+  }, [closeAfter])
+  useEffect(() => {
+    shutdownAfterRef.current = shutdownAfter
+  }, [shutdownAfter])
 
-  // Seed the tab editors when their tab opens, from the freshest
-  // row — typing in them must not be clobbered by the 500 ms poll.
+  // Seed the limiter input when its tab opens, from the freshest
+  // row — typing in it must not be clobbered by the 500 ms poll.
   function openTab(next: ProgressTab) {
     setTab(next)
     setActionError(null)
-    setCompletionSaved(false)
-    if (next === 'limiter' && download) {
+    if (next === 'options' && download) {
       setCapInput(download.speed_limit_kbps ? String(download.speed_limit_kbps) : '')
+    }
+  }
+
+  /** Persist a completion-options change (checkbox toggle) to
+   *  Rust and to local state. A failure surfaces as the
+   *  window's action error; the checkbox already moved, so the
+   *  user sees the error instead of a silent revert. */
+  async function persistOptions(next: DownloadCompletionOptions) {
+    setCloseAfter(next.close_after)
+    setShutdownAfter(next.shutdown_after)
+    try {
+      await setDownloadCompletionOptions(downloadId, next)
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e))
     }
   }
 
@@ -298,31 +263,68 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
     )
   }
 
-  // Fresh samples when the window shows another download (it
-  // never does in practice — one window, one download — but the
-  // reset costs nothing and matches the old dialog).
+  /** Completion actions (Round 62): when the polled status
+   *  flips into 'complete' while this window is open, act on
+   *  the checked Options — shut down wins over close (closing
+   *  the program would stop the shutdown). A download that was
+   *  already complete when the window opened does not fire
+   *  them: the options were chosen for a run that already
+   *  ended. */
   useEffect(() => {
-    setSamples([])
-    setActionError(null)
-    setRetryBusy(false)
-    setFolderBusy(false)
-    setScanBusy(null)
-  }, [downloadId])
+    const status = download?.status ?? null
+    const prev = prevStatusRef.current
+    prevStatusRef.current = status
+    if (status !== 'complete') {
+      completionActedRef.current = false
+      return
+    }
+    if ((prev === 'downloading' || prev === 'paused') && !completionActedRef.current) {
+      completionActedRef.current = true
+      if (shutdownAfterRef.current) {
+        setShutdownCountdown(30)
+      } else if (closeAfterRef.current) {
+        void exitApp().catch((e: unknown) =>
+          setActionError(e instanceof Error ? e.message : String(e)),
+        )
+      }
+    }
+  }, [download?.status])
 
+  /** The 30 s shutdown countdown: one second at a time, then
+   *  the Windows shutdown command. Cancelling (below) clears
+   *  the countdown and unchecks the option, so it cannot fire
+   *  again for this download. */
   useEffect(() => {
-    if (!live || !download || live.id !== download.id) return
-    if (live.status !== 'downloading') return
-    setSamples((prev) => recordSpeedSample(prev, Date.now(), live.speed_bps))
-  }, [live, download])
+    if (shutdownCountdown === null) return
+    if (shutdownCountdown <= 0) {
+      setShutdownCountdown(null)
+      setShutdownBusy(true)
+      void shutdownComputer()
+        .catch((e: unknown) => setActionError(e instanceof Error ? e.message : String(e)))
+        .finally(() => setShutdownBusy(false))
+      return
+    }
+    const timer = window.setTimeout(
+      () => setShutdownCountdown((s) => (s === null ? null : s - 1)),
+      1000,
+    )
+    return () => window.clearTimeout(timer)
+  }, [shutdownCountdown])
 
-  async function toggleCompact() {
-    const next = !compact
-    setCompact(next)
+  async function cancelShutdownCountdown() {
+    setShutdownCountdown(null)
+    await persistOptions({ close_after: closeAfterRef.current, shutdown_after: false })
+  }
+
+  async function runShutdownNow() {
+    setShutdownCountdown(null)
+    setShutdownBusy(true)
     try {
-      await setProgressWindowCompact(downloadId, next)
-    } catch {
-      // Outside the desktop app (or a closed window) the command
-      // throws; the in-page collapse still applies.
+      await shutdownComputer()
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setShutdownBusy(false)
     }
   }
 
@@ -365,86 +367,13 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
     }
   }
 
-  async function handleOpenFolder() {
-    setFolderBusy(true)
-    setActionError(null)
-    try {
-      await openFolder(downloadId)
-    } catch (e) {
-      setActionError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setFolderBusy(false)
-    }
-  }
-
-  /** S14 — open the finished file. The engine refuses when the
-   *  scanner flagged it, so a threat can never be opened from
-   *  here (the button is disabled too). */
-  async function handleOpenFile() {
-    setScanBusy('open')
-    setActionError(null)
-    try {
-      await openFile(downloadId)
-    } catch (e) {
-      setActionError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setScanBusy(null)
-    }
-  }
-
-  /** S14 — scan the finished file again with the configured
-   *  scanner. The result arrives on the live snapshot and on the
-   *  download row, so the window updates without a refresh. */
-  async function handleRescan() {
-    setScanBusy('rescan')
-    setActionError(null)
-    try {
-      await runAntivirusScan(downloadId)
-    } catch (e) {
-      setActionError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setScanBusy(null)
-    }
-  }
-
-  /** S14 — quarantine is an explicit user choice: the engine
-   *  moves the flagged file into a Quarantine folder. The window
-   *  then closes — the file no longer lives at the old path. */
-  async function handleQuarantine() {
-    setScanBusy('quarantine')
-    setActionError(null)
-    try {
-      await quarantineDownload(downloadId)
-      getCurrentWindow().close()
-    } catch (e) {
-      setActionError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setScanBusy(null)
-    }
-  }
-
-  /** S14 — delete the flagged file. Also an explicit user choice:
-   *  nothing is ever deleted automatically. */
-  async function handleDeleteFile() {
-    setScanBusy('delete')
-    setActionError(null)
-    try {
-      await deleteDownload(downloadId, true)
-      getCurrentWindow().close()
-    } catch (e) {
-      setActionError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setScanBusy(null)
-    }
-  }
-
-  /** Speed Limiter tab — apply the per-download cap, live: the
-   *  engine's token bucket picks it up at once (S12). Empty or 0
-   *  removes the cap; the global cap still applies, so the
-   *  effective speed is the lower of the two. `value` overrides
-   *  the input (the Remove cap button passes '' — state updates
-   *  are async, so reading the input there would use the old
-   *  value). */
+  /** Speed Limiter (Options tab) — apply the per-download cap,
+   *  live: the engine's token bucket picks it up at once (S12).
+   *  Empty or 0 removes the cap; the global cap still applies,
+   *  so the effective speed is the lower of the two. `value`
+   *  overrides the input (the Remove cap button passes '' —
+   *  state updates are async, so reading the input there would
+   *  use the old value). */
   async function handleApplyCap(value?: string) {
     if (!download) return
     setCapBusy(true)
@@ -469,68 +398,43 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
     }
   }
 
-  /** Options on completion tab — save the download's queue
-   *  completion action. The action fires when the queue finishes:
-   *  open the file, run a program, shut down or hibernate — the
-   *  last two ask first, with the existing 60 s cancellable
-   *  countdown in the main window. */
-  async function handleSaveCompletion() {
-    if (!queue) return
-    setCompletionBusy(true)
-    setActionError(null)
-    setCompletionSaved(false)
-    try {
-      const updated = await updateQueue(queue.id, {
-        schedule_type: queue.schedule_type as QueueScheduleType,
-        start_at: queue.start_at,
-        stop_at: queue.stop_at,
-        start_on_startup: queue.start_on_startup,
-        on_complete_action: completionAction,
-        on_complete_program: completionAction === 'run_program' ? completionProgram.trim() || null : null,
-        sync_interval_minutes: queue.sync_interval_minutes,
-      })
-      setQueue(updated)
-      setCompletionSaved(true)
-    } catch (e) {
-      setActionError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setCompletionBusy(false)
-    }
-  }
-
   if (!loaded) {
     return (
-      <div className="flex h-full flex-col p-6 text-text">
-        <p className="text-sm text-text-muted">Loading download…</p>
+      <div className="flex h-full flex-col text-text">
+        <TitleBar title="Sonic Manager" />
+        <p className="p-6 text-sm text-text-muted">Loading download…</p>
       </div>
     )
   }
 
   if (!download) {
     return (
-      <div className="flex h-full flex-col p-6 text-text">
-        <h1 className="text-lg font-semibold">
-          {pollError ? 'Could not load this download' : 'Download removed'}
-        </h1>
-        <p className="mt-2 text-sm text-text-muted">
-          {pollError
-            ? `The window could not reach the app: ${pollError} The download itself is not affected.`
-            : 'This download is no longer in the list — it was removed from the main window.'}
-        </p>
-        <div className="mt-6 flex justify-end gap-2">
-          {backendDead ? (
-            <>
-              <Button variant="secondary" onClick={retryPolling}>
-                Retry connection
-              </Button>
-              <Button variant="secondary" onClick={reloadWindow}>
-                Reload window
-              </Button>
-            </>
-          ) : null}
-          <Button variant="primary" onClick={() => getCurrentWindow().close()}>
-            Close
-          </Button>
+      <div className="flex h-full flex-col text-text">
+        <TitleBar title="Sonic Manager" />
+        <div className="flex flex-col p-6">
+          <h1 className="text-lg font-semibold">
+            {pollError ? 'Could not load this download' : 'Download removed'}
+          </h1>
+          <p className="mt-2 text-sm text-text-muted">
+            {pollError
+              ? `The window could not reach the app: ${pollError} The download itself is not affected.`
+              : 'This download is no longer in the list — it was removed from the main window.'}
+          </p>
+          <div className="mt-6 flex justify-end gap-2">
+            {backendDead ? (
+              <>
+                <Button variant="secondary" onClick={retryPolling}>
+                  Retry connection
+                </Button>
+                <Button variant="secondary" onClick={reloadWindow}>
+                  Reload window
+                </Button>
+              </>
+            ) : null}
+            <Button variant="primary" onClick={() => getCurrentWindow().close()}>
+              Close
+            </Button>
+          </div>
         </div>
       </div>
     )
@@ -546,385 +450,264 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
   // snapshot (every 500 ms) with seconds left until the next
   // attempt, counted down from the engine's backoff deadline.
   const retry = download.status === 'downloading' ? (live?.retry ?? null) : null
-  // S14 — the scan result: the live snapshot carries it once the
-  // detached scan finishes; otherwise the download row (refreshed
-  // by the poll) carries the stored result.
-  const scan: ScanResult | null =
-    live?.scan ??
-    (download.scan_status
-      ? {
-          status: download.scan_status,
-          detail: download.scan_detail,
-          scanned_at: download.scan_scanned_at,
-        }
-      : null)
-  const threatFound = scan?.status === 'infected'
-  const points = speedGraphPoints(samples, 480, 80)
-  const polyline = speedGraphPolyline(points)
-  const area = points.length >= 2 ? `${polyline} 480,80 0,80` : null
   const resumeCapability =
     download.accept_ranges === true ? 'Yes' : download.accept_ranges === false ? 'No' : 'Unknown'
+  const title = percent !== null ? `${percent}% - ${download.filename}` : download.filename
 
   return (
-    <div className="flex h-full flex-col p-6 text-text">
-      {backendDead ? (
-        <div role="alert" className="mb-4 flex shrink-0 items-center justify-between gap-2 rounded-md border border-border bg-danger-soft px-3 py-2 text-sm text-danger">
-          <span>Backend not responding — restart the app. Your downloads are safe on disk.</span>
-          <span className="flex shrink-0 items-center gap-2">
-            <Button variant="secondary" size="sm" onClick={retryPolling}>
-              Retry connection
-            </Button>
-            <Button variant="secondary" size="sm" onClick={reloadWindow}>
-              Reload window
-            </Button>
-          </span>
-        </div>
-      ) : null}
-      <div className="mb-4 flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <h1 className="truncate text-lg font-semibold" title={download.filename}>
-            {download.filename}
-          </h1>
-          <p className="mt-1 text-sm text-text-muted">
-            {download.status === 'downloading'
-              ? 'Receiving data…'
-              : download.status === 'complete'
-                ? 'Download complete'
-                : statusLabel(download.status)}
-          </p>
-        </div>
-        <div className="flex shrink-0 items-start gap-2">
-          <ProgressRing
-            percent={percent}
-            status={download.status === 'complete' ? 'complete' : download.status === 'error' ? 'error' : download.status === 'paused' ? 'paused' : 'downloading'}
-            size={56}
-            label={`Progress of ${download.filename}`}
-          />
-          <button
-            type="button"
-            onClick={() => getCurrentWindow().close()}
-            aria-label="Close"
-            className="rounded-md p-1 text-text-muted hover:bg-surface-2"
-          >
-            <X className="h-5 w-5" aria-hidden="true" />
-          </button>
-        </div>
-      </div>
-
-      <div className="mb-4 flex items-center gap-3">
-        <StatusBadge status={download.status} />
-        <span className="font-mono text-sm text-text-muted">{download.url}</span>
-      </div>
-
-      {!compact ? (
-        <>
-          <div role="tablist" aria-label="Download details" className="mb-4 flex gap-1 border-b border-border">
-            {(
-              [
-                ['status', 'Download status'],
-                ['limiter', 'Speed Limiter'],
-                ['completion', 'Options on completion'],
-              ] as const
-            ).map(([value, label]) => (
-              <button
-                key={value}
-                type="button"
-                role="tab"
-                aria-selected={tab === value}
-                onClick={() => openTab(value)}
-                className={`-mb-px border-b-2 px-3 py-2 text-sm font-semibold ${
-                  tab === value ? 'border-accent text-accent' : 'border-transparent text-text-muted hover:text-text'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          {tab === 'status' ? (
-            <>
-              <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-        <div>
-          <dt className="text-text-muted">File size</dt>
-          <dd>{formatBytes(size)}</dd>
-        </div>
-        <div>
-          <dt className="text-text-muted">Downloaded</dt>
-          <dd>
-            {formatBytes(downloaded)}
-            {percent !== null ? ` (${percent}%)` : ''}
-          </dd>
-        </div>
-        <div>
-          <dt className="text-text-muted">Transfer rate</dt>
-          <dd>{formatSpeed(speed)}</dd>
-        </div>
-        <div>
-          <dt className="text-text-muted">Time left</dt>
-          <dd>{formatEta(eta)}</dd>
-        </div>
-        <div>
-          <dt className="text-text-muted">Resume capability</dt>
-          <dd>{resumeCapability}</dd>
-        </div>
-        {download.speed_limit_kbps ? (
-          <div>
-            <dt className="text-text-muted">Speed cap</dt>
-            <dd>{download.speed_limit_kbps} KB/s</dd>
+    <div className="flex h-full flex-col text-text">
+      <TitleBar title={title} />
+      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4">
+        {backendDead ? (
+          <div role="alert" className="flex shrink-0 items-center justify-between gap-2 rounded-md border border-border bg-danger-soft px-3 py-2 text-sm text-danger">
+            <span>Backend not responding — restart the app. Your downloads are safe on disk.</span>
+            <span className="flex shrink-0 items-center gap-2">
+              <Button variant="secondary" size="sm" onClick={retryPolling}>
+                Retry connection
+              </Button>
+              <Button variant="secondary" size="sm" onClick={reloadWindow}>
+                Reload window
+              </Button>
+            </span>
           </div>
         ) : null}
-      </dl>
 
-      {download.quota_paused ? (
-        <p className="mt-4 text-sm text-danger">
-          Paused — the download quota is reached. It resumes on its own when the quota window
-          rolls over, or sooner with “Reset quota &amp; resume now” in Settings.
-        </p>
-      ) : null}
-
-              {download.status === 'downloading' ? (
-            <div className="mt-4">
-              <p className="mb-2 text-sm font-semibold">Speed over the last minute</p>
-              {points.length >= 2 ? (
-                <svg
-                  viewBox="0 0 480 80"
-                  className="h-20 w-full rounded-md border border-border bg-surface"
-                  role="img"
-                  aria-label={`Speed graph for the last minute, current speed ${formatSpeed(speed)}`}
-                >
-                  {area ? <polygon points={area} fill="var(--color-accent-soft)" /> : null}
-                  <polyline points={polyline} fill="none" stroke="var(--color-accent)" strokeWidth="2" strokeLinejoin="round" />
-                </svg>
-              ) : points.length === 1 ? (
-                <svg
-                  viewBox="0 0 480 80"
-                  className="h-20 w-full rounded-md border border-border bg-surface"
-                  role="img"
-                  aria-label={`Speed graph for the last minute, current speed ${formatSpeed(speed)}`}
-                >
-                  <circle cx={points[0].x} cy={points[0].y} r="3" fill="var(--color-accent)" />
-                </svg>
-              ) : (
-                <p className="rounded-md border border-border bg-surface p-3 text-sm text-text-muted">
-                  The speed graph builds as the download runs.
-                </p>
-              )}
+        <div className="flex items-start gap-3">
+          <div
+            aria-hidden="true"
+            className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-[linear-gradient(135deg,#8b20ff,#f02dcd)] shadow-[0_0_18px_rgba(139,32,255,0.55)]"
+          >
+            <FileDown className="h-6 w-6 text-white" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <h1 className="min-w-0 truncate text-base font-semibold" title={download.filename}>
+                {download.filename}
+              </h1>
+              <StatusBadge status={download.status} />
             </div>
-          ) : null}
-
-          {segments.length > 0 ? (
-            <div className="mt-4">
-              <p className="mb-2 text-sm font-semibold">Parts</p>
-              <div className="flex flex-col gap-2" role="list" aria-label="Download parts">
-                {segments.map((s) => {
-                  const segTotal = s.end_byte === null ? null : s.end_byte - s.start_byte + 1
-                  const segPercent = segTotal === null ? null : Math.min(100, Math.round((s.downloaded_bytes / segTotal) * 100))
-                  return (
-                    <div key={s.segment_index} role="listitem" className="flex items-center gap-2 text-sm">
-                      <span className="w-16 shrink-0 font-mono text-xs text-text-muted">Part {s.segment_index + 1}</span>
-                      <ProgressBar percent={segPercent} status={s.status === 'done' ? 'complete' : 'downloading'} label={`Part ${s.segment_index + 1}`} />
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-          ) : null}
-
-          {retry ? (
-            <div role="status" className="mt-4 rounded-md border border-border bg-warning-soft p-3">
-              <p className="text-sm font-semibold">
-                Connection lost — retrying in {retry.retry_in_secs}s (attempt {retry.attempt + 1} of {retry.max_attempts})
-              </p>
-              <p className="mt-1 text-sm text-text-muted">{retry.error}</p>
-              <div className="mt-3 flex gap-2">
-                <Button variant="secondary" onClick={handleRetryNow} disabled={retryBusy}>
-                  <RotateCw className="h-4 w-4" aria-hidden="true" /> Retry now
-                </Button>
-                <Button variant="ghost" onClick={handleCancel}>
-                  Cancel download
-                </Button>
-              </div>
-            </div>
-          ) : null}
-
-          {download.status === 'error' && download.error_message ? (
-            <p role="alert" className="mt-4 text-sm text-danger">
-              {download.error_message}
+            <p className="mt-0.5 truncate font-mono text-xs text-text-muted" title={download.url}>
+              {download.url}
             </p>
-          ) : null}
+            <p className="mt-0.5 text-xs text-text-muted">
+              {download.status === 'downloading'
+                ? 'Receiving data…'
+                : download.status === 'complete'
+                  ? 'Download complete'
+                  : statusLabel(download.status)}
+            </p>
+          </div>
+          <div className="shrink-0 text-right" aria-label={`Progress ${percent === null ? 'unknown' : `${percent} percent`}`}>
+            <span className="bg-[linear-gradient(90deg,#8b20ff,#00c8ff)] bg-clip-text text-4xl font-bold tabular-nums text-transparent">
+              {percent === null ? '—' : `${percent}%`}
+            </span>
+          </div>
+        </div>
 
-          {download.status === 'complete' ? (
-            <div className="mt-4 rounded-md border border-border bg-surface p-3">
-              <p className="text-sm font-semibold">Finished file</p>
-              <p className="mt-1 break-all font-mono text-sm text-text-muted" title={download.save_path}>
-                {download.save_path}
-              </p>
-              <ScanStatus scan={scan} />
-            </div>
-          ) : null}
-            </>
-          ) : null}
-          {tab === 'limiter' ? (
-            <div className="mt-2 text-sm">
-              <p className="text-text-muted">
-                {download.speed_limit_kbps
-                  ? `This download is capped at ${download.speed_limit_kbps} KB/s.`
-                  : 'This download has no per-download cap.'}
-                {settings?.speed_limit_kbps
-                  ? ` The global limit is ${settings.speed_limit_kbps} KB/s — the effective speed is the lower of the two.`
-                  : ' There is no global speed limit set.'}
-              </p>
-              <div className="mt-4 flex flex-wrap items-center gap-2">
-                <label htmlFor="speed-cap" className="font-semibold">
-                  Limit this download to
-                </label>
-                <input
-                  id="speed-cap"
-                  type="number"
-                  min={0}
-                  max={1_000_000}
-                  step={1}
-                  inputMode="numeric"
-                  value={capInput}
-                  onChange={(e) => setCapInput(e.target.value)}
-                  placeholder="No cap"
-                  aria-label="Per-download speed cap in KB/s"
-                  className="h-8 w-28 rounded-md border border-border-input bg-bg px-2 font-mono text-sm text-text"
-                />
-                <span className="text-text-muted">KB/s</span>
-                <Button variant="primary" size="sm" onClick={() => void handleApplyCap()} disabled={capBusy}>
-                  Apply
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  disabled={capBusy || !download.speed_limit_kbps}
-                  onClick={() => void handleApplyCap('')}
-                >
-                  Remove cap
-                </Button>
+        <ProgressBar
+          percent={percent}
+          gradient
+          size="tall"
+          status={download.status === 'complete' ? 'complete' : download.status === 'error' ? 'error' : download.status === 'paused' ? 'paused' : 'downloading'}
+          label={`Progress of ${download.filename}`}
+        />
+
+        <dl className="grid grid-cols-4 gap-2 text-sm">
+          <div>
+            <dt className="text-text-muted">Downloaded</dt>
+            <dd className="mt-0.5 font-mono">
+              {formatBytes(downloaded)}
+              {percent !== null ? ` (${percent}%)` : ''}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-text-muted">Speed</dt>
+            <dd className="mt-0.5 font-mono">{formatSpeed(speed)}</dd>
+          </div>
+          <div>
+            <dt className="text-text-muted">Time left</dt>
+            <dd className="mt-0.5 font-mono">{formatEta(eta)}</dd>
+          </div>
+          <div>
+            <dt className="text-text-muted">Resume</dt>
+            <dd className="mt-0.5">{resumeCapability}</dd>
+          </div>
+        </dl>
+
+        <div role="tablist" aria-label="Download details" className="flex shrink-0 gap-1 border-b border-border">
+          {(
+            [
+              ['status', 'Download status'],
+              ['options', 'Options'],
+            ] as const
+          ).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              role="tab"
+              aria-selected={tab === value}
+              onClick={() => openTab(value)}
+              className={`-mb-px border-b-2 px-3 py-2 text-sm font-semibold ${
+                tab === value ? 'border-accent text-accent' : 'border-transparent text-text-muted hover:text-text'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {tab === 'status' ? (
+          <>
+            {segments.length > 0 ? (
+              <div>
+                <p className="mb-1 text-sm font-semibold">Parts</p>
+                <div className="max-h-[140px] overflow-y-auto rounded-md border border-border">
+                  <table className="w-full border-collapse text-sm" aria-label="Download parts">
+                    <thead className="sticky top-0 bg-surface">
+                      <tr className="border-b border-border text-left text-xs text-text-muted">
+                        <th scope="col" className="px-3 py-1.5">N.</th>
+                        <th scope="col" className="px-3 py-1.5">Downloaded</th>
+                        <th scope="col" className="px-3 py-1.5">Info</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {segments.map((s) => {
+                        const info = partInfo(s, download.status, retry !== null)
+                        return (
+                          <tr key={s.segment_index} className="border-b border-border last:border-0">
+                            <td className="px-3 py-1.5 font-mono text-xs text-text-muted">
+                              {s.segment_index + 1}
+                            </td>
+                            <td className="px-3 py-1.5 font-mono text-xs">{formatBytes(s.downloaded_bytes)}</td>
+                            <td className={`px-3 py-1.5 text-xs ${info.className}`}>{info.label}</td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <p className="mt-1 text-xs text-text-muted">
+                  {segments.length} part{segments.length === 1 ? '' : 's'} — the count depends on
+                  what the server supports, up to 16.
+                </p>
               </div>
-              <p className="mt-2 text-sm text-text-muted">
-                Leave it empty for no cap. The cap applies at once — the download keeps running.
-              </p>
-            </div>
-          ) : null}
-          {tab === 'completion' ? (
-            <div className="mt-2 text-sm">
-              <p className="font-semibold">Finished file</p>
-              {download.status === 'complete' ? (
-                <>
-                  <p className="mt-1 break-all font-mono text-sm text-text-muted" title={download.save_path}>
-                    {download.save_path}
-                  </p>
-                  <ScanStatus scan={scan} />
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    {scan && scan.status !== 'scanning' ? (
-                      <Button variant="secondary" size="sm" onClick={handleRescan} disabled={scanBusy !== null}>
-                        <ShieldCheck className="h-4 w-4" aria-hidden="true" /> Scan again
-                      </Button>
-                    ) : null}
-                    {threatFound ? (
-                      <>
-                        <Button variant="secondary" size="sm" onClick={handleQuarantine} disabled={scanBusy !== null}>
-                          Quarantine
-                        </Button>
-                        <Button variant="danger" size="sm" onClick={handleDeleteFile} disabled={scanBusy !== null}>
-                          Delete file
-                        </Button>
-                      </>
-                    ) : null}
-                  </div>
-                </>
-              ) : (
-                <p className="mt-1 text-text-muted">
-                  The file actions and the scan result appear here once the download finishes.
-                </p>
-              )}
-              <p className="mt-5 font-semibold">When the queue finishes</p>
-              {queue ? (
-                <>
-                  <p className="mt-1 text-text-muted">
-                    Queue &ldquo;{queue.name}&rdquo;: {completeActionLabel(queue.on_complete_action)}
-                    {queue.on_complete_action === 'run_program' && queue.on_complete_program
-                      ? ` — ${queue.on_complete_program}`
-                      : ''}
-                  </p>
-                  <div className="mt-3 flex flex-wrap items-center gap-2">
-                    <label htmlFor="completion-action" className="font-semibold">
-                      When done
-                    </label>
-                    <select
-                      id="completion-action"
-                      value={completionAction}
-                      onChange={(e) => setCompletionAction(e.target.value as QueueCompleteAction)}
-                      className="h-8 rounded-md border border-border-input bg-bg px-2 text-sm text-text"
-                    >
-                      <option value="none">Do nothing when done</option>
-                      <option value="open_file">Open the file when done</option>
-                      <option value="run_program">Run a program when done</option>
-                      <option value="shutdown">Shut down the computer when done</option>
-                      <option value="hibernate">Hibernate the computer when done</option>
-                    </select>
-                    {completionAction === 'run_program' ? (
-                      <input
-                        type="text"
-                        value={completionProgram}
-                        onChange={(e) => setCompletionProgram(e.target.value)}
-                        placeholder="Program path"
-                        aria-label="Program to run when done"
-                        className="h-8 w-64 rounded-md border border-border-input bg-bg px-2 font-mono text-sm text-text"
-                      />
-                    ) : null}
-                    <Button variant="primary" size="sm" onClick={handleSaveCompletion} disabled={completionBusy}>
-                      Save
-                    </Button>
-                  </div>
-                  {completionSaved ? (
-                    <p role="status" className="mt-2 text-success">
-                      Saved.
-                    </p>
-                  ) : null}
-                  <p className="mt-2 text-text-muted">
-                    Shut down and hibernate ask first — a 60 second countdown appears in the main
-                    window, and the action runs only when the queue actually downloaded something.
-                  </p>
-                </>
-              ) : (
-                <p className="mt-1 text-text-muted">
-                  This download is not in a queue — completion actions are set per queue, in
-                  Queues &amp; scheduler.
-                </p>
-              )}
-            </div>
-          ) : null}
-        </>
-      ) : null}
+            ) : null}
 
-      <ProgressBar
-        percent={percent}
-        size="tall"
-        status={download.status === 'complete' ? 'complete' : download.status === 'error' ? 'error' : download.status === 'paused' ? 'paused' : 'downloading'}
-        label={`Progress of ${download.filename}`}
-      />
+            {download.quota_paused ? (
+              <p className="text-sm text-danger">
+                Paused — the download quota is reached. It resumes on its own when the quota window
+                rolls over, or sooner with “Reset quota &amp; resume now” in Settings.
+              </p>
+            ) : null}
+
+            {retry ? (
+              <div role="status" className="rounded-md border border-border bg-warning-soft p-3">
+                <p className="text-sm font-semibold">
+                  Connection lost — retrying in {retry.retry_in_secs}s (attempt {retry.attempt + 1} of {retry.max_attempts})
+                </p>
+                <p className="mt-1 text-sm text-text-muted">{retry.error}</p>
+                <div className="mt-3 flex gap-2">
+                  <Button variant="secondary" onClick={handleRetryNow} disabled={retryBusy}>
+                    <RotateCw className="h-4 w-4" aria-hidden="true" /> Retry now
+                  </Button>
+                  <Button variant="ghost" onClick={handleCancel}>
+                    Cancel download
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+
+            {download.status === 'error' && download.error_message ? (
+              <p role="alert" className="text-sm text-danger">
+                {download.error_message}
+              </p>
+            ) : null}
+
+            <p className="truncate font-mono text-xs text-text-muted" title={download.save_path}>
+              {download.save_path}
+            </p>
+          </>
+        ) : null}
+
+        {tab === 'options' ? (
+          <div className="text-sm">
+            <p className="font-semibold">Speed Limiter</p>
+            <p className="mt-1 text-text-muted">
+              {download.speed_limit_kbps
+                ? `This download is capped at ${download.speed_limit_kbps} KB/s.`
+                : 'This download has no per-download cap.'}
+              {settings?.speed_limit_kbps
+                ? ` The global limit is ${settings.speed_limit_kbps} KB/s — the effective speed is the lower of the two.`
+                : ' There is no global speed limit set.'}
+            </p>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <label htmlFor="speed-cap" className="font-semibold">
+                Limit this download to
+              </label>
+              <input
+                id="speed-cap"
+                type="number"
+                min={0}
+                max={1_000_000}
+                step={1}
+                inputMode="numeric"
+                value={capInput}
+                onChange={(e) => setCapInput(e.target.value)}
+                placeholder="No cap"
+                aria-label="Per-download speed cap in KB/s"
+                className="h-8 w-28 rounded-md border border-border-input bg-bg px-2 font-mono text-sm text-text"
+              />
+              <span className="text-text-muted">KB/s</span>
+              <Button variant="primary" size="sm" onClick={() => void handleApplyCap()} disabled={capBusy}>
+                Apply
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={capBusy || !download.speed_limit_kbps}
+                onClick={() => void handleApplyCap('')}
+              >
+                Remove cap
+              </Button>
+            </div>
+            <p className="mt-2 text-sm text-text-muted">
+              Leave it empty for no cap. The cap applies at once — the download keeps running.
+            </p>
+
+            <p className="mt-5 font-semibold">When this download finishes</p>
+            <label className="mt-2 flex cursor-pointer items-center gap-2">
+              <input
+                type="checkbox"
+                checked={closeAfter}
+                onChange={(e) => void persistOptions({ close_after: e.target.checked, shutdown_after: shutdownAfter })}
+                className="h-4 w-4 accent-[#8b20ff]"
+              />
+              Close program after download
+            </label>
+            <label className="mt-2 flex cursor-pointer items-center gap-2">
+              <input
+                type="checkbox"
+                checked={shutdownAfter}
+                onChange={(e) => void persistOptions({ close_after: closeAfter, shutdown_after: e.target.checked })}
+                className="h-4 w-4 accent-[#8b20ff]"
+              />
+              Shut down computer after download
+            </label>
+            <p className="mt-2 text-text-muted">
+              Shutting down waits 30 seconds with a Cancel button first. If both boxes are checked,
+              shut down wins — closing the program would stop the shutdown.
+            </p>
+          </div>
+        ) : null}
+      </div>
 
       {actionError ? (
-        <p role="alert" className="mt-4 text-sm text-danger">
+        <p role="alert" className="shrink-0 px-4 pb-2 text-sm text-danger">
           {actionError}
         </p>
       ) : null}
 
-      <div className="mt-6 flex flex-wrap justify-end gap-2">
-        <Button variant="ghost" onClick={toggleCompact}>
-          {compact ? (
-            <>
-              <ChevronDown className="h-4 w-4" aria-hidden="true" /> Show details
-            </>
-          ) : (
-            <>
-              <ChevronUp className="h-4 w-4" aria-hidden="true" /> Hide details
-            </>
-          )}
-        </Button>
+      <div className="flex shrink-0 flex-wrap justify-end gap-2 border-t border-border p-3">
         {download.status === 'downloading' ? (
           <Button variant="secondary" onClick={handlePause}>
             <Pause className="h-4 w-4" aria-hidden="true" /> Pause
@@ -935,27 +718,6 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
             <Play className="h-4 w-4" aria-hidden="true" /> Resume
           </Button>
         ) : null}
-        {download.status === 'complete' ? (
-          <>
-            <Button
-              variant="primary"
-              onClick={handleOpenFile}
-              disabled={threatFound || scan?.status === 'scanning' || scanBusy !== null}
-              title={
-                threatFound
-                  ? 'The antivirus scan found a threat in this file, so it cannot be opened'
-                  : scan?.status === 'scanning'
-                    ? 'Wait for the antivirus scan to finish first'
-                    : undefined
-              }
-            >
-              Open
-            </Button>
-            <Button variant="secondary" onClick={handleOpenFolder} disabled={folderBusy}>
-              <FolderOpen className="h-4 w-4" aria-hidden="true" /> Open folder
-            </Button>
-          </>
-        ) : null}
         {download.status === 'downloading' || download.status === 'paused' ? (
           <Button variant="danger" onClick={handleCancel}>
             Cancel
@@ -965,6 +727,41 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
           Close
         </Button>
       </div>
+
+      {shutdownCountdown !== null ? (
+        <div
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="shutdown-title"
+          className="fixed inset-0 z-20 flex items-center justify-center bg-black/50 p-4"
+        >
+          <div className="w-full max-w-sm rounded-lg border border-border bg-surface-raised p-6 shadow-pop">
+            <div className="mb-2 flex items-center gap-3">
+              <Power className="h-6 w-6 text-danger" aria-hidden="true" />
+              <h2 id="shutdown-title" className="text-lg font-semibold">
+                Shut down the computer?
+              </h2>
+            </div>
+            <p className="text-base text-text-muted">
+              “{download.filename}” finished downloading.
+            </p>
+            <p className="mt-4 text-center text-3xl font-bold tabular-nums" aria-live="polite">
+              {shutdownCountdown}s
+            </p>
+            <p className="text-center text-sm text-text-muted">
+              Shutting down when the countdown ends.
+            </p>
+            <div className="mt-6 flex justify-end gap-2">
+              <Button variant="ghost" loading={shutdownBusy} onClick={() => void cancelShutdownCountdown()}>
+                Cancel
+              </Button>
+              <Button variant="danger" loading={shutdownBusy} onClick={() => void runShutdownNow()}>
+                Shut down now
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }

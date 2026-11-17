@@ -77,6 +77,16 @@ export interface RetryInfo {
   error: string
 }
 
+/** Round 62 — per-download completion options (progress window
+ *  Options tab). Mirrors the Rust `DownloadCompletionOptions`:
+ *  `close_after` exits the app when the download completes,
+ *  `shutdown_after` shuts the PC down after the window's 30 s
+ *  cancellable countdown. In memory only. */
+export interface DownloadCompletionOptions {
+  close_after: boolean
+  shutdown_after: boolean
+}
+
 export interface ProgressEvent {
   id: string
   filename: string
