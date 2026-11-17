@@ -745,6 +745,14 @@ fn build_progress_window(
     if let Some(env) = shared_environment {
         builder = builder.with_environment(env);
     }
+    // Round 60 (§11.4 item 2): prove `build()` was entered and on
+    // which thread — discriminates (e1) stuck-before-`build()` from
+    // (b) stuck-inside-`build()`.
+    let build_thread_id = std::thread::current().id();
+    log_startup(
+        log,
+        &format!("progress window {label}: build() entered on thread {build_thread_id:?}"),
+    );
     match builder.build() {
         Ok(window) => {
             let elapsed_ms = build_started.elapsed().as_millis();
@@ -754,7 +762,9 @@ fn build_progress_window(
             // a discovery: the builder loaded `index.html`.
             log_startup(
                 log,
-                &format!("progress window {label} created: index.html in {elapsed_ms}ms"),
+                &format!(
+                    "progress window {label} created: index.html in {elapsed_ms}ms on thread {build_thread_id:?}"
+                ),
             );
             if elapsed_ms > 5_000 {
                 log_startup(
@@ -785,7 +795,9 @@ fn build_progress_window(
             let elapsed_ms = build_started.elapsed().as_millis();
             log_startup(
                 log,
-                &format!("progress window {label} FAILED to create after {elapsed_ms}ms: {e}"),
+                &format!(
+                    "progress window {label} FAILED to create after {elapsed_ms}ms on thread {build_thread_id:?}: {e}"
+                ),
             );
             Err(e.to_string())
         }
@@ -1811,6 +1823,9 @@ pub fn run() {
                 let monitor_heartbeats = Arc::clone(&webview_heartbeats);
                 let monitor_app = app.handle().clone();
                 let monitor_manager = Arc::clone(&manager);
+                // Round 60 (§11.4 item 1): keep a copy of the log
+                // path — the closure below moves `monitor_log`.
+                let monitor_log_start = monitor_log.clone();
                 std::thread::spawn(move || loop {
                     std::thread::sleep(Duration::from_secs(5));
                     let now = epoch_ms();
@@ -1866,6 +1881,11 @@ pub fn run() {
                         );
                     }
                 });
+                // Round 60 (§11.4 item 1): prove the monitor thread
+                // was spawned — before this, neither the monitor nor
+                // the watchdog logged its start, so "did the watchdog
+                // run" was unanswerable from the log.
+                startup_log_line(&monitor_log_start, "heartbeat monitor started");
             }
             // Round 58 (§9.5a): main-thread watchdog — a plain
             // std::thread that asks the main thread for a trivial
@@ -1881,17 +1901,43 @@ pub fn run() {
             // stalled check), never the watchdog itself.
             if let Some(watchdog_log) = startup_log_path_from_app(app.handle()) {
                 let watchdog_app = app.handle().clone();
+                // Round 60 (§11.4 item 1): keep a copy of the log
+                // path — the closure below moves `watchdog_log`.
+                let watchdog_log_start = watchdog_log.clone();
                 std::thread::spawn(move || {
                     let mut stalled = false;
                     let mut stall_since_ms = 0u64;
+                    // Round 60 (§11.4 item 1): tick counter for the
+                    // periodic liveness proof (see below).
+                    let mut tick_count: u64 = 0;
                     loop {
                         std::thread::sleep(Duration::from_secs(5));
+                        tick_count += 1;
+                        // Round 60 (§11.4 item 1): one `watchdog
+                        // tick` line every 60 s (every 12th 5 s
+                        // check, starting with the first), so the
+                        // log shows the watchdog kept running even
+                        // when the main thread never stalls.
+                        if tick_count % 12 == 1 {
+                            startup_log_line(&watchdog_log, "watchdog tick");
+                        }
                         let Some(window) = watchdog_app.get_webview_window("main") else {
                             continue;
                         };
                         let (tx, rx) = std::sync::mpsc::channel();
+                        // Round 60 (§11.4 item 3): the helper needs
+                        // its own copy of the log path.
+                        let probe_log = watchdog_log.clone();
                         std::thread::spawn(move || {
-                            let _ = window.is_visible();
+                            // Round 60 (§11.4 item 3): a fast-failing
+                            // getter was silent — the one blind spot
+                            // in the watchdog. Log it.
+                            if let Err(e) = window.is_visible() {
+                                startup_log_line(
+                                    &probe_log,
+                                    &format!("watchdog probe failed: {e}"),
+                                );
+                            }
                             let _ = tx.send(());
                         });
                         match rx.recv_timeout(Duration::from_secs(10)) {
@@ -1915,6 +1961,9 @@ pub fn run() {
                         }
                     }
                 });
+                // Round 60 (§11.4 item 1): prove the watchdog thread
+                // was spawned — same gap as the monitor (see above).
+                startup_log_line(&watchdog_log_start, "main thread watchdog started");
             }
             // Round 57 (§9.1b/c): the main window gets the same
             // treatment as a progress window — a heartbeat entry

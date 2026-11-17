@@ -5024,3 +5024,22 @@ edited region. VPS build is the real compile check.
   changed. The next proof is the user's `startup.log` from
   the fixed build ending with "setup ok" and "frontend
   reached backend: get_settings ok".
+
+**Round 58 retest (2026-11-17 16:48 EET, build a26a1027, exe 17,873,920 bytes):**
+BUILD OK (3m 59s). (a) Progress window ×10 FAIL — still blank white, will not
+close (X ×2, Task View X ×2), red "Backend did not respond" banner after each
+creation. (b) 20 MB via Start PASS on a healthy instance (Start never visibly
+disabled). (c) Slow Stop/Resume FAIL — froze at exactly 2,097,152 bytes
+(2 MiB) on disk, UI "Downloading 0%", Resume did not move it. (d) 1 GB PASS
+by criterion — probe error in ~15 s, no 60 s dialog timeout. Log: progress
+heartbeat STARTED then LOST (33s); main heartbeat lost (34s); main
+auto-reload done; progress auto-reload skipped (creation never completed).
+NO "build took ... slow creation" or "main thread stalled" lines — the
+main-thread wedge hypothesis is now weakened. NEW: slow-a.mp4 listed as
+Finished with only 2 MiB on disk (false Finished). Fixture server listens on
+an EPHEMERAL port (this run: 55140), not fixed 18099.
+
+- **Round 59 investigation (2026-11-17 ~17:02 EET, report `~/workspace/round59-investigation.md`):** the r58 fix removed only 1 of 2 unbounded waits — `create_controller` also ends in an unbounded `wait_with_pump` (wry-0.57.2 mod.rs:382-436), hit on every progress-window creation. "Heartbeat started" + `created_ok` false = hung `build()` signature (started is a Rust-side entry, not a JS ping). Watchdog verified a genuine discriminator (tao buffers events during a wedge, so a stall line MUST fire within 10 s). No engine path can mark a partial row complete (single `mark_complete` call site behind a `total == size` guard). 1 GB probe error = transport failure, not a timeout. Fix plan §9 gated on live checks (A1 persistent window; A2 surface FAILED + close leaked window; A3/A4 ProcessFailed gap + decouple windows).
+- **Round 59 live checks (2026-11-17 17:44 EET, task 37b76396, 44 min, read-only):** full-log grep (1,322 lines): "created:" = 0, "main thread stalled" = 0, "PANIC" = 0, "build took" = 0, no "FAILED to create"; heartbeat lost 7 (main 5, progress 2), resumed 0; auto-reload 8. **Wedge RULED OUT — all four §8 branches ruled out; §9.2–§9.4 suspended.** **CORRECTIONS: (1) slow-a.mp4 did NOT freeze at 2 MiB and was NOT falsely Finished — DB + disk agree: complete, 20,971,520/20,971,520, 4 segments done, ran 14:39:51→14:42:30 at exactly the fixture rate (128.8 KiB/s); the 2,097,152 reading was a misread by the retest task. Stop was pressed ~14:44, after completion. (2) 1 GB probe error = REAL DNS failure: curl "Could not resolve host: speed.hetzner.de" in ~18 ms — not a code bug. (3) Last add_download pair exited 150 ms (err) — no ~15 s vs 18 ms gap; "~15 s" was a loose observation bound.** Mechanism now: build() returns neither Ok nor Err while the main thread stays healthy; leading candidate by elimination = the CreateWindow message never reached the handler (unproven; no silent-drop path in vendored code). Unclosable window: wedge explanation gone (RDP miss or unregistered window id remain).
+- **Round 59 §11 follow-up (2026-11-17 18:06 EET):** all four branches ruled out; revised plan §11.4 = instrument first, fix second (6 logging-only changes + one instrumented VPS run). **Incident: the follow-up agent overwrote round59-investigation.md while appending §11 and rebuilt it condensed (532 lines vs 922 original); §8/§9.1/§9.5/§9.6/§9.7/§10 verbatim, §0–§7/§9.2–§9.4 faithful reconstructions; §11 intact, backed up to /tmp/section11-backup.md.**
+- **Round 60 (approved 2026-11-17 18:10 EET):** §11.4 items 1–3 implemented, logging only — monitor/watchdog started lines, watchdog tick every 60 s, build() entered with thread id, thread id on created:/FAILED lines, watchdog probe-failed line. Engine suite 459/459; npm build passes. No behavior change; §9.5 engine latent fixes NOT in this round. VPS build + instrumented test pending.
