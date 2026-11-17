@@ -421,10 +421,12 @@ fn maybe_auto_reload(
 /// (§9.1c, Round 57). wry 0.57 surfaces no renderer-failure event
 /// at all — a dead renderer is invisible to the app, which is how
 /// both windows sat blank white for half an hour in the r55 test
-/// with nothing in the log. The registration goes through wry's
-/// `WebViewExtWindows` trait (`Webview::with_webview` hands the
-/// closure the platform webview; `webview()` returns the raw
-/// `ICoreWebView2`) and the `webview2-com 0.39` crate
+/// with nothing in the log. The registration goes through Tauri's
+/// `Webview::with_webview` (it hands the closure the platform
+/// webview, whose `controller()` returns the
+/// `ICoreWebView2Controller`; the raw `ICoreWebView2` comes from
+/// it via the `CoreWebView2` propget — Tauri's `PlatformWebview`
+/// exposes no `webview()` method) and the `webview2-com 0.39` crate
 /// (`ProcessFailedEventHandler::create` +
 /// `ICoreWebView2::add_ProcessFailed`), mirroring wry's own
 /// `PermissionRequested` registration in wry 0.57.2
@@ -457,8 +459,14 @@ fn register_process_failed(
     // registration only means the heartbeat monitor is the sole
     // detector — a window creation must never fail over it.
     let _ = window.with_webview(move |platform_webview| {
-        use wry::WebViewExtWindows;
-        let core = platform_webview.webview();
+        let controller = platform_webview.controller();
+        let mut core: Option<webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2> = None;
+        if unsafe { controller.CoreWebView2(&mut core) }.is_err() {
+            return;
+        }
+        let Some(core) = core else {
+            return;
+        };
         let handler =
             webview2_com::ProcessFailedEventHandler::create(Box::new(move |_sender, args| {
                 use webview2_com::Microsoft::Web::WebView2::Win32::{
