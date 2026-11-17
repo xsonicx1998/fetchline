@@ -460,12 +460,9 @@ fn register_process_failed(
     // detector — a window creation must never fail over it.
     let _ = window.with_webview(move |platform_webview| {
         let controller = platform_webview.controller();
-        let mut core: Option<webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2> = None;
-        if unsafe { controller.CoreWebView2(&mut core) }.is_err() {
-            return;
-        }
-        let Some(core) = core else {
-            return;
+        let core = match unsafe { controller.CoreWebView2() } {
+            Ok(core) => core,
+            Err(_) => return,
         };
         let handler =
             webview2_com::ProcessFailedEventHandler::create(Box::new(move |_sender, args| {
