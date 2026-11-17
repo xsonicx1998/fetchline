@@ -4995,6 +4995,22 @@ VPS build is the first compile. Decisive log check (§8.1): `progress window
 progress-<id> created: <url>` present = creation completed (renderer branch),
 absent = main-thread wedge confirmed.
 
+**E0277 fix (2026-11-17 ~15:46 EET, same round):** the first VPS build failed
+with exactly one error — `NonNull<c_void>` cannot be sent between threads
+safely (lib.rs:614): `main_webview_environment` sent the environment through
+`mpsc::Sender<ICoreWebView2Environment>`, but `with_webview` requires a `Send`
+closure. Fix: a Windows-only newtype `SendableWebView2Environment` with
+`unsafe impl Send`; the channel now carries the wrapper. Safety (documented
+in the code, no agility claimed — Microsoft's WebView2 threading doc does NOT
+state the environment is agile): move-only use — the worker never calls a
+method on it, only stores it in the builder; the only COM call
+(`CreateCoreWebView2Controller`) runs on the main thread; clone/drop is only
+`AddRef`/`Release` (thread-safe by COM rules). This is the same transfer
+Tauri itself performs: `WebviewAttributes` (holding this exact type) is
+`unsafe impl Send` (tauri-runtime-2.12.2/src/webview.rs:434). 5 s
+`recv_timeout` unchanged. `npm run build` passes; `cargo fmt` clean in the
+edited region. VPS build is the real compile check.
+
 ## Known limitations, not bugs (round-24 additions)
 
 - The Tauri shell never compiles or runs on this VM, so a

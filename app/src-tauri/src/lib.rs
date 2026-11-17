@@ -594,6 +594,41 @@ fn register_process_failed(
 ) {
 }
 
+/// A WebView2 environment that may be moved between threads.
+/// `ICoreWebView2Environment` is `!Send` (it wraps a raw COM
+/// pointer), so it cannot cross the `with_webview` closure's
+/// `Send` bound — or a channel — on its own. This wrapper exists
+/// only to carry the pointer from the main thread (where
+/// `with_webview` runs) back to the calling worker, which stores
+/// it in the window builder without ever calling a method on it.
+///
+/// # Safety
+///
+/// The wrapped value is only ever *moved* between threads, never
+/// *used* off the main thread: the worker holds it and passes it
+/// to `WebviewWindowBuilder::with_environment`, and the only COM
+/// method call on it — wry's `CreateCoreWebView2Controller` —
+/// runs on the main thread, the thread that created it. Cloning
+/// or dropping the pointer performs only COM `AddRef`/`Release`,
+/// which COM requires to be thread-safe. This is the same transfer
+/// Tauri itself already performs: `WebviewAttributes` (which holds
+/// this exact type) is `unsafe impl Send` in tauri-runtime
+/// (`tauri-runtime-2.12.2/src/webview.rs:434`), and that is how
+/// the environment travels from the worker to the main thread in
+/// the `builder.with_environment` call below. Microsoft's WebView2
+/// threading doc does NOT state the environment is agile, so no
+/// agility is claimed here — the guarantee is the narrower
+/// move-only use above. Windows only.
+#[cfg(target_os = "windows")]
+struct SendableWebView2Environment(
+    webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment,
+);
+
+// SAFETY: see the struct docs — move-only, never called off the
+// main thread; AddRef/Release are thread-safe by COM rules.
+#[cfg(target_os = "windows")]
+unsafe impl Send for SendableWebView2Environment {}
+
 /// Round 58 (§9.1): the main window's WebView2 environment, so a
 /// progress window can share it instead of creating a fresh
 /// environment on the main thread. A fresh environment creation
@@ -609,13 +644,13 @@ fn main_webview_environment(
     log: Option<&std::path::Path>,
 ) -> Option<webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment> {
     let main = app.get_webview_window("main")?;
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = std::sync::mpsc::channel::<SendableWebView2Environment>();
     // `with_webview` runs the closure on the main thread.
     let _ = main.with_webview(move |platform_webview| {
-        let _ = tx.send(platform_webview.environment());
+        let _ = tx.send(SendableWebView2Environment(platform_webview.environment()));
     });
     match rx.recv_timeout(std::time::Duration::from_secs(5)) {
-        Ok(env) => Some(env),
+        Ok(env) => Some(env.0),
         Err(_) => {
             log_startup(
                 log,
