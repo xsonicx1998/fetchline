@@ -2426,6 +2426,202 @@ fn build_system_tray(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Round 69 (a) — register the browser extension's native messaging
+/// host on startup (Windows only, best-effort).
+///
+/// Root cause of the Round 68 retest's "Not connected": the repo
+/// manifest hardcodes `C:\Program Files\Sonic Manager\fetchline-host.exe`
+/// (the MSI install path), and nothing registers the host except the
+/// installer (the NSIS post-install script / MSI custom action). The
+/// VPS runs a dev build that was never installed, so Chrome had no
+/// `HKCU\...\NativeMessagingHosts\com.fetchline.host` key at all —
+/// the popup's ping could never reach the host even though the host
+/// binary itself is fine (it answers `pong` to a framed ping, and
+/// parses native messages on the VPS).
+///
+/// So the app registers itself on every launch: it writes the
+/// manifest (real host-exe path, UTF-8 WITHOUT a BOM — Chrome
+/// rejects a BOM-prefixed manifest, which is why the NSIS script
+/// writes it that way too) into the app data dir, and points the
+/// Chrome + Edge (+ Firefox) `NativeMessagingHosts` registry keys
+/// at it. Registration is idempotent — a key that already points
+/// at the same manifest is left alone — and any failure is logged,
+/// never fatal: a missing host registration must not stop the app
+/// from starting.
+#[cfg(target_os = "windows")]
+fn register_native_host_best_effort(app: &AppHandle, log: Option<&std::path::Path>) {
+    use std::os::windows::process::CommandExt;
+    // CREATE_NO_WINDOW (Win32): keep the reg.exe calls invisible —
+    // no console window flashing on every launch.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const EXTENSION_ID: &str = "mioamdgogndabpcjbdekggcnlkkfpmbj";
+    const FIREFOX_EXTENSION_ID: &str = "fetchline@fetchline.app";
+
+    // Where the host exe lives: next to the app exe in an installed
+    // build, or under src-tauri/binaries in a dev build (the exe
+    // sits in src-tauri/target/release, two levels below the app
+    // dir). First existing candidate wins.
+    let exe_dir = match std::env::current_exe() {
+        Ok(exe) => match exe.parent() {
+            Some(dir) => dir.to_path_buf(),
+            None => {
+                log_startup(log, "native host: cannot find the app exe directory");
+                return;
+            }
+        },
+        Err(e) => {
+            log_startup(log, &format!("native host: current_exe failed: {e}"));
+            return;
+        }
+    };
+    let candidates = [
+        exe_dir.join("fetchline-host.exe"),
+        exe_dir
+            .join("binaries")
+            .join("fetchline-host.exe"),
+        exe_dir
+            .join("binaries")
+            .join("fetchline-host-x86_64-pc-windows-msvc.exe"),
+        exe_dir
+            .join("..")
+            .join("..")
+            .join("binaries")
+            .join("fetchline-host-x86_64-pc-windows-msvc.exe"),
+    ];
+    let host_exe = match candidates.iter().find(|p| p.is_file()) {
+        Some(p) => p.clone(),
+        None => {
+            log_startup(
+                log,
+                "native host: fetchline-host.exe not found next to the app binary; extension host not registered",
+            );
+            return;
+        }
+    };
+    // Canonicalize so the manifest holds a clean absolute path
+    // (no `..\..` components from the dev-build candidate).
+    let host_exe = std::fs::canonicalize(&host_exe).unwrap_or(host_exe);
+    let host_path = host_exe.to_string_lossy().into_owned();
+
+    // Manifests live in the app data dir, next to startup.log —
+    // a place the app owns in every layout (installed or dev).
+    // `fs::write` of a String is UTF-8 without a BOM by
+    // construction, which is what Chrome requires.
+    let manifest_dir = match app.path().app_data_dir() {
+        Ok(dir) => dir.join("fetchline").join("native-host"),
+        Err(e) => {
+            log_startup(log, &format!("native host: app_data_dir failed: {e}"));
+            return;
+        }
+    };
+    if let Err(e) = std::fs::create_dir_all(&manifest_dir) {
+        log_startup(
+            log,
+            &format!("native host: cannot create {}: {e}", manifest_dir.display()),
+        );
+        return;
+    }
+    let chrome_manifest = manifest_dir.join("com.fetchline.host.json");
+    let firefox_manifest = manifest_dir.join("com.fetchline.host.firefox.json");
+    let chrome_json = serde_json::json!({
+        "allowed_origins": [format!("chrome-extension://{EXTENSION_ID}/")],
+        "description": "Sonic Manager native messaging host — lets the Sonic Manager browser extension send links to the Sonic Manager desktop app",
+        "name": "com.fetchline.host",
+        "path": host_path,
+        "type": "stdio"
+    });
+    let firefox_json = serde_json::json!({
+        "allowed_extensions": [FIREFOX_EXTENSION_ID],
+        "description": "Sonic Manager native messaging host — lets the Sonic Manager browser extension send links to the Sonic Manager desktop app",
+        "name": "com.fetchline.host",
+        "path": host_path,
+        "type": "stdio"
+    });
+    for (path, json) in [
+        (&chrome_manifest, &chrome_json),
+        (&firefox_manifest, &firefox_json),
+    ] {
+        let text = match serde_json::to_string_pretty(json) {
+            Ok(t) => t,
+            Err(e) => {
+                log_startup(log, &format!("native host: manifest JSON failed: {e}"));
+                return;
+            }
+        };
+        if let Err(e) = std::fs::write(path, text) {
+            log_startup(
+                log,
+                &format!("native host: cannot write {}: {e}", path.display()),
+            );
+            return;
+        }
+    }
+    log_startup(
+        log,
+        &format!("native host: manifest written for {host_path}"),
+    );
+
+    // Point each browser's NativeMessagingHosts key at the
+    // manifest. `reg query` first: a key already pointing at the
+    // same manifest is left alone, so a normal launch spawns no
+    // writes at all.
+    let chrome_manifest_str = chrome_manifest.to_string_lossy().into_owned();
+    let firefox_manifest_str = firefox_manifest.to_string_lossy().into_owned();
+    let keys: [(&str, &str, &str); 3] = [
+        (
+            "Google Chrome",
+            r"HKCU\Software\Google\Chrome\NativeMessagingHosts\com.fetchline.host",
+            &chrome_manifest_str,
+        ),
+        (
+            "Microsoft Edge",
+            r"HKCU\Software\Microsoft\Edge\NativeMessagingHosts\com.fetchline.host",
+            &chrome_manifest_str,
+        ),
+        (
+            "Mozilla Firefox",
+            r"HKCU\Software\Mozilla\NativeMessagingHosts\com.fetchline.host",
+            &firefox_manifest_str,
+        ),
+    ];
+    for (browser, key, manifest) in keys {
+        let already = std::process::Command::new("reg")
+            .args(["query", key, "/ve"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map(|out| {
+                out.status.success()
+                    && String::from_utf8_lossy(&out.stdout).contains(manifest)
+            })
+            .unwrap_or(false);
+        if already {
+            log_startup(log, &format!("native host: {browser} already registered"));
+            continue;
+        }
+        match std::process::Command::new("reg")
+            .args(["add", key, "/ve", "/t", "REG_SZ", "/d", manifest, "/f"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+        {
+            Ok(out) if out.status.success() => log_startup(
+                log,
+                &format!("native host: {browser} registered -> {manifest}"),
+            ),
+            Ok(out) => log_startup(
+                log,
+                &format!(
+                    "native host: {browser} registration failed: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
+            ),
+            Err(e) => log_startup(
+                log,
+                &format!("native host: {browser} registration failed to run reg.exe: {e}"),
+            ),
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // BUG-029: a panic on the main thread exits silently in a
@@ -2542,6 +2738,13 @@ pub fn run() {
             // cap, proxy, retries) before any download starts.
             let _ = manager.apply_settings();
             log_startup(log, "settings applied");
+            // Round 69 (a): self-register the extension's native
+            // messaging host so Chrome/Edge/Firefox can reach the
+            // app even when it was never installed (a dev build
+            // has no installer to do it). Best-effort — a failure
+            // is logged, never fatal.
+            #[cfg(target_os = "windows")]
+            register_native_host_best_effort(app.handle(), log);
             // Forward engine progress events to the frontend.
             let handle = app.handle().clone();
             let mut rx = manager.subscribe();

@@ -1006,6 +1006,29 @@ impl Store {
     /// double drain can never accept the same link twice. Deciding
     /// the row also wipes its cookies column (S13 finish): cookies
     /// are held only while the row is pending, never past the drain.
+    /// Round 69 (d) — expire interactive browser/video captures
+    /// older than 24 h. A capture the user never answered used to
+    /// sit `pending` forever, and the frontend's capture queue
+    /// re-offered it on every launch — closing the Add URL dialog
+    /// reopened it instantly with the stale link, which looked
+    /// exactly like an unclosable dialog (Round 68 retest). An
+    /// expired row is marked `rejected` with the reason, so it
+    /// never reaches the dialog again. `download_all` rows are
+    /// NOT expired here — the drain decides those itself.
+    /// `created_at` is `datetime('now')` text, so the comparison
+    /// is lexicographic and correct for that format.
+    pub fn expire_stale_pending_links(&self) -> Result<usize> {
+        let conn = self.lock_conn();
+        let changed = conn.execute(
+            "UPDATE pending_links SET status = 'rejected', \
+             error = 'Expired — the link was captured more than a day ago and was never confirmed', cookies = NULL \
+             WHERE status = 'pending' AND source IN ('browser', 'video') \
+             AND created_at < datetime('now', '-24 hours')",
+            [],
+        )?;
+        Ok(changed)
+    }
+
     pub fn mark_pending_link(
         &self,
         id: &str,

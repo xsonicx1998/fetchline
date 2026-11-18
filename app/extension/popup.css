@@ -57,6 +57,20 @@ h1 {
 .status-bad { color: #F02DCD; background: rgba(240, 45, 205, 0.12); border-color: rgba(240, 45, 205, 0.35); }
 .status-bad .dot { background: #F02DCD; box-shadow: 0 0 8px #F02DCD; }
 
+/* Round 69 — the host's own words under the pill: when the ping
+   fails, Chrome's `lastError.message` (e.g. "Specified native
+   messaging host not found.") says WHY, so a future failure is
+   diagnosable instead of a bare "Not connected". Empty when
+   connected. */
+.status-detail {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 16px;
+  color: #F2A9E4;
+  overflow-wrap: break-word;
+}
+.status-detail:empty { display: none; }
+
 main { display: flex; flex-direction: column; gap: 14px; }
 
 .dev-card {

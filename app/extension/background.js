@@ -6,8 +6,11 @@
 //    us the URL, so no content script is injected into any page).
 //  * Watches downloads the browser starts. When catching is on, the
 //    site is not opted out and the file type is in the catch list,
-//    it cancels the browser download and hands the URL to the
-//    desktop app instead. Page loads are never blocked.
+//    it pauses the browser download, hands the URL to the desktop
+//    app, and cancels the browser copy ONLY once the app confirms
+//    receipt. If the hand-off fails the browser download is resumed
+//    and proceeds normally in Chrome — a failed hand-off never
+//    swallows the file (Round 69). Page loads are never blocked.
 //  * Records every hand-off in chrome.storage.local for the popup
 //    to show (Milestone 2): the last hand-off's outcome and time,
 //    and the pending count the host reports — never a URL.
@@ -127,16 +130,35 @@ async function recordHandoff(ok, message, pendingCount) {
 
 function sendToHost(message) {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    // Round 69 (a): the host is a one-shot process that answers
+    // in milliseconds when healthy; a reply that never comes
+    // (crashed host, wedged DB open) must fail loudly instead of
+    // hanging the caller forever — the download watcher pauses
+    // the browser download while it waits, so an unbounded wait
+    // would stall the file. A late reply after the timeout is a
+    // harmless no-op (the promise already settled).
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error("Sonic Manager did not answer within 15 seconds"));
+    }, 15000);
+    const done = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn(value);
+    };
     try {
       chrome.runtime.sendNativeMessage(HOST_NAME, message, (reply) => {
         if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
+          done(reject, new Error(chrome.runtime.lastError.message));
           return;
         }
-        resolve(reply || null);
+        done(resolve, reply || null);
       });
     } catch (err) {
-      reject(err);
+      done(reject, err);
     }
   });
 }
@@ -276,10 +298,22 @@ chrome.contextMenus.onClicked.addListener(async (info) => {
       if (!url) return;
       await handToFetchline({ type: "download_link", url, referrer: info.pageUrl || null });
     }
-  } catch {
-    // The user gets no toast from a service worker; the popup shows
-    // the connection state, and the link stays where it was (the
+  } catch (err) {
+    // Round 69 — the old empty catch swallowed injection failures
+    // (no permission, tab gone, scripting error), so "Find videos
+    // on this page" could do nothing with no trace at all — the
+    // Round 68 retest's video failure. Record it for the popup,
+    // which shows the last scan outcome. The user gets no toast
+    // from a service worker, and the link stays where it was (the
     // browser download was never started for a menu click).
+    await chrome.storage.local
+      .set({
+        lastVideoScan: {
+          error: err && err.message ? err.message : String(err),
+          at: Date.now(),
+        },
+      })
+      .catch(() => {});
   }
 });
 
@@ -303,41 +337,70 @@ chrome.downloads.onCreated.addListener(async (item) => {
     // download URL need not end in .zip); fall back to the URL.
     const ext = extensionOfFilename(item.filename) || extensionOf(item.url);
     if (!DEFAULT_CATCH_EXTENSIONS.includes(ext)) return;
-    // Cancel the browser download first, then hand the URL over, so
-    // the file is never downloaded twice.
+    // Round 69 (a) — NEVER cancel the browser download until the
+    // app confirms receipt. The old order cancelled first and
+    // handed over second, so a failed hand-off silently swallowed
+    // the file (neither in the app nor in Chrome — the Round 68
+    // retest's auto-capture failure). The new order:
+    //   1. pause the browser download (best-effort: a tiny file
+    //      may already be finished, and then there is nothing to
+    //      pause);
+    //   2. hand the URL to the desktop app and WAIT for its reply;
+    //   3. only on a confirmed receipt, cancel (and erase) the
+    //      browser copy;
+    //   4. on ANY hand-off failure, resume the browser download
+    //      so it proceeds normally in Chrome — the file is never
+    //      lost, it just downloads in the browser instead.
     // BUG-049 (Round 50): chrome.downloads.cancel takes the bare
     // download id — cancel(downloadId) — NOT a query object.
     // The old call cancel({ id }) threw "No matching signature" in
     // real Chrome on EVERY download, the empty catch below swallowed
     // it, and the browser download sailed past the watcher uncaught
     // with no trace (the Node fake destructured an object, so the
-    // unit suite never saw it). A cancel can still fail when the
-    // download already finished — a small file can complete before
-    // this async handler runs — and then there is nothing left to
-    // cancel; the URL is handed over anyway so it still lands in
-    // Sonic Manager instead of vanishing silently, and the browser's
-    // finished copy stays where it is (only a cancelled download is
-    // erased from the browser's list).
+    // unit suite never saw it).
+    let paused = false;
+    try {
+      await chrome.downloads.pause(item.id);
+      paused = true;
+    } catch {
+      // Already finished (or otherwise unpausable): the browser
+      // copy stays where it is; hand over anyway so the link
+      // still lands in Sonic Manager instead of vanishing.
+    }
+    let handedOver = false;
+    try {
+      await handToFetchline({
+        type: "download_link",
+        url: item.url,
+        referrer: item.referrer || null,
+      });
+      handedOver = true;
+    } catch {
+      // The hand-off failed and the browser download is still
+      // there (paused, or finished): resume it so Chrome
+      // finishes the file normally. `handToFetchline` already
+      // recorded the failure for the popup.
+      if (paused) {
+        await chrome.downloads.resume(item.id).catch(() => {});
+      }
+      return;
+    }
+    if (!handedOver) return;
     let cancelled = false;
     try {
       await chrome.downloads.cancel(item.id);
       cancelled = true;
     } catch {
-      // Already finished (or otherwise uncancellable): hand over anyway.
+      // Already finished while the hand-off was in flight: the
+      // browser's finished copy stays where it is (only a
+      // cancelled download is erased from the browser's list).
     }
     if (cancelled) {
       await chrome.downloads.erase({ id: item.id }).catch(() => {});
     }
-    await handToFetchline({
-      type: "download_link",
-      url: item.url,
-      referrer: item.referrer || null,
-    });
   } catch {
-    // If the hand-off fails the browser download is already
-    // cancelled; there is no safe automatic retry from here (the
-    // URL would download twice if the first hand-off actually
-    // landed). The user can right-click the link and try again.
+    // Unexpected watcher failure before the hand-off: the browser
+    // download was never cancelled by us, so it proceeds normally.
   }
 });
 

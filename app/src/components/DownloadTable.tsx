@@ -327,12 +327,15 @@ function MenuSeparator() {
  *    finished file to open).
  *  - Open with... / Open folder: only when a file is on disk
  *    (complete, or paused/failed with bytes already saved).
- *  - Resume Download: only when paused or failed.
+ *  - Resume Download: only when paused, failed, or waiting
+ *    (queued) — a queued row is a download that was added but
+ *    never started (Round 69 (b)).
  *  - Stop Download: only while downloading.
  *  - Refresh download address: only when paused or failed.
  *  - Move to queue: only shown when queues exist; a queue the
  *    download is already in is disabled. Delete from queue is
- *    only shown while the download is in a queue.
+ *    always shown, disabled while the download is in no queue
+ *    (Round 69 (e)).
  *  - Open progress window, Redownload, Remove, Properties:
  *    always available. */
 function RowMenu({
@@ -387,9 +390,19 @@ function RowMenu({
   /** A file exists on disk once the download finished or any
    *  bytes were saved (paused / failed with progress). */
   const hasFile = isComplete || d.downloaded_bytes > 0
-  const canResume = d.status === 'paused' || d.status === 'error'
+  // Round 69 (b) — `queued` ("Waiting") rows are resumable too
+  // (same reason as the toolbar: the engine accepts any
+  // non-complete, non-downloading row, and a queued row is a
+  // download that was added but never started). The menu's Resume
+  // used to be greyed for exactly the rows that most needed it.
+  const canResume = d.status === 'paused' || d.status === 'error' || d.status === 'queued'
   const isDownloading = d.status === 'downloading'
-  const showQueueSection = queues.length > 0 || d.queue_id !== null
+  // Round 69 (e) — the queue section is always shown: "Delete
+  // from queue" is a state-gated item like the rest (disabled
+  // when the row is in no queue), never hidden. It used to render
+  // only when `d.queue_id !== null`, so the Round 68 retest found
+  // no such item on any row it checked — every row it checked
+  // was in no queue.
   return (
     <div
       ref={menuRef}
@@ -449,40 +462,43 @@ function RowMenu({
         onClick={closeMenu(onRefreshAddress)}
       />
       <MenuItem label="Remove" onClick={closeMenu(onRemove)} />
-      {showQueueSection ? (
+      <MenuSeparator />
+      {queues.length > 0 ? (
         <>
-          <MenuSeparator />
-          {queues.length > 0 ? (
-            <>
-              <button
-                type="button"
-                aria-expanded={queueSubOpen}
-                onClick={onToggleQueueSub}
-                className="flex w-full items-center justify-between rounded px-3 py-1.5 text-left text-sm text-text hover:bg-surface-2"
-              >
-                <span>Move to queue</span>
-                <span aria-hidden="true">{queueSubOpen ? '▾' : '▸'}</span>
-              </button>
-              {queueSubOpen ? (
-                <div className="ml-3 border-l border-border pl-1">
-                  {queues.map((q) => (
-                    <MenuItem
-                      key={q.id}
-                      label={q.name}
-                      disabled={d.queue_id === q.id}
-                      title={d.queue_id === q.id ? 'Already in this queue' : undefined}
-                      onClick={closeMenu(() => onMoveToQueue(q.id))}
-                    />
-                  ))}
-                </div>
-              ) : null}
-            </>
-          ) : null}
-          {d.queue_id !== null ? (
-            <MenuItem label="Delete from queue" onClick={closeMenu(onDeleteFromQueue)} />
+          <button
+            type="button"
+            aria-expanded={queueSubOpen}
+            onClick={onToggleQueueSub}
+            className="flex w-full items-center justify-between rounded px-3 py-1.5 text-left text-sm text-text hover:bg-surface-2"
+          >
+            <span>Move to queue</span>
+            <span aria-hidden="true">{queueSubOpen ? '▾' : '▸'}</span>
+          </button>
+          {queueSubOpen ? (
+            <div className="ml-3 border-l border-border pl-1">
+              {queues.map((q) => (
+                <MenuItem
+                  key={q.id}
+                  label={q.name}
+                  disabled={d.queue_id === q.id}
+                  title={d.queue_id === q.id ? 'Already in this queue' : undefined}
+                  onClick={closeMenu(() => onMoveToQueue(q.id))}
+                />
+              ))}
+            </div>
           ) : null}
         </>
       ) : null}
+      <MenuItem
+        label="Delete from queue"
+        disabled={d.queue_id === null}
+        title={
+          d.queue_id === null
+            ? 'Only a download in a queue can be removed from its queue'
+            : undefined
+        }
+        onClick={closeMenu(onDeleteFromQueue)}
+      />
       <MenuSeparator />
       <p className="px-3 pb-1 pt-2 text-xs font-semibold uppercase text-text-muted">
         Move to category

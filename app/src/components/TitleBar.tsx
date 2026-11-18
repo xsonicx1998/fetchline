@@ -35,6 +35,7 @@ export function TitleBar({
   hideOnClose = false,
   showMinimize = true,
   showMaximize = true,
+  onClose,
 }: {
   title: string
   icon?: boolean
@@ -47,6 +48,11 @@ export function TitleBar({
    *  fixed-size dialog has nothing to maximize. */
   showMinimize?: boolean
   showMaximize?: boolean
+  /** Round 69 (d) — when the bar is drawn inside the MAIN window
+   *  (the add-time error dialog rendered as an overlay, not its
+   *  own OS window), X must dismiss the overlay, not close the
+   *  app's main window. Absent, X keeps its old behaviour. */
+  onClose?: () => void
 }) {
   const [maximized, setMaximized] = useState(false)
 
@@ -81,6 +87,10 @@ export function TitleBar({
   }
 
   function close() {
+    if (onClose) {
+      onClose()
+      return
+    }
     if (hideOnClose) {
       void getCurrentWindow().hide().catch(() => undefined)
     } else {

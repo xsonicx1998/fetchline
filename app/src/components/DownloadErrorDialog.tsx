@@ -32,8 +32,36 @@ import { TitleBar } from './TitleBar'
  *
  *  The row is polled until it appears (same pattern as the
  *  progress window and the complete dialog); a download that
- *  vanished from the list shows the empty state instead. */
-export function DownloadErrorDialog({ downloadId }: { downloadId: string }) {
+ *  vanished from the list shows the empty state instead.
+ *
+ *  Round 69 (d) — the message variant: an ADD-time failure (the
+ *  probe said 404, the server could not be reached) creates no
+ *  download row, so the Round 68 trigger — a row flipping to
+ *  `error` — could never fire for it, and the failure existed
+ *  only as the Add dialog's inline pink text. With `message`
+ *  given, the dialog shows that text directly (no polling), with
+ *  `title` in the title bar and `onClose` dismissing it — the
+ *  Add dialog renders it as an overlay in the main window, so
+ *  OK/X must dismiss the overlay, never close the main window. */
+export function DownloadErrorDialog({
+  downloadId,
+  message,
+  title,
+  onClose,
+}: {
+  /** The failed download's row id — the dialog polls
+   *  `listDownloads` for it. Absent when `message` is given. */
+  downloadId?: string
+  /** An add-time error: there is no download row, so the Details
+   *  text is passed directly and no polling happens. */
+  message?: string
+  /** Title-bar title for the message variant (the file name the
+   *  user typed, or "Download failed"). */
+  title?: string
+  /** Dismiss handler for the message variant (overlay in the
+   *  main window). Absent, OK/X close this OS window. */
+  onClose?: () => void
+}) {
   const [download, setDownload] = useState<DownloadRow | null>(null)
   const [loaded, setLoaded] = useState(false)
   const [pollError, setPollError] = useState<string | null>(null)
@@ -53,6 +81,8 @@ export function DownloadErrorDialog({ downloadId }: { downloadId: string }) {
   }, [])
 
   useEffect(() => {
+    // Round 69 (d) — the message variant has no row to poll for.
+    if (message !== undefined || !downloadId) return
     let stopped = false
     async function poll() {
       if (foundRef.current) return
@@ -82,13 +112,24 @@ export function DownloadErrorDialog({ downloadId }: { downloadId: string }) {
       stopped = true
       window.clearInterval(timer)
     }
-  }, [downloadId])
+  }, [downloadId, message])
 
   function closeDialog() {
+    if (onClose) {
+      onClose()
+      return
+    }
     void getCurrentWindow().close()
   }
 
-  if (!loaded || !download) {
+  // Round 69 (d) — the message variant shows its text directly;
+  // the row variant shows the row's `error_message`.
+  const isMessage = message !== undefined
+  const detailsText =
+    message ?? download?.error_message ?? 'The download failed for an unknown reason.'
+  const barTitle = title ?? download?.filename ?? 'Download failed'
+
+  if (!isMessage && (!loaded || !download)) {
     return (
       <div className="flex h-full flex-col bg-bg text-text">
         <TitleBar title="Download failed" showMinimize={false} showMaximize={false} />
@@ -112,7 +153,7 @@ export function DownloadErrorDialog({ downloadId }: { downloadId: string }) {
 
   return (
     <div className="flex h-full flex-col bg-bg text-text">
-      <TitleBar title={download.filename} showMinimize={false} showMaximize={false} />
+      <TitleBar title={barTitle} showMinimize={false} showMaximize={false} onClose={onClose} />
       {/* Purple→pink divider under the title bar, like the
           progress bar (approved mockup). */}
       <div
@@ -143,9 +184,7 @@ export function DownloadErrorDialog({ downloadId }: { downloadId: string }) {
           <p className="mt-3 text-[15px] leading-relaxed">
             <b className="font-semibold">Details:</b>
             <br />
-            <span className="text-danger">
-              {download.error_message ?? 'The download failed for an unknown reason.'}
-            </span>
+            <span className="text-danger">{detailsText}</span>
           </p>
         </div>
       </div>

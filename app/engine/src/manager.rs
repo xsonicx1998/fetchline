@@ -88,7 +88,15 @@ const SEGMENT_STALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// retry backoff, so backoffs never trip it.
 const RUN_STALL_TIMEOUT: Duration = Duration::from_secs(180);
 const MIN_SPLIT_REMAINING: u64 = 256 * 1024;
-const INITIAL_SEGMENTS: usize = 4;
+/// Round 69 (f) — the smallest segment worth opening a connection
+/// for (256 KiB). `initial_ranges` splits a download into as many
+/// segments as the "Connections per download" setting asks for,
+/// but never smaller than this: a 1 MiB file with 32 connections
+/// would otherwise open 32 connections for ~32 KiB each. The
+/// floor is deliberately below the 512 KiB segments the existing
+/// tests pin (a 2 MiB file with 4 connections = 4 segments), so
+/// those expectations still hold.
+const MIN_SEGMENT_BYTES: u64 = 256 * 1024;
 const MIN_SIZE_TO_SEGMENT: u64 = 1024 * 1024;
 
 /// Epoch milliseconds — the independent run watchdog's clock
@@ -1540,6 +1548,12 @@ impl DownloadManager {
     /// exclusion check above still runs first, so an excluded
     /// capture is rejected here and never reaches the dialog.
     pub async fn drain_pending_links(self: &Arc<Self>) -> Result<DrainSummary> {
+        // Round 69 (d) — expire interactive captures the user
+        // never answered (see `expire_stale_pending_links`): a
+        // stale row re-offered forever made the Add URL dialog
+        // look unclosable. Runs here because the drain runs at
+        // startup and every 30 s, before any early return.
+        let _ = self.store.expire_stale_pending_links();
         let settings = self.store.get_settings().unwrap_or_default();
         let pending = self.store.list_pending_links(Some("pending"))?;
         let mut summary = DrainSummary {
@@ -5877,12 +5891,23 @@ fn remote_changed(info: &ProbeInfo, row: &DownloadRow) -> Option<bool> {
     }
 }
 
-/// Initial segment ranges for a probe: 4 segments when the file is large
-/// and range-capable, otherwise a single segment.
+/// Initial segment ranges for a probe: as many segments as the
+/// "Connections per download" setting asks for (up to 32) when the
+/// file is large and range-capable, otherwise a single segment.
+/// Segments are never smaller than `MIN_SEGMENT_BYTES`, so a small
+/// file with a high setting still splits sanely.
+///
+/// Round 69 (f) — this used to cap at `INITIAL_SEGMENTS` (4):
+/// `INITIAL_SEGMENTS.min(max_connections)` meant the setting could
+/// only ever REDUCE the segment count below 4, never raise it —
+/// the Round 68 retest's "8 connections set, 4 used". The setting
+/// is the segment count now; the 4-segment tests still pass
+/// because their managers run with max_connections = 4.
 fn initial_ranges(info: &ProbeInfo, max_connections: usize) -> Vec<(i64, Option<i64>)> {
     match (info.size, info.accept_ranges) {
         (Some(size), true) if size >= MIN_SIZE_TO_SEGMENT => {
-            let n = INITIAL_SEGMENTS.min(max_connections).max(1) as u64;
+            let by_size = (size / MIN_SEGMENT_BYTES) as usize;
+            let n = max_connections.min(by_size).max(1) as u64;
             let chunk = size / n;
             (0..n)
                 .map(|i| {

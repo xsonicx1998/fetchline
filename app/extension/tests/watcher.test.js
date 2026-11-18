@@ -6,10 +6,13 @@
 // of download events, the way a real browser would fire them:
 // a downloadable link, an excluded site, integration off, a file
 // type outside the catch list, and the same URL twice. The
-// assertions cover the whole decision: cancel the browser
-// download, erase it, hand the URL to the host (with that URL's
-// cookies, when the browser has any), and record the hand-off —
-// or leave the browser download completely alone. BUG-049: the
+// assertions cover the whole decision: pause the browser
+// download, hand the URL to the host (with that URL's
+// cookies, when the browser has any), cancel + erase the browser
+// copy ONLY once the app confirms receipt — or resume the browser
+// download when the hand-off fails, so the file is never
+// swallowed (Round 69) — or leave the browser download
+// completely alone. BUG-049: the
 // fake's cancel enforces Chrome's real signature (a bare download
 // id — cancel({ id }) throws "No matching signature" in real
 // Chrome), and a cancel failure (download already finished) must
@@ -29,11 +32,13 @@ const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
 // Test-only dummy cookie values, never real ones.
 const DUMMY_COOKIES = [{ name: "session", value: "test-dummy-value" }];
 
-function loadBackground({ seed = {}, cookiesForUrl = () => [], cancelThrows = false } = {}) {
+function loadBackground({ seed = {}, cookiesForUrl = () => [], cancelThrows = false, hostError = null } = {}) {
   const storage = { ...seed };
   const sentMessages = [];
   const cancelled = [];
   const erased = [];
+  const paused = [];
+  const resumed = [];
   const listeners = {};
   const chrome = {
     storage: {
@@ -56,6 +61,11 @@ function loadBackground({ seed = {}, cookiesForUrl = () => [], cancelThrows = fa
       onMessage: { addListener(fn) { listeners.message = fn; } },
       sendNativeMessage(_host, message, cb) {
         sentMessages.push(message);
+        if (hostError) {
+          chrome.runtime.lastError = { message: hostError };
+          cb(null);
+          return;
+        }
         chrome.runtime.lastError = null;
         cb({ ok: true, pending_count: sentMessages.length, message: "Link queued — Fetchline will pick it up" });
       },
@@ -71,6 +81,15 @@ function loadBackground({ seed = {}, cookiesForUrl = () => [], cancelThrows = fa
       // Chrome threw "No matching signature" on every download while
       // this fake happily destructured the object. The fake now
       // enforces the real signature, so a wrong call fails here.
+      // Round 69: pause/resume take the same bare id.
+      pause: async (id) => {
+        if (typeof id !== "number") throw new Error("No matching signature.");
+        paused.push(id);
+      },
+      resume: async (id) => {
+        if (typeof id !== "number") throw new Error("No matching signature.");
+        resumed.push(id);
+      },
       cancel: async (id) => {
         if (typeof id !== "number") throw new Error("No matching signature.");
         if (cancelThrows) throw new Error("Download not found");
@@ -91,6 +110,8 @@ function loadBackground({ seed = {}, cookiesForUrl = () => [], cancelThrows = fa
     sentMessages,
     cancelled,
     erased,
+    paused,
+    resumed,
     listeners,
     async fireDownload(item) {
       await listeners.downloadCreated(item);
@@ -110,6 +131,10 @@ const zipDownload = (id, url = "http://127.0.0.1/file.zip") => ({
 test("watcher cancels a downloadable link and hands it to Fetchline", async () => {
   const env = loadBackground({ seed: { desktopIntegration: true } });
   await env.fireDownload(zipDownload(1));
+  // Round 69: the browser download is paused while the hand-off
+  // runs, and cancelled only once the app confirms receipt.
+  assert.deepEqual(env.paused, [1]);
+  assert.deepEqual(env.resumed, []);
   assert.deepEqual(env.cancelled, [1]);
   assert.deepEqual(env.erased, [1]);
   assert.equal(env.sentMessages.length, 1);
@@ -122,6 +147,25 @@ test("watcher cancels a downloadable link and hands it to Fetchline", async () =
     }),
   );
   assert.equal(env.storage.lastHandoff.ok, true);
+});
+
+test("watcher resumes the browser download when the hand-off fails", async () => {
+  // Round 69 (a) — the safety rule: NEVER cancel a browser
+  // download until the app confirms receipt. The old order
+  // cancelled first, so a failed hand-off silently swallowed the
+  // file (Round 68 retest). Now the paused browser download is
+  // resumed and proceeds normally in Chrome.
+  const env = loadBackground({
+    seed: { desktopIntegration: true },
+    hostError: "Could not establish connection",
+  });
+  await env.fireDownload(zipDownload(1));
+  assert.deepEqual(env.paused, [1]);
+  assert.deepEqual(env.resumed, [1]);
+  assert.deepEqual(env.cancelled, []);
+  assert.deepEqual(env.erased, []);
+  assert.equal(env.sentMessages.length, 1);
+  assert.equal(env.storage.lastHandoff.ok, false);
 });
 
 test("watcher attaches the target URL's cookies to the hand-off", async () => {

@@ -30,9 +30,9 @@ function fakeElement() {
   };
 }
 
-function loadPopup({ nativeReply = { ok: true } } = {}) {
+function loadPopup({ nativeReply = { ok: true }, lastVideoScan = null } = {}) {
   const elements = {};
-  for (const id of ["status", "statusText"]) elements[id] = fakeElement();
+  for (const id of ["status", "statusText", "statusDetail", "scanLine"]) elements[id] = fakeElement();
   let nativeHandler = () => nativeReply;
   let lastError = null;
   const chrome = {
@@ -49,6 +49,13 @@ function loadPopup({ nativeReply = { ok: true } } = {}) {
           lastError = null;
           cb(reply);
         }
+      },
+    },
+    storage: {
+      local: {
+        async get(_key) {
+          return lastVideoScan ? { lastVideoScan } : {};
+        },
       },
     },
   };
@@ -85,6 +92,7 @@ test("popup shows Connected when the desktop app answers the ping", async () => 
   await tick();
   assert.equal(env.elements.statusText.textContent, "Connected");
   assert.match(env.elements.status.className, /status-ok/);
+  assert.equal(env.elements.statusDetail.textContent, "");
 });
 
 test("popup shows Not connected when the host is unreachable", async () => {
@@ -94,6 +102,8 @@ test("popup shows Not connected when the host is unreachable", async () => {
   await tick();
   assert.equal(env.elements.statusText.textContent, "Not connected");
   assert.match(env.elements.status.className, /status-bad/);
+  // Round 69 — the host's own words, not a bare "Not connected".
+  assert.equal(env.elements.statusDetail.textContent, "Could not establish connection");
 });
 
 test("popup shows Not connected when the host answers with an error", async () => {
@@ -102,4 +112,24 @@ test("popup shows Not connected when the host answers with an error", async () =
   await tick();
   assert.equal(env.elements.statusText.textContent, "Not connected");
   assert.match(env.elements.status.className, /status-bad/);
+  assert.equal(env.elements.statusDetail.textContent, "nope");
+});
+
+test("popup shows the last video-scan outcome", async () => {
+  // Round 69 — the scan line surfaces what "Find videos on this
+  // page" found (or why it failed), instead of silent nothing.
+  const none = loadPopup({ lastVideoScan: { total: 0, downloadable: 0, at: Date.now() } });
+  await none.domContentLoaded();
+  await tick();
+  assert.match(none.elements.scanLine.textContent, /no videos found/);
+
+  const found = loadPopup({ lastVideoScan: { total: 2, downloadable: 1, at: Date.now() } });
+  await found.domContentLoaded();
+  await tick();
+  assert.match(found.elements.scanLine.textContent, /1 downloadable video/);
+
+  const failed = loadPopup({ lastVideoScan: { error: "no web address to scan", at: Date.now() } });
+  await failed.domContentLoaded();
+  await tick();
+  assert.match(failed.elements.scanLine.textContent, /Video scan failed: no web address to scan/);
 });

@@ -1941,6 +1941,38 @@ async fn max_connections_from_settings_changes_segment_count() {
 }
 
 #[tokio::test]
+async fn max_connections_setting_raises_segment_count() {
+    // Round 69 (f): the "Connections per download" setting IS the
+    // segment count now. It used to cap at INITIAL_SEGMENTS (4),
+    // so a setting of 8 still downloaded with 4 segments — the
+    // Round 68 retest's "8 connections set, 4 used".
+    let server = MockServer::start(MockConfig {
+        size_bytes: Some(2 * 1024 * 1024),
+        ..Default::default()
+    });
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let mgr = DownloadManager::new(Arc::clone(&store), 8);
+    // Default settings say 8: a 2 MiB range-capable file splits
+    // into 8, not 4.
+    let (id, _) = mgr
+        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .await
+        .unwrap();
+    assert_eq!(store.get_segments(&id).unwrap().len(), 8);
+    // 32 connections on a 2 MiB file: the 256 KiB segment floor
+    // caps it at 8 segments, not 32 tiny ones.
+    let mut s = mgr.get_settings().unwrap();
+    s.max_connections = 32;
+    mgr.update_settings(&s).unwrap();
+    let (id2, _) = mgr
+        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .await
+        .unwrap();
+    assert_eq!(store.get_segments(&id2).unwrap().len(), 8);
+}
+
+#[tokio::test]
 async fn save_to_folder_and_file_types_edit_change_downloads() {
     let server = MockServer::start(MockConfig::default());
     let dir = tmpdir();

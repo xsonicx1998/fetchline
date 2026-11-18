@@ -329,6 +329,47 @@ async fn drain_skips_browser_and_video_rows_but_drains_download_all() {
 }
 
 #[tokio::test]
+async fn stale_browser_capture_expires_in_drain() {
+    // Round 69 (d): a browser capture the user never answered
+    // used to sit pending forever, and the frontend re-offered it
+    // on every launch — closing the Add URL dialog reopened it
+    // instantly with the stale link, which looked exactly like an
+    // unclosable dialog (Round 68 retest). The drain rejects
+    // interactive rows older than 24 h before it does anything
+    // else; fresh rows are untouched.
+    let server = MockServer::start(MockConfig::default());
+    let dir = tmpdir();
+    let mgr = test_mgr(&dir);
+    let store = mgr.store();
+    let stale = store
+        .enqueue_pending_link(&server.url, None, "browser")
+        .unwrap();
+    let fresh = store
+        .enqueue_pending_link(&server.url, None, "video")
+        .unwrap();
+    // Backdate the stale row past 24 h, straight in the DB.
+    {
+        let conn = rusqlite::Connection::open(dir.join("app.db")).unwrap();
+        conn.execute(
+            "UPDATE pending_links SET created_at = datetime('now', '-25 hours') WHERE id = ?1",
+            rusqlite::params![stale.id],
+        )
+        .unwrap();
+    }
+    let _summary = mgr.drain_pending_links().await.unwrap();
+    let row = store.get_pending_link(&stale.id).unwrap().unwrap();
+    assert_eq!(row.status, "rejected");
+    assert!(
+        row.error.as_deref().unwrap().contains("Expired"),
+        "error: {:?}",
+        row.error
+    );
+    let pending = store.list_pending_links(Some("pending")).unwrap();
+    assert_eq!(pending.len(), 1, "only the fresh video row must stay pending");
+    assert_eq!(pending[0].id, fresh.id);
+}
+
+#[tokio::test]
 async fn confirm_pending_link_twice_is_an_error() {
     // A double confirm can never add the same link twice.
     let server = MockServer::start(MockConfig::default());

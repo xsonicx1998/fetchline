@@ -37,6 +37,7 @@ import {
   resumeDownload,
   runGrabber,
   setTaskbarProgress,
+  startDownload,
   startQueue,
   stopQueue,
   syncQueueNow,
@@ -53,6 +54,7 @@ import { Button } from './components/Button'
 import { CategorySidebar, type SidebarFilter } from './components/CategorySidebar'
 import { ClipboardOfferDialog } from './components/ClipboardOfferDialog'
 import { DownloadAllDialog } from './components/DownloadAllDialog'
+import { DownloadErrorDialog } from './components/DownloadErrorDialog'
 import { DownloadPropertiesDialog } from './components/DownloadPropertiesDialog'
 import { DownloadTable } from './components/DownloadTable'
 import { HistoryView } from './components/HistoryView'
@@ -139,6 +141,10 @@ export default function App() {
    *  the poll. The banner shows it first, else the transient poll
    *  error. */
   const [bannerError, setBannerError] = useState<string | null>(null)
+  /** Round 69 (d) — an Add URL submit failure, shown in the
+   *  standalone error dialog (IDM-style, with Details) as an
+   *  overlay above the Add dialog. */
+  const [addError, setAddError] = useState<{ title: string; message: string } | null>(null)
   function actionError(e: unknown) {
     setBannerError(e instanceof Error ? e.message : String(e))
   }
@@ -534,6 +540,13 @@ export default function App() {
       category: download.category_id === '' ? null : download.category_id,
       queue: download.queue_id,
     })
+    // Round 69 (b) — Redownload means "download the same link
+    // again", so the new row must START. The old code only added
+    // it (status `queued`, never started) — the Round 68 retest's
+    // "Redownload did nothing" on the stuck Waiting row. If the
+    // start itself fails the row stays queued and is now resumable
+    // from the toolbar / menu.
+    await startDownload(id)
     setSelectedId(id)
   }
 
@@ -1085,10 +1098,29 @@ export default function App() {
           void refreshAll()
         }}
         onLateError={(message) => setBannerError(message)}
+        onSubmitError={(message, filename) =>
+          setAddError({ title: filename || 'Download failed', message })
+        }
         onAddCategory={() => setShowAddCategory(true)}
         pendingLinkId={activeCapture?.id ?? null}
         initialCookies={activeCapture?.cookies ?? null}
       />
+      {addError ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Download failed"
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4"
+        >
+          <div className="h-[360px] w-[520px] max-w-full overflow-hidden rounded-lg border border-border bg-bg shadow-pop">
+            <DownloadErrorDialog
+              message={addError.message}
+              title={addError.title}
+              onClose={() => setAddError(null)}
+            />
+          </div>
+        </div>
+      ) : null}
       <RefreshAddressDialog
         open={refreshTarget !== null}
         download={refreshTarget}
@@ -1110,7 +1142,16 @@ export default function App() {
           offer={clipboardOffer}
           onDownload={() => {
             const url = clipboardOffer.url
+            // Round 69 (b) — the offer asked "Download this link?",
+            // so accepting it must START the download. The old code
+            // only added the row (`add_download` creates it as
+            // `queued` and never starts it), and a `queued` row had
+            // no start path anywhere (Resume was gated to
+            // paused/error) — the Round 68 retest's stuck "Waiting"
+            // row. If the start itself fails the row stays queued
+            // and is now resumable from the toolbar / menu.
             void addDownload({ url })
+              .then(([id]) => startDownload(id))
               .then(() => void refreshAll())
               .catch((e: unknown) => actionError(e))
             setClipboardOffer(null)

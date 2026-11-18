@@ -30,7 +30,17 @@ interface ToolbarProps {
  *  menu bar and the TOOLS strip now, and there is no settings
  *  gear anywhere — Settings is reached from the Options menu. */
 export function Toolbar({ actions, selected, searchQuery, onSearchChange }: ToolbarProps) {
-  const canResume = selected !== null && (selected.status === 'paused' || selected.status === 'error')
+  // Round 69 (b) — a `queued` ("Waiting") row is resumable too:
+  // the engine's `resume_download` accepts any non-complete,
+  // non-downloading row, and a queued row is exactly a download
+  // that was added but never started (clipboard offer, Download
+  // Later, Redownload). Gating Resume to paused/error left those
+  // rows with no start path at all in the UI — the Round 68
+  // retest's stuck "Waiting" row, whose toolbar Resume "did
+  // nothing" because the button was disabled.
+  const canResume =
+    selected !== null &&
+    (selected.status === 'paused' || selected.status === 'error' || selected.status === 'queued')
   const canStop = selected !== null && selected.status === 'downloading'
 
   return (

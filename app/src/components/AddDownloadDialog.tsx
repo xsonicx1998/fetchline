@@ -47,6 +47,13 @@ interface AddDownloadDialogProps {
   /** Round 67: the capture's browser cookies (JSON array), so
    *  the size probe works on cookie-gated links. */
   initialCookies?: string | null
+  /** Round 69 (d): a submit that fails (404, server not found,
+   *  timeout…) reports here too, so the caller can open the
+   *  standalone error dialog with the real error — the inline
+   *  pink text alone looked like "Start Download did nothing"
+   *  in the Round 68 retest. The filename rides along for the
+   *  dialog's title bar. */
+  onSubmitError?: (message: string, filename: string) => void
 }
 
 /** The Save As field shows the full path (folder + filename).
@@ -90,6 +97,7 @@ export function AddDownloadDialog({
   onAdded,
   onLateError,
   onAddCategory,
+  onSubmitError,
   pendingLinkId = null,
   initialCookies = null,
 }: AddDownloadDialogProps) {
@@ -399,7 +407,14 @@ export function AddDownloadDialog({
       if (!timedOut) consumed = true
       if (submitSeq.current !== runId) return
       setBusy(false)
-      setError(e instanceof Error ? e.message : String(e))
+      const msg = e instanceof Error ? e.message : String(e)
+      setError(msg)
+      // Round 69 (d) — open the standalone error dialog with the
+      // real error, like IDM's popup. The inline pink text alone
+      // is what made the 404 look like "Start Download did
+      // nothing" in the Round 68 retest; the dialog makes the
+      // failure unmistakable (and plays the error sound).
+      onSubmitError?.(msg, filename.trim() || url.trim())
     }
   }
 
