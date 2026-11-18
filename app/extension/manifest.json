@@ -31,6 +31,13 @@
     "nativeMessaging",
     "scripting"
   ],
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["video-detect.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ],
   "version": "0.1.0",
   "browser_specific_settings": {
     "gecko": {

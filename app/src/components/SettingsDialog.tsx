@@ -191,6 +191,28 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
     return () => window.removeEventListener('keydown', onKey)
   }, [open, onClose])
 
+  /** Round 72 (C) — the connections field keeps a draft string
+   *  while it is being edited. The old controlled `type="number"`
+   *  field ran every keystroke through `Number(...)` at once, so
+   *  clearing it wrote 0 and the next digit appended ("02",
+   *  "22" in the Round 71 retest) while the controlled value
+   *  fought backspace. The draft shows exactly what the user
+   *  typed; blur / Enter commits a clamped number (1–32), and
+   *  an empty draft just keeps the current setting. */
+  const [connectionsDraft, setConnectionsDraft] = useState<string | null>(null)
+  useEffect(() => {
+    if (open) setConnectionsDraft(null)
+  }, [open])
+
+  function commitConnections() {
+    if (connectionsDraft === null) return
+    const n = Number(connectionsDraft)
+    if (connectionsDraft !== '' && Number.isFinite(n)) {
+      set('max_connections', Math.min(32, Math.max(1, Math.floor(n))))
+    }
+    setConnectionsDraft(null)
+  }
+
   if (!open) return null
 
   function set<T extends keyof Settings>(key: T, value: Settings[T]) {
@@ -716,15 +738,27 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                 </label>
                 <input
                   id="set-connections"
-                  type="number"
-                  min={1}
-                  max={32}
-                  value={settings.max_connections}
-                  onChange={(e) => set('max_connections', Number(e.target.value) || 0)}
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="off"
+                  value={connectionsDraft ?? String(settings.max_connections)}
+                  onChange={(e) =>
+                    // Numeric-only, at most two digits (the max is
+                    // 32): letters, signs and exponents never reach
+                    // the setting, and an empty field is a draft,
+                    // not a 0.
+                    setConnectionsDraft(e.target.value.replace(/[^0-9]/g, '').slice(0, 2))
+                  }
+                  onBlur={commitConnections}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitConnections()
+                  }}
                   className={inputCls}
                 />
                 <p className={hintCls}>
-                  How many parts a file is split into. Applies to the next download you start.
+                  Maximum simultaneous connections per download. A file starts as one part and
+                  splits into more parts as connections free up — the part count can grow past
+                  this number. Applies to the next download you start.
                 </p>
               </div>
               <div>

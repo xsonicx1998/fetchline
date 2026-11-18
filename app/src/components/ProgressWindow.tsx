@@ -675,11 +675,16 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
                       connections never exceed the setting. Calling
                       the count "connections" made the setting look
                       ignored in the Round 69 retest (OVH showed
-                      11 with the setting at 8). */}
+                      11 with the setting at 8). Round 72 (D) — the
+                      live connection count now rides on the event
+                      (`active_connections`), so the header shows
+                      both: "2 connections · 3/6 completed". */}
                   <p className="text-sm font-semibold">
                     Parts ({segments.length} part{segments.length === 1 ? '' : 's'})
                   </p>
                   <p className="text-xs text-accent">
+                    {live?.active_connections ?? 0} connection
+                    {(live?.active_connections ?? 0) === 1 ? '' : 's'} ·{' '}
                     {segments.filter((s) => s.status === 'done').length}/{segments.length} completed
                   </p>
                 </div>
@@ -721,7 +726,13 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
             {retry ? (
               <div role="status" className="rounded-md border border-border bg-warning-soft p-3">
                 <p className="text-sm font-semibold">
-                  Connection lost — retrying in {retry.retry_in_secs}s (attempt {retry.attempt + 1} of {retry.max_attempts})
+                  {/* Round 72 (C) — a patient tail wait has
+                      `max_attempts` 0 (no limit): say so instead
+                      of "attempt N of 0". */}
+                  Connection lost — retrying in {retry.retry_in_secs}s
+                  {retry.max_attempts > 0
+                    ? ` (attempt ${retry.attempt + 1} of ${retry.max_attempts})`
+                    : ' — retrying until it succeeds'}
                 </p>
                 <p className="mt-1 text-sm text-text-muted">{retry.error}</p>
                 <div className="mt-3 flex gap-2">

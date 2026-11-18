@@ -1,26 +1,34 @@
 #!/usr/bin/env python3
-"""Validate app/extension/manifest.json (S13 + S08 + S13 finish).
+"""Validate app/extension/manifest.json (S13 + S08 + S13 finish + Round 72).
 
 Checks the Manifest V3 shape and that the permission set stays
 minimal: no host permissions, no tabs. `scripting` is allowed
 since S08, and only for one thing — injecting the video detector
 into the ACTIVE tab when the user clicks "Find videos on this page"
 in the popup (activeTab grants that one tab, on that one gesture).
-There is still no content_scripts entry: no page is ever scanned
-without the user asking. `cookies` is allowed since the S13
-finish, and only for one thing — reading the cookies for the exact
-URL being handed over, so a login-only link can download (see
-background.js `cookiesFor`); the extension never reads cookies
-for any other URL and never logs them. Firefox needs a stable
-add-on id (`browser_specific_settings.gecko.id`) so its host
-manifest can name it in `allowed_extensions`. Chrome needs a
-stable extension id too: `key` holds the extension's public key
-(base64 DER), and Chrome derives the same 32-character id from
-it on every machine, so the installer can ship a host manifest
-with that id already in `allowed_origins` (see
-validate_host_manifest.py). Without `key`, an unpacked load
-gets a random id on every machine and no shipped manifest can
-name it. Run with
+Round 72 (2026-11-18, user-approved): the detector is ALSO
+auto-injected on every http(s) page (`content_scripts`,
+`document_idle`) so the floating Download button appears next to
+any video without a click, like IDM — the menu-only injection was
+the Round 71 video-button root cause (nobody clicked the menu,
+so nothing was ever injected). The entry is pinned exactly:
+http(s) matches only, `document_idle`, `video-detect.js` +
+`content.js` — nothing broader. The per-site opt-out /
+switched-off integration check moved into content.js
+(`video_allowed`), so an opted-out page still shows no button.
+`cookies` is allowed since the S13 finish, and only for one
+thing — reading the cookies for the exact URL being handed over,
+so a login-only link can download (see background.js
+`cookiesFor`); the extension never reads cookies for any other
+URL and never logs them. Firefox needs a stable add-on id
+(`browser_specific_settings.gecko.id`) so its host manifest can
+name it in `allowed_extensions`. Chrome needs a stable extension
+id too: `key` holds the extension's public key (base64 DER), and
+Chrome derives the same 32-character id from it on every
+machine, so the installer can ship a host manifest with that id
+already in `allowed_origins` (see validate_host_manifest.py).
+Without `key`, an unpacked load gets a random id on every
+machine and no shipped manifest can name it. Run with
 `npm run test:extension` from app/, or directly:
     python3 app/extension/tests/validate_manifest.py
 Exit code 0 means the manifest is valid; anything else prints the
@@ -70,11 +78,21 @@ def main() -> int:
             problems.append(f"unexpected permission (justify it or remove it): {p}")
     if "host_permissions" in manifest:
         problems.append("host_permissions must not be present (no <all_urls>)")
-    if "content_scripts" in manifest:
-        problems.append(
-            "content_scripts must not be present — the video detector is "
-            "injected only on a user gesture (scripting + activeTab), never on every page"
-        )
+    # Round 72 (A) — the auto-injection entry, pinned exactly: one
+    # entry, http(s) matches only, document_idle, video-detect.js
+    # + content.js. Anything else (another match pattern, another
+    # file, another run_at) fails the validation.
+    content_scripts = manifest.get("content_scripts")
+    if not isinstance(content_scripts, list) or len(content_scripts) != 1:
+        problems.append("content_scripts must be exactly one entry (Round 72 auto-injection)")
+    else:
+        entry = content_scripts[0]
+        if entry.get("matches") != ["http://*/*", "https://*/*"]:
+            problems.append("content_scripts matches must be exactly http://*/* and https://*/*")
+        if entry.get("js") != ["video-detect.js", "content.js"]:
+            problems.append("content_scripts js must be exactly video-detect.js + content.js")
+        if entry.get("run_at") != "document_idle":
+            problems.append("content_scripts run_at must be document_idle")
 
     icons = manifest.get("icons", {})
     for size in REQUIRED_ICON_SIZES:

@@ -281,6 +281,15 @@ async fn resume_download(state: State<'_, AppState>, id: String) -> Result<(), S
     state.manager.resume_download(&id).await.map_err(|e| e.to_string())
 }
 
+/// Round 72 (C) — Redownload in place: reset the row's segments
+/// and start it over from scratch without deleting the row first.
+/// A probe failure leaves the row Failed with the new error (the
+/// old delete-first flow lost the row entirely on a flaky probe).
+#[tauri::command]
+async fn redownload_download(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state.manager.redownload_download(&id).await.map_err(|e| e.to_string())
+}
+
 /// Refresh the address of a paused or failed download (Round 51):
 /// the engine re-probes the new link first and only switches when
 /// it serves the same file — or when the user confirms a different
@@ -3229,6 +3238,7 @@ pub fn run() {
             start_download,
             pause_download,
             resume_download,
+            redownload_download,
             refresh_download_address,
             dismiss_clipboard_offer,
             cancel_download,

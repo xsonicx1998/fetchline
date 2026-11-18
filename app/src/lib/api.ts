@@ -184,6 +184,13 @@ export async function resumeDownload(id: string): Promise<void> {
   return invoke('resume_download', { id })
 }
 
+/** Round 72 (C) — Redownload in place: reset the row's segments
+ *  and start it over from scratch without deleting the row first.
+ *  A probe failure leaves the row Failed with the new error. */
+export async function redownloadDownload(id: string): Promise<void> {
+  return invoke('redownload_download', { id })
+}
+
 /** Round 51 — refresh download address: point a paused/failed
  *  download at a new link. The engine re-probes the link first:
  *  same file → the row switches and resumes from the downloaded

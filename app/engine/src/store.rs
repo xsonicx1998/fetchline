@@ -323,6 +323,16 @@ pub struct DownloadRow {
     /// so rows written before Round 67 still read.
     #[serde(default)]
     pub description: Option<String>,
+    /// Round 72 (D) — live connection/part counts, written by
+    /// the ~1 s checkpoint while a download runs: how many
+    /// connections are transferring right now, and how many parts
+    /// the file is split into. 0 when not downloading.
+    /// `#[serde(default)]` so rows written before Round 72 still
+    /// read.
+    #[serde(default)]
+    pub active_connections: i64,
+    #[serde(default)]
+    pub segment_count: i64,
     /// Round 71 (D4) — NOT a column: computed on read (see
     /// `mark_missing`): a Completed download whose file no
     /// longer exists on disk (deleted outside the app — the
@@ -872,6 +882,31 @@ impl Store {
         // progress window can show resume capability honestly.
         // NULL = unknown (a download added before this was stored).
         for (table, column, ddl) in [("downloads", "accept_ranges", "INTEGER")] {
+            let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+            let cols: Vec<String> = stmt
+                .query_map([], |r| r.get::<_, String>(1))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            drop(stmt);
+            if !cols.iter().any(|c| c == column) {
+                conn.execute(
+                    &format!("ALTER TABLE {table} ADD COLUMN {column} {ddl}"),
+                    [],
+                )?;
+            }
+        }
+        // Added in Round 72 (2026-11-18): the live
+        // connection/part counts the checkpoint writes for the
+        // main window ("N connections · M parts"). Fresh
+        // databases get them from schema.sql; older databases
+        // gain them here.
+        for (table, column, ddl) in [
+            (
+                "downloads",
+                "active_connections",
+                "INTEGER NOT NULL DEFAULT 0",
+            ),
+            ("downloads", "segment_count", "INTEGER NOT NULL DEFAULT 0"),
+        ] {
             let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
             let cols: Vec<String> = stmt
                 .query_map([], |r| r.get::<_, String>(1))?
@@ -2401,7 +2436,7 @@ impl Store {
             "SELECT id, url, final_url, filename, save_path, category_id, queue_id, \
              queue_position, size_bytes, downloaded_bytes, status, speed_bps, eta_seconds, \
              etag, last_modified, error_message, created_at, completed_at, \
-             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges, updated_at, grabber_project_id, description \
+             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges, updated_at, grabber_project_id, description, active_connections, segment_count \
              FROM downloads WHERE queue_id = ?1 AND status != 'deleted' \
              ORDER BY queue_position ASC, created_at ASC",
         )?;
@@ -2491,7 +2526,7 @@ impl Store {
             "SELECT id, url, final_url, filename, save_path, category_id, queue_id, \
              queue_position, size_bytes, downloaded_bytes, status, speed_bps, eta_seconds, \
              etag, last_modified, error_message, created_at, completed_at, \
-             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges, updated_at, grabber_project_id, description \
+             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges, updated_at, grabber_project_id, description, active_connections, segment_count \
              FROM downloads WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![id], row_to_download)?;
@@ -2511,7 +2546,7 @@ impl Store {
             "SELECT id, url, final_url, filename, save_path, category_id, queue_id, \
              queue_position, size_bytes, downloaded_bytes, status, speed_bps, eta_seconds, \
              etag, last_modified, error_message, created_at, completed_at, \
-             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges, updated_at, grabber_project_id, description \
+             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges, updated_at, grabber_project_id, description, active_connections, segment_count \
              FROM downloads WHERE status != 'deleted' ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], row_to_download)?;
@@ -2586,7 +2621,7 @@ impl Store {
                 "SELECT id, url, final_url, filename, save_path, category_id, queue_id, \
                  queue_position, size_bytes, downloaded_bytes, status, speed_bps, eta_seconds, \
                  etag, last_modified, error_message, created_at, completed_at, \
-                 speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges, updated_at, grabber_project_id, description \
+                 speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges, updated_at, grabber_project_id, description, active_connections, segment_count \
                  FROM downloads WHERE id = ?1",
                 params![id],
                 row_to_download,
@@ -2716,12 +2751,30 @@ impl Store {
     }
 
     /// Persist the current byte counts (called every ~2 s and on pause).
-    pub fn checkpoint(&self, id: &str, downloaded: i64, speed_bps: i64, eta: Option<i64>) -> Result<()> {
+    /// Round 72 (D): also persists the live connection/part counts
+    /// for the main window (`active_connections`, `segment_count`).
+    pub fn checkpoint(
+        &self,
+        id: &str,
+        downloaded: i64,
+        speed_bps: i64,
+        eta: Option<i64>,
+        active_connections: i64,
+        segment_count: i64,
+    ) -> Result<()> {
         let conn = self.lock_conn();
         conn.execute(
             "UPDATE downloads SET downloaded_bytes = ?1, speed_bps = ?2, eta_seconds = ?3, \
-             updated_at = datetime('now') WHERE id = ?4",
-            params![downloaded, speed_bps, eta, id],
+             active_connections = ?4, segment_count = ?5, \
+             updated_at = datetime('now') WHERE id = ?6",
+            params![
+                downloaded,
+                speed_bps,
+                eta,
+                active_connections,
+                segment_count,
+                id
+            ],
         )?;
         Ok(())
     }
@@ -2830,10 +2883,14 @@ impl Store {
     }
 
     /// Reset a download to zero bytes (file changed on the server).
+    /// Round 72 (D): the live connection/part counts reset too —
+    /// a reset row is not downloading, so both read 0 until its
+    /// next run's checkpoint writes them.
     pub fn reset_download(&self, id: &str, size: Option<i64>, etag: Option<&str>, last_modified: Option<&str>) -> Result<()> {
         let conn = self.lock_conn();
         conn.execute(
             "UPDATE downloads SET downloaded_bytes = 0, speed_bps = 0, eta_seconds = NULL, \
+             active_connections = 0, segment_count = 0, \
              error_message = NULL, size_bytes = ?1, etag = ?2, last_modified = ?3, \
              status = 'queued', updated_at = datetime('now') WHERE id = ?4",
             params![size, etag, last_modified, id],
@@ -3022,6 +3079,8 @@ fn row_to_download(r: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadRow> {
         updated_at: r.get(24)?,
         grabber_project_id: r.get(25)?,
         description: r.get(26)?,
+        active_connections: r.get(27)?,
+        segment_count: r.get(28)?,
         // Round 71 (D4) — not a column; `mark_missing` sets it
         // after the read (it needs a filesystem check, and the
         // row mapper must stay a pure DB read).

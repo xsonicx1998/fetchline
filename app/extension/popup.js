@@ -4,11 +4,11 @@
 // a link to his Facebook page — nothing else. There are no
 // switches or buttons here any more: catching is governed by the
 // desktop app's browser-integration setting, per-site opt-outs
-// live in the desktop Settings, and videos are found from the
-// right-click menu ("Find videos on this page") or the video
-// panel itself. The background worker still owns the catch
-// toggle / excluded-sites storage and reads it on every
-// download; this popup only reports whether the desktop app
+// live in the desktop Settings, and videos are found
+// automatically on every page (Round 72) or from the right-click
+// menu ("Find videos on this page"). The background worker still
+// owns the catch toggle / excluded-sites storage and reads it on
+// every download; this popup only reports whether the desktop app
 // answers.
 
 const HOST_NAME = "com.fetchline.host";
@@ -88,9 +88,52 @@ document.addEventListener("DOMContentLoaded", () => {
 // reports its summary (or the menu handler records the injection
 // failure) in `lastVideoScan`, and the popup is the only place the
 // user can see it.
+//
+// Round 72 (A) — trigger a FRESH scan on popup open and show ITS
+// result. The old code only read the stored `lastVideoScan`, which
+// belonged to an earlier page, and presented it as this page's —
+// "1 downloadable video found" on a page with no video (the Round
+// 71 retest). The stored scan is only a fallback, and it is
+// labelled with the page it was for, so a stale result can never
+// pose as the current page. A fresh-scan failure never replaces
+// the stored line: it only shows when there is nothing stored.
 async function refreshScanLine() {
   const el = $("scanLine");
   if (!el) return;
+  let currentUrl = null;
+  try {
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    currentUrl = tabs && tabs[0] && tabs[0].url ? tabs[0].url : null;
+  } catch {
+    // No tabs access in this context (or a test fake without it):
+    // the stored scan below still renders, just without the
+    // fresh/stale distinction.
+  }
+  try {
+    const reply = await chrome.runtime.sendMessage({ type: "scan_page_for_videos" });
+    if (reply && reply.ok && typeof reply.total === "number" && typeof reply.downloadable === "number") {
+      // The rescan answered with this page's summary — show it
+      // directly, no storage round-trip.
+      renderScan(el, reply.total, reply.downloadable, "This page");
+      return;
+    }
+    if (reply && reply.ok) {
+      // The scan ran through the injection fallback, which reports
+      // to storage a moment later — give it a beat, then read it.
+      await new Promise((r) => setTimeout(r, 300));
+    } else if (reply && reply.error) {
+      // A fresh failure with nothing stored shows below; with a
+      // stored scan, the stored line wins (see the fallback).
+      const stored = await chrome.storage.local.get("lastVideoScan");
+      if (!stored || !stored.lastVideoScan) {
+        el.textContent = `Video scan failed: ${reply.error}`;
+        return;
+      }
+    }
+  } catch {
+    // No content script / background unreachable: fall through to
+    // the stored scan below.
+  }
   try {
     const stored = await chrome.storage.local.get("lastVideoScan");
     const scan = stored && stored.lastVideoScan;
@@ -101,14 +144,34 @@ async function refreshScanLine() {
     }
     const total = typeof scan.total === "number" ? scan.total : 0;
     const downloadable = typeof scan.downloadable === "number" ? scan.downloadable : 0;
-    if (total === 0) {
-      el.textContent = "Last scan: no videos found on this page.";
-    } else if (downloadable === 0) {
-      el.textContent = `Last scan: ${total} video${total === 1 ? "" : "s"} found, none downloadable.`;
-    } else {
-      el.textContent = `Last scan: ${downloadable} downloadable video${downloadable === 1 ? "" : "s"} found — hover a video to download it.`;
-    }
+    const fresh = currentUrl && scan.pageUrl && scan.pageUrl === currentUrl;
+    const prefix = fresh
+      ? "This page"
+      : scan.pageUrl
+        ? `Last scan (${hostOf(scan.pageUrl)})`
+        : "Last scan";
+    renderScan(el, total, downloadable, prefix);
   } catch {
     // Storage unreadable: the line simply stays hidden.
+  }
+}
+
+// `prefix` is "This page" for a fresh scan of the open tab, or
+// "Last scan (<host>)" for a stored scan from another page.
+function renderScan(el, total, downloadable, prefix) {
+  if (total === 0) {
+    el.textContent = `${prefix}: no videos found.`;
+  } else if (downloadable === 0) {
+    el.textContent = `${prefix}: ${total} video${total === 1 ? "" : "s"} found, none downloadable.`;
+  } else {
+    el.textContent = `${prefix}: ${downloadable} downloadable video${downloadable === 1 ? "" : "s"} found — hover a video to download it.`;
+  }
+}
+
+function hostOf(url) {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
   }
 }

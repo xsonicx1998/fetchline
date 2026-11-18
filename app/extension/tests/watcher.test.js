@@ -322,3 +322,43 @@ test("watcher still hands over when cancel fails because the download already fi
   assert.equal(env.sentMessages[1].url, "http://127.0.0.1/file.zip");
   assert.equal(env.storage.lastHandoff.ok, true);
 });
+
+test("watcher skips a file:// download: the file is already local (Round 72 B)", async () => {
+  // A download whose URL is file:// is a local file Chrome is
+  // already fetching from disk. The engine probe rejects every
+  // non-http(s)/ftp scheme, so handing it over would only create
+  // a Failed row — the watcher leaves it to download natively.
+  const env = loadBackground({ seed: { desktopIntegration: true } });
+  await env.fireDownload({
+    id: 7,
+    url: "file:///C:/Users/test/Downloads/clip.mp4",
+    filename: "clip.mp4",
+    state: "in_progress",
+    referrer: "file:///C:/page.html",
+  });
+  assert.deepEqual(env.paused, []);
+  assert.deepEqual(env.cancelled, []);
+  assert.equal(env.sentMessages.length, 0);
+});
+
+test("watcher catches an http(s) download link on a file:// page (Round 72 B)", async () => {
+  // The Round 71 retest's file:// link clicks produced nothing,
+  // which looked like a page-scheme gap — but the watcher keys
+  // on the FILE's URL, never the page's. A link to an http(s)
+  // file on a local HTML page is caught exactly like one on a
+  // web page (the retest clicks most plausibly hit a moment when
+  // the fixture server was down).
+  const env = loadBackground({ seed: { desktopIntegration: true } });
+  await env.fireDownload({
+    id: 8,
+    url: "http://127.0.0.1:62282/slow-a.mp4",
+    filename: "slow-a.mp4",
+    state: "in_progress",
+    referrer: "file:///C:/videos.html",
+  });
+  assert.deepEqual(env.paused, [8]);
+  assert.deepEqual(env.cancelled, [8]);
+  assert.deepEqual(env.erased, [8]);
+  assert.equal(env.sentMessages.length, 2);
+  assert.equal(env.sentMessages[1].url, "http://127.0.0.1:62282/slow-a.mp4");
+});

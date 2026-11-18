@@ -62,6 +62,14 @@ export interface DownloadRow {
    *  listed as Finished, but the UI says the file is missing
    *  instead of offering to open a file that is not there. */
   file_missing?: boolean
+  /** Round 72 (D) — live connection/part counts, written by the
+   *  ~1 s checkpoint while a download runs: how many connections
+   *  are transferring right now, and how many parts the file is
+   *  split into. The table shows both ("2 connections · 6 parts")
+   *  so parts growing past connections never looks like the
+   *  setting is ignored. 0 when not downloading. */
+  active_connections: number
+  segment_count: number
 }
 
 export interface SegmentProgress {
@@ -77,7 +85,10 @@ export interface SegmentProgress {
  *  `max_attempts` is the total attempts the settings allow, and
  *  `retry_in_secs` counts down from the engine's backoff deadline —
  *  it is recomputed on every progress event, so the dialog's
- *  countdown is driven by the engine, not by a UI timer. */
+ *  countdown is driven by the engine, not by a UI timer.
+ *  Round 72 (C): `max_attempts` is 0 for a patient tail wait —
+ *  there is no attempt limit, and the dialog says so instead of
+ *  showing "attempt N of 0". */
 export interface RetryInfo {
   attempt: number
   max_attempts: number
@@ -104,6 +115,12 @@ export interface ProgressEvent {
   eta_seconds: number | null
   status: string
   segments: SegmentProgress[]
+  /** Round 72 (D) — how many connections are actively
+   *  transferring right now (segments with a live task), as
+   *  distinct from `segments.length`: the part count grows past
+   *  the connection count as splits happen, and the progress
+   *  window shows "N connections · M parts". */
+  active_connections: number
   /** Set while a segment waits out its retry backoff; null otherwise. */
   retry: RetryInfo | null
   /** Antivirus scan result (S14), once known: set on the

@@ -785,9 +785,31 @@ fn extension_manifest_is_mv3_and_minimal() {
             "manifest must list a {size}px icon"
         );
     }
-    // The extension must not run a content script on every page:
-    // the video detector is injected only on a user gesture.
-    assert!(m.get("content_scripts").is_none());
+    // Round 72 (A) — the video detector IS a content script now:
+    // it must run automatically on every http(s) page so the
+    // floating Download button appears without a menu click (the
+    // Round 71 retest proved gesture-only injection never ran on
+    // a real page). Exactly one entry, http/https only, the two
+    // detector files, at document_idle — and still no
+    // host_permissions (see validate_manifest.py, which pins the
+    // same shape).
+    let scripts = m["content_scripts"].as_array().unwrap();
+    assert_eq!(scripts.len(), 1, "exactly one content_scripts entry");
+    let matches: Vec<&str> = scripts[0]["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(matches, ["http://*/*", "https://*/*"]);
+    let js: Vec<&str> = scripts[0]["js"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(js, ["video-detect.js", "content.js"]);
+    assert_eq!(scripts[0]["run_at"].as_str().unwrap(), "document_idle");
     let _ = Settings::default();
     let _ = Duration::from_secs(0);
 }

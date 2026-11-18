@@ -1,10 +1,21 @@
 // Sonic Manager video panel (S08 / F05) — content script.
 //
-// Injected ONLY on a user gesture: the right-click menu's "Find
-// videos on this page" item (background.js, chrome.scripting +
-// activeTab). It is never injected into every page — there is no
-// content_scripts entry in manifest.json, no host permission and
-// no <all_urls>.
+// Round 72 (A) — AUTO-INJECTED on every http(s) page now
+// (manifest.json `content_scripts`, `document_idle`): the
+// floating Download button appears next to any video without
+// any click, like IDM. The right-click menu's "Find videos on
+// this page" still works — it asks this script to re-scan
+// (`rescan_videos`), and re-injection is a no-op thanks to the
+// `__fetchlineVideoInstalled` guard below.
+//
+// The per-site opt-out / switched-off integration check that
+// used to happen BEFORE injection (background.js
+// `injectVideoDetector`) now happens HERE, once, before the
+// script scans or shows anything: it asks the background
+// (`video_allowed`) and stays silent when the answer is no. A
+// failed check defaults to ALLOWED — the button is the user's
+// core spec and must not vanish on a messaging hiccup; the
+// opt-out is a preference, not a security boundary.
 //
 // What it does on the page:
 //  * scans the live DOM for <video> / <audio> elements and their
@@ -50,42 +61,87 @@
     '<polyline points="7 10 12 15 17 10"/>' +
     '<line x1="12" y1="15" x2="12" y2="3"/></svg>';
 
-  const media = scanLiveMedia(document, location.href);
-  const byElement = new Map();
-
-  // Group variants by their video element, so each floating button
-  // offers only the qualities of the video it sits on.
-  document.querySelectorAll("video").forEach((el) => {
-    const variants = [];
-    const collect = (url) => {
-      if (!url) return;
-      let absolute;
-      try {
-        absolute = new URL(url, location.href).toString();
-      } catch {
-        return;
-      }
-      const hit = media.find((v) => v.url === absolute);
-      if (hit) variants.push(hit);
-    };
-    collect(el.currentSrc || el.getAttribute("src") || "");
-    el.querySelectorAll("source").forEach((s) => collect(s.getAttribute("src") || ""));
-    if (variants.length > 0) byElement.set(el, variants);
-  });
-
-  // Tell the popup (via the background worker) what this page holds.
-  const downloadable = media.filter((v) => !v.drm).length;
-  chrome.runtime.sendMessage({
-    type: "videos_found",
-    pageUrl: location.href,
-    total: media.length,
-    downloadable,
+  // Round 72 (A) — the gate: ask the background once whether
+  // this page may show the button (desktop integration on, site
+  // not opted out). Set the installed flag BEFORE the async
+  // answer, so a second injection racing this one still
+  // no-ops instead of initialising twice.
+  const gate = new Promise((resolve) => {
+    try {
+      chrome.runtime.sendMessage(
+        { type: "video_allowed", page_url: location.href },
+        (reply) => resolve(!(reply && reply.ok === false)),
+      );
+    } catch {
+      resolve(true);
+    }
   });
 
   let button = null;
   let panel = null;
   let currentVideo = null;
   let hideTimer = null;
+  let initialized = false;
+  // Videos already in the map, and videos that already have a
+  // mouseenter listener (a rescan must not attach a second one).
+  const byElement = new Map();
+  const attached = new Set();
+
+  // (Re-)scan the live DOM for <video> / <audio> elements and
+  // their <source> children (video-detect.js, loaded first in
+  // the same injection), using the real videoWidth/videoHeight
+  // for quality and the playback state for live / DRM. Group
+  // variants by their video element, so each floating button
+  // offers only the qualities of the video it sits on. Returns
+  // the scan summary, and reports it to the popup (via the
+  // background worker) — on the first run and on every rescan,
+  // so the popup's scan line is never stale.
+  function scanAndAttach() {
+    const media = scanLiveMedia(document, location.href);
+    // Drop videos that left the page since the last scan.
+    for (const video of byElement.keys()) {
+      if (!document.contains(video)) {
+        byElement.delete(video);
+        attached.delete(video);
+      }
+    }
+    document.querySelectorAll("video").forEach((el) => {
+      const variants = [];
+      const collect = (url) => {
+        if (!url) return;
+        let absolute;
+        try {
+          absolute = new URL(url, location.href).toString();
+        } catch {
+          return;
+        }
+        const hit = media.find((v) => v.url === absolute);
+        if (hit) variants.push(hit);
+      };
+      collect(el.currentSrc || el.getAttribute("src") || "");
+      el.querySelectorAll("source").forEach((s) => collect(s.getAttribute("src") || ""));
+      if (variants.length > 0) {
+        byElement.set(el, variants);
+        if (!attached.has(el)) {
+          attached.add(el);
+          el.addEventListener("mouseenter", () => {
+            clearTimeout(hideTimer);
+            showButton(el);
+          });
+          el.addEventListener("mouseleave", scheduleHide);
+        }
+      }
+    });
+    const downloadable = media.filter((v) => !v.drm).length;
+    const summary = { total: media.length, downloadable };
+    chrome.runtime.sendMessage({
+      type: "videos_found",
+      pageUrl: location.href,
+      total: summary.total,
+      downloadable: summary.downloadable,
+    });
+    return summary;
+  }
 
   function makeButton() {
     const b = document.createElement("button");
@@ -332,52 +388,74 @@
           }
         }
         btn.disabled = false;
-        btn.textContent = v.format === "MPD" ? "Download manifest" : variant.live ? "Download playlist" : "Download";
+        btn.textContent = variant.format === "MPD" ? "Download manifest" : variant.live ? "Download playlist" : "Download";
       },
     );
   }
 
-  byElement.forEach((_variants, video) => {
-    video.addEventListener("mouseenter", () => {
-      clearTimeout(hideTimer);
-      showButton(video);
+  // First run: scan, then wire the button up once. A rescan
+  // (the `rescan_videos` message below) only re-scans — the
+  // listeners below are one-time, and the immediate show is
+  // first-run only, so a rescan never pops the button up while
+  // the user is reading the page.
+  async function init() {
+    if (initialized) return scanAndAttach();
+    if (!(await gate)) return null;
+    initialized = true;
+    const summary = scanAndAttach();
+    // Round 71 (A4) — the button must appear even when the mouse
+    // is ALREADY over the video when this script is injected (the
+    // user clicks the context menu while hovering the player, so
+    // no fresh mouseenter ever fires — the Round 70 retest hovered
+    // and saw nothing). Two fixes:
+    //   1. document-level mouseover delegation (mouseenter does
+    //      not bubble, mouseover does): any video in the map shows
+    //      the button when the pointer moves over it, including
+    //      videos added after injection (a rescan puts them in
+    //      the map);
+    //   2. show the button immediately for the first video with
+    //      variants, so a video page shows it without any hover.
+    // The button is NEVER gated on native-host health (a dead host
+    // must not hide it — the user still sees the qualities, and
+    // native messaging is re-attempted only when they click a
+    // Download button, in sendVariant).
+    document.addEventListener("mouseover", (e) => {
+      const t = e && e.target;
+      if (t && byElement.has(t)) {
+        clearTimeout(hideTimer);
+        showButton(t);
+      }
     });
-    video.addEventListener("mouseleave", scheduleHide);
-  });
-
-  // Round 71 (A4) — the button must appear even when the mouse
-  // is ALREADY over the video when this script is injected (the
-  // user clicks the context menu while hovering the player, so
-  // no fresh mouseenter ever fires — the Round 70 retest hovered
-  // and saw nothing). Two fixes:
-  //   1. document-level mouseover delegation (mouseenter does
-  //      not bubble, mouseover does): any video in the map shows
-  //      the button when the pointer moves over it, including
-  //      videos added after injection;
-  //   2. show the button immediately for the first video with
-  //      variants, so a video page shows it without any hover.
-  // The button is NEVER gated on native-host health (a dead host
-  // must not hide it — the user still sees the qualities, and
-  // native messaging is re-attempted only when they click a
-  // Download button, in sendVariant).
-  document.addEventListener("mouseover", (e) => {
-    const t = e && e.target;
-    if (t && byElement.has(t)) {
-      clearTimeout(hideTimer);
-      showButton(t);
+    for (const [video, variants] of byElement) {
+      if (variants.length > 0) {
+        showButton(video);
+        break;
+      }
     }
-  });
-  for (const [video, variants] of byElement) {
-    if (variants.length > 0) {
-      showButton(video);
-      break;
-    }
+    // Keep the button glued to the video while the page scrolls.
+    window.addEventListener("scroll", () => {
+      if (button && button.style.display !== "none" && currentVideo) {
+        positionButton(currentVideo);
+      }
+    }, true);
+    return summary;
   }
 
-  // Keep the button glued to the video while the page scrolls.
-  window.addEventListener("scroll", () => {
-    if (button && button.style.display !== "none" && currentVideo) {
-      positionButton(currentVideo);
+  // Round 72 (A) — re-scan on demand: the popup asks for a fresh
+  // scan when it opens, and the right-click menu asks for one
+  // too. The reply carries the summary, so the popup can show
+  // this page's result without waiting on storage. `null` means
+  // the gate refused the page (opted out / integration off).
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message && message.type === "rescan_videos") {
+      init().then((summary) => {
+        if (summary) sendResponse({ ok: true, total: summary.total, downloadable: summary.downloadable });
+        else sendResponse({ ok: false, error: "Videos are not shown on this page." });
+      });
+      return true;
     }
-  }, true);
+    return false;
+  });
+
+  void init();
 })();

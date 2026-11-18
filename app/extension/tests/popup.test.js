@@ -6,7 +6,8 @@
 // (Connected / Not connected) for a reachable, unreachable and
 // error-answering desktop app. The v2 popup has no toggles or
 // buttons: catching is governed by the desktop app, and videos
-// are found from the right-click menu.
+// are found automatically on every page (Round 72) or from the
+// right-click menu.
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -30,7 +31,7 @@ function fakeElement() {
   };
 }
 
-function loadPopup({ nativeReply = { ok: true }, lastVideoScan = null } = {}) {
+function loadPopup({ nativeReply = { ok: true }, lastVideoScan = null, scanReply = null, tabUrl = "http://127.0.0.1/page.html" } = {}) {
   const elements = {};
   for (const id of ["status", "statusText", "statusDetail", "scanLine"]) elements[id] = fakeElement();
   let nativeHandler = () => nativeReply;
@@ -50,6 +51,19 @@ function loadPopup({ nativeReply = { ok: true }, lastVideoScan = null } = {}) {
           cb(reply);
         }
       },
+      // Round 72 (A) — the fresh scan the popup triggers on open.
+      // Default (null): no background answers, so the popup falls
+      // back to the stored scan — the old behaviour. Tests pass an
+      // explicit reply (or an Error to throw) to cover the fresh
+      // paths.
+      sendMessage(_message) {
+        if (scanReply instanceof Error) return Promise.reject(scanReply);
+        if (scanReply === null) return Promise.reject(new Error("Could not establish connection"));
+        return Promise.resolve(scanReply);
+      },
+    },
+    tabs: {
+      query: async () => (tabUrl ? [{ url: tabUrl }] : []),
     },
     storage: {
       local: {
@@ -75,6 +89,7 @@ function loadPopup({ nativeReply = { ok: true }, lastVideoScan = null } = {}) {
     setTimeout,
     clearTimeout,
     Date,
+    URL,
   });
   vm.runInContext(popupSrc, context, { filename: "popup.js" });
   return {
@@ -132,4 +147,75 @@ test("popup shows the last video-scan outcome", async () => {
   await failed.domContentLoaded();
   await tick();
   assert.match(failed.elements.scanLine.textContent, /Video scan failed: no web address to scan/);
+});
+
+test("popup shows the fresh scan for the current page, not a stale stored one (Round 72 A)", async () => {
+  // The Round 71 retest's popup said "1 downloadable video
+  // found" on a page with no video — a stored scan from an
+  // earlier page, presented as this page's. A fresh scan wins
+  // over the stored one, and the line says "This page".
+  const env = loadPopup({
+    scanReply: { ok: true, total: 0, downloadable: 0 },
+    lastVideoScan: { pageUrl: "http://other.example.com/x", total: 5, downloadable: 5, at: Date.now() },
+    tabUrl: "http://127.0.0.1/page.html",
+  });
+  await env.domContentLoaded();
+  await tick();
+  assert.match(env.elements.scanLine.textContent, /This page: no videos found/);
+
+  const found = loadPopup({
+    scanReply: { ok: true, total: 2, downloadable: 1 },
+    lastVideoScan: { pageUrl: "http://other.example.com/x", total: 5, downloadable: 5, at: Date.now() },
+    tabUrl: "http://127.0.0.1/page.html",
+  });
+  await found.domContentLoaded();
+  await tick();
+  assert.match(found.elements.scanLine.textContent, /This page: 1 downloadable video/);
+});
+
+test("popup labels a stored scan with the page it was for (Round 72 A)", async () => {
+  // No fresh scan (the background does not answer): the stored
+  // scan still shows, but labelled with its page's host, so it
+  // can never pose as the current page's.
+  const env = loadPopup({
+    lastVideoScan: { pageUrl: "http://other.example.com/x", total: 2, downloadable: 1, at: Date.now() },
+    tabUrl: "http://127.0.0.1/page.html",
+  });
+  await env.domContentLoaded();
+  await tick();
+  assert.match(env.elements.scanLine.textContent, /Last scan \(other\.example\.com\): 1 downloadable video/);
+});
+
+test("popup shows a fresh scan failure only when nothing is stored (Round 72 A)", async () => {
+  const failed = loadPopup({
+    scanReply: { ok: false, error: "This site is opted out — videos here are not scanned." },
+  });
+  await failed.domContentLoaded();
+  await tick();
+  assert.match(failed.elements.scanLine.textContent, /Video scan failed: This site is opted out/);
+
+  // The same failure with a stored scan: the stored line wins.
+  const stored = loadPopup({
+    scanReply: { ok: false, error: "This site is opted out — videos here are not scanned." },
+    lastVideoScan: { pageUrl: "http://other.example.com/x", total: 1, downloadable: 1, at: Date.now() },
+    tabUrl: "http://127.0.0.1/page.html",
+  });
+  await stored.domContentLoaded();
+  await tick();
+  assert.match(stored.elements.scanLine.textContent, /Last scan \(other\.example\.com\): 1 downloadable video/);
+});
+
+test("popup reads storage after the injection-fallback scan (Round 72 A)", async () => {
+  // The fallback scan returns { ok: true } with no numbers (the
+  // injected script reports to storage a moment later), so the
+  // popup waits, then reads the stored scan — and recognises it
+  // as this page's because the page matches.
+  const env = loadPopup({
+    scanReply: { ok: true },
+    lastVideoScan: { pageUrl: "http://127.0.0.1/page.html", total: 1, downloadable: 1, at: Date.now() },
+    tabUrl: "http://127.0.0.1/page.html",
+  });
+  await env.domContentLoaded();
+  await tick(400);
+  assert.match(env.elements.scanLine.textContent, /This page: 1 downloadable video/);
 });

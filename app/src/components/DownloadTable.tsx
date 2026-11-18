@@ -235,6 +235,20 @@ export function DownloadTable({
                       />
                     </span>
                   ) : null}
+                  {/* Round 72 (D) — connections and parts, side by
+                      side: the part count grows past the
+                      connections setting as splits happen (6 parts
+                      on 2 connections), so showing only one number
+                      made the setting look ignored in the Round 71
+                      retest. Both come from the ~1 s checkpoint;
+                      only downloading rows show them (a paused row
+                      holds 0 connections). */}
+                  {d.status === 'downloading' && d.segment_count > 0 ? (
+                    <span className="mt-0.5 block text-xs text-text-muted">
+                      {d.active_connections} connection{d.active_connections === 1 ? '' : 's'} ·{' '}
+                      {d.segment_count} part{d.segment_count === 1 ? '' : 's'}
+                    </span>
+                  ) : null}
                 </td>
                 <td className="whitespace-nowrap px-3 py-2 font-mono text-sm text-text-muted">
                   {formatBytes(d.size_bytes)}

@@ -4,6 +4,17 @@
 //! not fail the download: the refused segments defer and retry
 //! under the ratcheted concurrency instead of failing the whole
 //! run (the old `abort_all` on one segment failure).
+//!
+//! Round 72 (D) — the file is 4 MiB, not 2: under start-with-1
+//! a 2 MiB file can only grow to 2 segments (the mock writes its
+//! first chunk immediately, so the 1 MiB halves already hold
+//! 64 KiB and sit below the 1 MiB split floor before the next
+//! tick), and 2 concurrent GETs never trip a limit of 3. A 4 MiB
+//! file grows to 4 segments of 1 MiB by ~750 ms, so the 4th GET
+//! is refused. The chunk delay is 1 s (a 1 MiB segment takes
+//! ~16 s — still longer than the 0.5 + 1.5 + 3.0 = 5 s fast-retry
+//! schedule, so a refused segment exhausts its attempts while
+//! the first three are still transferring and MUST defer).
 
 #![allow(dead_code)]
 
@@ -19,8 +30,10 @@ use fetchline_engine::{DownloadManager, Store};
 
 #[tokio::test]
 async fn download_completes_when_server_limits_concurrency_to_three() {
-    // 2 MiB file, 8 segments of 256 KiB (4 chunks each). Each
-    // chunk costs 2 s, so a segment takes ~6 s — longer than the
+    // 4 MiB file, 8 connections, limit 3. It starts as one
+    // segment and grows to 4 of 1 MiB (the 1 MiB split floor);
+    // the 4th concurrent GET is refused with 429. Each chunk
+    // costs 1 s, so a segment takes ~16 s — longer than the
     // deferral retry schedule (0.5 + 1.5 + 3.0 = 5 s), so a
     // refused segment exhausts all 4 attempts while the first 3
     // are still transferring, and MUST defer: without the
@@ -29,8 +42,8 @@ async fn download_completes_when_server_limits_concurrency_to_three() {
     // exhausted its retries).
     let server = MockServer::start(MockConfig {
         chunk: 65536,
-        delay: Duration::from_millis(2000),
-        size_bytes: Some(2 * 1024 * 1024),
+        delay: Duration::from_millis(1000),
+        size_bytes: Some(4 * 1024 * 1024),
         max_concurrent_gets: Some(3),
         ..Default::default()
     });
@@ -57,7 +70,7 @@ async fn download_completes_when_server_limits_concurrency_to_three() {
     let row = mgr.get_download(&id).unwrap().unwrap();
     assert_eq!(
         std::fs::read(&row.save_path).unwrap(),
-        payload(2 * 1024 * 1024)
+        payload(4 * 1024 * 1024)
     );
     // The limit actually fired — not a vacuous pass.
     assert!(

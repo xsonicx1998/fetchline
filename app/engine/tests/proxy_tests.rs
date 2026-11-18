@@ -671,22 +671,38 @@ async fn ftp_probe_and_download_direct() {
 
 #[tokio::test]
 async fn ftp_download_multi_segment_byte_exact() {
-    // 2 MiB > the 1 MiB segmentation floor: 4 segments, each with
-    // its own control + data connection, plus dynamic splits.
+    // Round 72 (D) — a 4 MiB file with a 50 ms chunk delay:
+    // it starts as ONE segment and grows to 4 of 1 MiB (the
+    // 1 MiB split floor), each with its own control + data
+    // connection (its own RETR). The delay keeps the download
+    // alive past the three 250 ms split ticks: without it the
+    // old 2 MiB file finished in ~300 ms, before it could grow
+    // past 2 segments (its 1 MiB halves already hold a chunk
+    // and sit below the floor).
     let server = FtpServer::start(FtpConfig {
-        size_bytes: 2 * 1024 * 1024,
+        size_bytes: 4 * 1024 * 1024,
+        chunk_delay: Duration::from_millis(50),
         ..Default::default()
     });
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
     assert!(wait_for_status(&mgr, &id, "complete", 30).await);
     let row = mgr.get_download(&id).unwrap().unwrap();
-    assert_eq!(std::fs::read(&row.save_path).unwrap(), payload(2 * 1024 * 1024));
+    assert_eq!(
+        std::fs::read(&row.save_path).unwrap(),
+        payload(4 * 1024 * 1024)
+    );
     assert!(
         server.retrs.load(Ordering::SeqCst) >= 4,
         "expected >= 4 RETRs (one per segment), got {}",

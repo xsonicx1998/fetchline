@@ -55,9 +55,9 @@ use crate::options::{
 use crate::native_host::{cookies_from_json, cookies_to_header};
 use crate::probe::{probe_with_cookies, probe_with_proxy, ProbeInfo};
 use crate::proxy::{
-    basic_proxy_auth_header, build_client, build_segment_client, offered_proxy_auth_schemes,
-    proxy_auth_order, resolve_proxy_auth, ProxyAuthScheme, ProxyConfig, ProxyConfigInput,
-    ProxyConfigRow, PROXY_AUTH_BASIC,
+    basic_proxy_auth_header, build_client, build_segment_client, build_tail_segment_client,
+    offered_proxy_auth_schemes, proxy_auth_order, resolve_proxy_auth, ProxyAuthScheme,
+    ProxyConfig, ProxyConfigInput, ProxyConfigRow, PROXY_AUTH_BASIC,
 };
 use crate::queue::PendingAction;
 use crate::quota::{window_end_unix, window_expired, QuotaGate, QuotaStatus, QUOTA_MB_BYTES};
@@ -87,17 +87,15 @@ const SEGMENT_STALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// and the check is suppressed while a segment waits out its
 /// retry backoff, so backoffs never trip it.
 const RUN_STALL_TIMEOUT: Duration = Duration::from_secs(180);
-const MIN_SPLIT_REMAINING: u64 = 256 * 1024;
-/// Round 69 (f) — the smallest segment worth opening a connection
-/// for (256 KiB). `initial_ranges` splits a download into as many
-/// segments as the "Connections per download" setting asks for,
-/// but never smaller than this: a 1 MiB file with 32 connections
-/// would otherwise open 32 connections for ~32 KiB each. The
-/// floor is deliberately below the 512 KiB segments the existing
-/// tests pin (a 2 MiB file with 4 connections = 4 segments), so
-/// those expectations still hold.
-const MIN_SEGMENT_BYTES: u64 = 256 * 1024;
-const MIN_SIZE_TO_SEGMENT: u64 = 1024 * 1024;
+/// Round 72 (D) — the minimum segment worth splitting: 1 MiB.
+/// `try_split` never splits a segment with less than this
+/// remaining — the halves stay usable (a 1 MiB segment splits
+/// into two 512 KiB halves; a 512 KiB segment never splits).
+/// IDM publishes no number for this; 1 MiB is the value the
+/// second-AI review proposed and the clones converge on, and it
+/// keeps the segment count sane on small files (a 2 MiB file
+/// grows to at most 4 segments, not 8).
+const MIN_SPLIT_BYTES: u64 = 1024 * 1024;
 
 /// Epoch milliseconds — the independent run watchdog's clock
 /// (§7.2, Round 56). Absolute (not run-relative) so a stale
@@ -133,6 +131,15 @@ pub struct ProgressEvent {
     pub eta_seconds: Option<u64>,
     pub status: String,
     pub segments: Vec<SegmentProgress>,
+    /// Round 72 (D) — how many connections are actively
+    /// transferring right now (segments with a live task), as
+    /// distinct from `segments.len()`: the part count grows past
+    /// the connection count as splits happen (6 parts on 2
+    /// connections), and the progress window shows "N connections
+    /// · M parts" so the setting never looks ignored again.
+    /// `#[serde(default)]` so older cached events still read.
+    #[serde(default)]
+    pub active_connections: usize,
     /// Set while a segment is waiting out its retry backoff (S03):
     /// the dialog shows "waiting for retry" with a countdown from
     /// this, instead of a silent stall. `None` the rest of the time.
@@ -265,6 +272,15 @@ pub enum RefreshAddressResult {
 enum SegOutcome {
     Done,
     Deferred(EngineError),
+    /// Round 72 (C) — the segment exhausted its retries on a
+    /// failure that is patient-eligible (see `is_tail_patient`),
+    /// and it ran solo. The supervisor decides: if this is the
+    /// only unfinished segment left (the tail), it respawns it
+    /// as a patient tail task instead of failing the download;
+    /// otherwise the download fails exactly as before. Carries
+    /// the segment row id so the supervisor respawns the right
+    /// one (a join result carries no segment identity of its own).
+    TailRetryable(String, EngineError),
 }
 
 /// Mutable per-segment state shared between its task and the supervisor.
@@ -383,6 +399,11 @@ struct RetryWait {
 struct RetrySlot {
     wait: StdMutex<Option<RetryWait>>,
     retry_now: AtomicBool,
+    /// Round 72 (C) — a tail task is in patient retry (see
+    /// `PatientTailGuard`): the run watchdogs read this alongside
+    /// `info()` and do not treat the tail's long waits or 20 s
+    /// connects as a wedge.
+    patient_tail: AtomicBool,
 }
 
 impl RetrySlot {
@@ -390,7 +411,23 @@ impl RetrySlot {
         Self {
             wait: StdMutex::new(None),
             retry_now: AtomicBool::new(false),
+            patient_tail: AtomicBool::new(false),
         }
+    }
+
+    /// Round 72 (C) — mark / unmark the patient tail. The guard
+    /// owns the pairing; these are only called through it.
+    fn set_patient_tail(&self) {
+        self.patient_tail.store(true, Ordering::SeqCst);
+    }
+
+    fn clear_patient_tail(&self) {
+        self.patient_tail.store(false, Ordering::SeqCst);
+    }
+
+    /// Round 72 (C) — true while a tail task is in patient retry.
+    fn is_patient_tail(&self) -> bool {
+        self.patient_tail.load(Ordering::SeqCst)
     }
 
     /// Record that a segment failed and will try again at the end of
@@ -442,6 +479,10 @@ pub struct DownloadManager {
     /// (`SEGMENT_STALL_TIMEOUT`) and by the run watchdog
     /// (`RUN_STALL_TIMEOUT`) instead of a total budget.
     segment_client: RwLock<Arc<Client>>,
+    /// The tail client (Round 72, C): same shape as the segment
+    /// client, but with the 20 s tail connect timeout instead of
+    /// the 8 s cap — only a patient tail task uses it.
+    tail_segment_client: RwLock<Arc<Client>>,
     store: Arc<Store>,
     /// Connections per download (settings.max_connections, 1–32).
     /// Atomic so a settings save changes the segment count of the
@@ -560,9 +601,18 @@ impl DownloadManager {
                     .build()
                     .expect("reqwest client builds")
             });
+        // Round 72 (C): the tail client (20 s connect timeout) —
+        // same fallback shape as the segment client.
+        let tail_segment_client = build_tail_segment_client(None).unwrap_or_else(|_| {
+            Client::builder()
+                .user_agent("Fetchline/0.1")
+                .build()
+                .expect("reqwest client builds")
+        });
         Arc::new(Self {
             client: RwLock::new(Arc::new(client)),
             segment_client: RwLock::new(Arc::new(segment_client)),
+            tail_segment_client: RwLock::new(Arc::new(tail_segment_client)),
             store,
             max_connections: AtomicUsize::new(max_connections.max(1)),
             max_retries: AtomicU32::new(Settings::default().max_retries as u32),
@@ -597,6 +647,12 @@ impl DownloadManager {
     /// be cut off by a total budget.
     fn segment_client(&self) -> Arc<Client> {
         Arc::clone(&self.segment_client.read().unwrap())
+    }
+
+    /// The client a patient tail task uses (Round 72, C): 20 s
+    /// connect timeout instead of the 8 s cap.
+    fn tail_segment_client(&self) -> Arc<Client> {
+        Arc::clone(&self.tail_segment_client.read().unwrap())
     }
 
     /// Connections per download, as last applied from settings.
@@ -650,6 +706,8 @@ impl DownloadManager {
         let segment_client =
             build_segment_client(proxy.as_ref(), settings.connection_timeout_secs as u64)?;
         *self.segment_client.write().unwrap() = Arc::new(segment_client);
+        let tail_segment_client = build_tail_segment_client(proxy.as_ref())?;
+        *self.tail_segment_client.write().unwrap() = Arc::new(tail_segment_client);
         Ok(())
     }
 
@@ -1562,7 +1620,7 @@ impl DownloadManager {
         if let Some(header) = cookies {
             self.cookies.lock().unwrap().insert(id.clone(), header);
         }
-        let ranges = initial_ranges(&info, self.max_connections());
+        let ranges = initial_ranges(&info);
         self.store.create_segments(&id, &ranges)?;
         if let Some(queue) = queue_id {
             self.store.add_to_queue(&id, &queue)?;
@@ -3484,6 +3542,73 @@ impl DownloadManager {
     /// destroys the copy the user already has. The re-download goes
     /// through the normal engine path (segments, speed limiter,
     /// proxy client), so it is byte-checked the same way.
+    /// Redownload a row in place (Round 72, C): start the same
+    /// URL over from scratch WITHOUT deleting the row first.
+    /// The Round 71 retest showed why delete-first is wrong: the
+    /// old frontend flow deleted the row, then re-added the link
+    /// (probe), then started it — on a flaky server the probe
+    /// failed and the row was simply gone, and while the probe
+    /// ran (up to 16 s against OVH) the click looked dead. Here
+    /// the row survives everything: a probe failure leaves it
+    /// Failed with the new error, and a success resets its
+    /// segments and starts it. The `.part` file is kept, not
+    /// deleted (a just-failed run may still hold it open on
+    /// Windows, and `run_inner` re-extends it with `set_len`
+    /// anyway); every byte is overwritten by the fresh segments,
+    /// and the file is only renamed to its final name when all
+    /// segments complete, so stale bytes can never leak into a
+    /// finished download. Only a running download is refused
+    /// (after a bounded wait for its run to unregister, like
+    /// `refresh_download_address`); a complete row re-downloads
+    /// from zero, like the old flow.
+    pub async fn redownload_download(self: &Arc<Self>, id: &str) -> Result<()> {
+        let row = self
+            .store
+            .get_download(id)?
+            .ok_or_else(|| EngineError::NotFound(id.to_string()))?;
+        // A run that is still stopping (the user hit Stop, or the
+        // run just failed and is unwinding) must unregister first:
+        // starting into it would fail with "already running".
+        for _ in 0..20 {
+            if !self.running.lock().await.contains_key(id) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if self.running.lock().await.contains_key(id) {
+            return Err(EngineError::InvalidState(
+                "This download is still stopping — try again in a moment".to_string(),
+            ));
+        }
+        // Browser cookies (S13 finish), like `resume_download`:
+        // a cookie download re-probes with its cookies.
+        let cookies = self.cookies.lock().unwrap().get(id).cloned();
+        let info = self
+            .probe_url_with_cookies(&row.url, cookies.as_deref())
+            .await
+            .map_err(|e| {
+                // The row SURVIVES a failed probe — never
+                // delete-first. A complete row keeps its status
+                // (its file is on disk; the redownload just did
+                // not happen); anything else records the new
+                // failure so the row shows why it did not start.
+                if row.status != "complete" {
+                    let _ = self.store.set_status(id, "error", Some(&e.to_string()));
+                }
+                e
+            })?;
+        self.store.delete_segments(id)?;
+        self.store.reset_download(
+            id,
+            info.size.map(|s| s as i64),
+            info.etag.as_deref(),
+            info.last_modified.as_deref(),
+        )?;
+        let ranges = initial_ranges(&info);
+        self.store.create_segments(id, &ranges)?;
+        self.start_download(id).await
+    }
+
     async fn redownload_changed_file(
         self: &Arc<Self>,
         file: &DownloadRow,
@@ -3512,7 +3637,7 @@ impl DownloadManager {
                 info.last_modified.as_deref(),
             )
             .map_err(|e| e.to_string())?;
-        let ranges = initial_ranges(info, self.max_connections());
+        let ranges = initial_ranges(info);
         self.store
             .create_segments(&file.id, &ranges)
             .map_err(|e| e.to_string())?;
@@ -4298,7 +4423,7 @@ impl DownloadManager {
                 info.etag.as_deref(),
                 info.last_modified.as_deref(),
             )?;
-            let ranges = initial_ranges(&info, self.max_connections());
+            let ranges = initial_ranges(&info);
             self.store.create_segments(id, &ranges)?;
         }
         self.start_download(id).await
@@ -4423,7 +4548,7 @@ impl DownloadManager {
                 info.etag.as_deref(),
                 info.last_modified.as_deref(),
             )?;
-            let ranges = initial_ranges(&info, self.max_connections());
+            let ranges = initial_ranges(&info);
             self.store.create_segments(id, &ranges)?;
         }
         self.store.update_download_address(
@@ -4609,7 +4734,10 @@ impl DownloadManager {
                 match running.get(&id) {
                     Some(r) => (
                         r.last_progress_ms.load(Ordering::Relaxed),
-                        r.retry.info().is_some(),
+                        // Round 72 (C) — a patient tail is not a
+                        // wedge: it is deliberately waiting out a
+                        // long backoff (or a 20 s tail connect).
+                        r.retry.info().is_some() || r.retry.is_patient_tail(),
                     ),
                     None => return, // run ended — nothing to watch
                 }
@@ -4712,8 +4840,11 @@ impl DownloadManager {
                     _ => return,
                 }
             }
-            if entry.retry.info().is_some() {
-                continue; // retry backoff — not a wedge
+            // Round 72 (C) — a patient tail is not a wedge (see
+            // the tokio watchdog above): it waits out long
+            // backoffs and 20 s tail connects on purpose.
+            if entry.retry.info().is_some() || entry.retry.is_patient_tail() {
+                continue; // retry backoff / patient tail — not a wedge
             }
             if now_millis().saturating_sub(entry.last_progress_ms.load(Ordering::Relaxed))
                 < timeout_secs * 1000
@@ -4823,17 +4954,30 @@ impl DownloadManager {
             _ => None,
         };
         let mut tasks = JoinSet::new();
+        // Round 72 (C/D) — with start-with-1 there is exactly one
+        // segment at creation, so the first task is always the
+        // tail; a resumed download with several unfinished
+        // segments has no tail until only one remains. The tail
+        // task gets the 20 s tail client and the patient retry
+        // loop (Round 72, C) instead of another deferral cycle.
+        let unfinished = unfinished_count(&states);
         for state in &states {
             let st = state.lock().unwrap();
             let done = st.done;
             let total = segment_len_of(&st);
             drop(st);
             if done < total {
-                tasks.spawn(run_segment(
+                let tail = unfinished == 1;
+                let client = if tail {
+                    self.tail_segment_client()
+                } else {
                     // Round 55: segments use the no-total-timeout
                     // client — a slow download must never be cut
                     // off by a total budget.
-                    self.segment_client(),
+                    self.segment_client()
+                };
+                tasks.spawn(run_segment(
+                    client,
                     Arc::clone(&self.limiter),
                     Arc::clone(per_download_limiter),
                     quota_gate.clone(),
@@ -4848,6 +4992,7 @@ impl DownloadManager {
                     Arc::clone(retry),
                     Arc::clone(&self.store),
                     false,
+                    tail,
                 ));
             }
         }
@@ -5049,6 +5194,51 @@ impl DownloadManager {
                             )
                             .await;
                         }
+                        Some(Ok(Ok(SegOutcome::TailRetryable(seg_id, e)))) => {
+                            // Round 72 (C) — a solo segment
+                            // exhausted its retries on a
+                            // patient-eligible failure. If it is
+                            // the only unfinished segment left (the
+                            // tail), respawn it as a patient tail
+                            // task (20 s connects, unbounded
+                            // growing backoff) instead of failing
+                            // the download; otherwise fail exactly
+                            // as before.
+                            let is_tail = unfinished_count(&states) == 1;
+                            let state = states
+                                .iter()
+                                .find(|s| s.lock().unwrap().row.id == seg_id)
+                                .cloned();
+                            let Some(state) = state.filter(|_| is_tail) else {
+                                tasks.abort_all();
+                                while tasks.join_next().await.is_some() {}
+                                self.checkpoint(id, &states, 0).await;
+                                retry.clear_wait();
+                                return Err(e);
+                            };
+                            self.store.log(&format!(
+                                "segment {} failed solo on a retryable error and is the last unfinished segment — respawning as a patient tail (20 s connects, retrying until it succeeds or the download is paused/cancelled)",
+                                state.lock().unwrap().row.segment_index,
+                            ));
+                            tasks.spawn(run_segment(
+                                self.tail_segment_client(),
+                                Arc::clone(&self.limiter),
+                                Arc::clone(per_download_limiter),
+                                quota_gate.clone(),
+                                self.max_retries.load(Ordering::Relaxed).max(1),
+                                row.url.clone(),
+                                site_auth.clone(),
+                                proxy.clone(),
+                                cookies.clone(),
+                                state,
+                                Arc::clone(&file),
+                                Arc::clone(pause),
+                                Arc::clone(retry),
+                                Arc::clone(&self.store),
+                                true,
+                                true,
+                            ));
+                        }
                         None => break,
                     }
                 }
@@ -5129,9 +5319,12 @@ impl DownloadManager {
                     // Resume refuse it as "already running" and
                     // Pause a no-op). Suppressed while a segment
                     // waits out its retry backoff: a waiting segment
-                    // is not a wedged run.
+                    // is not a wedged run. Round 72 (C): also
+                    // suppressed while a tail task is in patient
+                    // retry — it is waiting on purpose.
                     if !tasks.is_empty()
                         && retry.info().is_none()
+                        && !retry.is_patient_tail()
                         && last_byte_at.elapsed() >= RUN_STALL_TIMEOUT
                     {
                         tasks.abort_all();
@@ -5263,9 +5456,24 @@ impl DownloadManager {
                 continue;
             }
             let solo = tasks.is_empty();
-            tasks.spawn(run_segment(
+            // Round 72 (C) — a respawned deferred segment that is
+            // the only unfinished one left is the tail: it gets
+            // the 20 s tail client and the patient retry loop
+            // instead of another deferral cycle. `tail` is sticky
+            // for the task's life — if a split later creates a
+            // second unfinished segment, the task keeps waiting
+            // patiently, which is safe: the download only fails
+            // when a task returns an error, and a patient task
+            // never returns one.
+            let tail = unfinished_count(states) == 1;
+            let client = if tail {
+                self.tail_segment_client()
+            } else {
                 // Round 55: segments use the no-total-timeout client.
-                self.segment_client(),
+                self.segment_client()
+            };
+            tasks.spawn(run_segment(
+                client,
                 Arc::clone(&self.limiter),
                 Arc::clone(per_download_limiter),
                 quota_gate.clone(),
@@ -5280,6 +5488,7 @@ impl DownloadManager {
                 Arc::clone(retry),
                 Arc::clone(&self.store),
                 solo,
+                tail,
             ));
             return;
         }
@@ -5307,7 +5516,7 @@ impl DownloadManager {
                 continue;
             }
             let remaining = segment_len_of(&st).saturating_sub(st.done);
-            if remaining > MIN_SPLIT_REMAINING {
+            if remaining >= MIN_SPLIT_BYTES {
                 best = Some((i, remaining));
                 break;
             }
@@ -5327,8 +5536,7 @@ impl DownloadManager {
                     continue;
                 }
                 let remaining = segment_len_of(&st).saturating_sub(st.done);
-                if remaining > MIN_SPLIT_REMAINING
-                    && best.map(|(_, r)| remaining > r).unwrap_or(true)
+                if remaining >= MIN_SPLIT_BYTES && best.map(|(_, r)| remaining > r).unwrap_or(true)
                 {
                     best = Some((i, remaining));
                 }
@@ -5362,6 +5570,9 @@ impl DownloadManager {
         let new_state = Arc::new(StdMutex::new(SegState::new(new_row, 0, new_end)));
         // Round 71 (B2) — a split-off half runs solo when it is the
         // only task alive (same fatal rule as a respawned segment).
+        // Round 72 (C) — it is never the tail: a split always
+        // leaves two unfinished segments (the halved original +
+        // the new half).
         let solo = tasks.is_empty();
         tasks.spawn(run_segment(
             // Round 55: segments use the no-total-timeout client.
@@ -5380,6 +5591,7 @@ impl DownloadManager {
             Arc::clone(retry),
             Arc::clone(&self.store),
             solo,
+            false,
         ));
         // The supervisor must keep the new state: progress, checkpoint
         // and completion all read from `states`.
@@ -5413,6 +5625,13 @@ impl DownloadManager {
         // only parks the supervisor task (the worker is free
         // while the blocking thread writes); a checkpoint failure
         // stays diagnostic, not fatal, exactly as before.
+        // Round 72 (D) — the live connection/part counts for the
+        // main window: segments with a live task, and the segment
+        // count itself. Computed here from the same in-memory
+        // snapshot as the totals, so the row never disagrees
+        // with the progress window's live event.
+        let active_connections = states.iter().filter(|s| s.lock().unwrap().running).count() as i64;
+        let segment_count = states.len() as i64;
         let store = Arc::clone(&self.store);
         let id = id.to_string();
         let _ = tokio::task::spawn_blocking(move || {
@@ -5435,7 +5654,14 @@ impl DownloadManager {
             // once per second — the checkpoint itself is the
             // throttle) while the run continues: a checkpoint
             // failure is diagnostic, not fatal.
-            if let Err(e) = store.checkpoint(&id, total, speed_bps as i64, eta) {
+            if let Err(e) = store.checkpoint(
+                &id,
+                total,
+                speed_bps as i64,
+                eta,
+                active_connections,
+                segment_count,
+            ) {
                 store.log(&format!("checkpoint failed for {id}: {e}"));
             }
             for (seg_id, done, status) in segs {
@@ -5485,6 +5711,10 @@ impl DownloadManager {
             eta_seconds: eta,
             status: status.to_string(),
             segments,
+            // Round 72 (D) — live tasks, not just unfinished
+            // segments: a deferred segment is "active" but holds
+            // no connection, so the count comes from `running`.
+            active_connections: states.iter().filter(|s| s.lock().unwrap().running).count(),
             // The live retry wait, if any — the dialog's countdown
             // reads this, so it is the engine's own deadline.
             retry: retry.and_then(|r| r.info()),
@@ -5616,6 +5846,93 @@ fn is_deferrable(e: &EngineError, received_bytes: bool) -> bool {
     }
 }
 
+/// Round 72 (C) — is this failure patient-eligible for the tail
+/// (the last unfinished segment)? A tail that keeps failing on a
+/// retryable transport problem must NOT fail the download after
+/// `max_attempts` — OVH drops SYNs in bursts and the server comes
+/// back, so the tail keeps retrying with growing backoff until it
+/// succeeds or the user cancels/pauses. Two failures are NEVER
+/// patient, whatever the segment:
+/// - a body stall (`stall_error`): the connection started and
+///   wedged — Round 55 pins that a wedged download FAILS, and a
+///   patient loop here would defer forever instead;
+/// - a non-rate-limit status (404 / 416 / ...): the file is gone
+///   or the range is wrong — retrying forever would never help.
+/// Everything else patient is a transport problem (connect /
+/// timeout / body read, 429 / 503, send-phase stall), whether or
+/// not bytes flowed in the attempt: the segment resumes from
+/// `done`, so a retry is safe.
+fn is_tail_patient(e: &EngineError) -> bool {
+    // A body stall is never patient — see the doc comment above.
+    if let EngineError::InvalidState(m) = e {
+        if m.starts_with(STALL_MSG_PREFIX) {
+            return false;
+        }
+    }
+    if let EngineError::Status(code, _) = e {
+        return *code == 429 || *code == 503;
+    }
+    if let EngineError::Http(re) = e {
+        // Round 72 (C) — `is_request()` is the mid-send close:
+        // the connection was established and the request went out,
+        // then the server closed the socket before answering
+        // ("connection closed before message completed"). Neither
+        // `is_connect()` (connect phase only) nor `is_body()`
+        // (body streaming only) sees it, so without this the OVH
+        // shape — a server that drops connections mid-request —
+        // would never be patient. It is NOT added to
+        // `is_deferrable`: the slow path's retry countdown for a
+        // dropped connection is pinned by
+        // `final_verify_tests::final_retry_countdown_on_dropped_connection_then_retry_now_recovers`
+        // (a fast-retry path publishes no countdown), so a dropped
+        // connection keeps its slow backoffs and only escapes
+        // into patient retry here, after `max_attempts`.
+        return re.is_connect() || re.is_timeout() || re.is_body() || re.is_request();
+    }
+    if let EngineError::InvalidState(m) = e {
+        if m.starts_with(SEND_STALL_MSG_PREFIX) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Round 72 (C) — patient tail backoffs, in seconds: 5 s, 15 s,
+/// 30 s, then 60 s forever. The wait is published to the run's
+/// retry slot (the dialog shows the countdown, and the run
+/// watchdogs do not treat the wait as a wedge) and is
+/// interruptible by pause / "Retry now" like every other backoff.
+const TAIL_BACKOFFS_SECS: [u64; 4] = [5, 15, 30, 60];
+
+/// Round 72 (C) — marks the run's retry slot "a tail task is in
+/// patient retry" for the guard's lifetime, so the run watchdogs
+/// (tokio, thread, in-loop) do not abort a download whose only
+/// remaining segment is waiting out a long patient backoff or a
+/// 20 s tail connect. Cleared on drop — every exit of the tail
+/// task, panic included, unmarks it. The flag alone never
+/// suppresses a watchdog for a task that is actually wedged: a
+/// tail task's operations are all bounded (20 s connect, 30 s
+/// send, 30 s chunk stall), so it always reaches its next wait
+/// or failure.
+struct PatientTailGuard {
+    retry: Arc<RetrySlot>,
+}
+
+impl PatientTailGuard {
+    fn arm(retry: &Arc<RetrySlot>) -> Self {
+        retry.set_patient_tail();
+        PatientTailGuard {
+            retry: Arc::clone(retry),
+        }
+    }
+}
+
+impl Drop for PatientTailGuard {
+    fn drop(&mut self) {
+        self.retry.clear_patient_tail();
+    }
+}
+
 /// Round 71 (B4) — log one failed segment attempt: segment
 /// index, byte range, attempt number, elapsed time and the FULL
 /// error chain (see `error_chain_text`). "error sending request"
@@ -5664,6 +5981,39 @@ async fn sleep_backoff(pause: &Arc<AtomicBool>, retry: &Arc<RetrySlot>, backoff:
     pause.load(Ordering::SeqCst)
 }
 
+/// Round 72 (C) — one patient tail wait (see `is_tail_patient`).
+/// Arms the watchdog guard on the first wait, publishes the
+/// backoff to the retry slot with `max_attempts = 0` (the dialog
+/// reads 0 as "no limit" and drops the "attempt N of M" suffix),
+/// then sleeps it interruptibly. Returns true when the run is
+/// paused — the caller exits cleanly, leaving the download
+/// resumable from the tail's checkpoint.
+async fn patient_tail_wait(
+    pause: &Arc<AtomicBool>,
+    retry: &Arc<RetrySlot>,
+    store: &Store,
+    segment_index: i64,
+    e: &EngineError,
+    tail_waits: &mut u32,
+    patient_guard: &mut Option<PatientTailGuard>,
+) -> bool {
+    if patient_guard.is_none() {
+        *patient_guard = Some(PatientTailGuard::arm(retry));
+        store.log(&format!(
+            "segment {segment_index} entering patient retry (tail): {} — retrying until it succeeds or the download is paused/cancelled",
+            error_chain_text(e),
+        ));
+    }
+    *tail_waits += 1;
+    let backoff = Duration::from_secs(
+        TAIL_BACKOFFS_SECS[(*tail_waits as usize - 1).min(TAIL_BACKOFFS_SECS.len() - 1)],
+    );
+    retry.set_wait(*tail_waits, 0, &e.to_string(), backoff);
+    let paused = sleep_backoff(pause, retry, backoff).await;
+    retry.clear_wait();
+    paused
+}
+
 /// One segment's task. The wrapper owns the `running` bookkeeping
 /// (B3) so the supervisor can tell a stuck-in-Connecting segment
 /// from a finished one; the inner function owns the retry loop.
@@ -5671,6 +6021,9 @@ async fn sleep_backoff(pause: &Arc<AtomicBool>, retry: &Arc<RetrySlot>, backoff:
 /// this segment is the only task running: a deferrable failure
 /// then ends the download (there is nobody left to pick the
 /// segment up), while a non-solo failure defers it instead.
+/// `tail` is true when this segment is the only unfinished one:
+/// a patient-eligible failure then retries forever with growing
+/// backoff (Round 72, C) instead of failing the download.
 async fn run_segment(
     client: Arc<Client>,
     limiter: Arc<RateLimiter>,
@@ -5687,6 +6040,7 @@ async fn run_segment(
     retry: Arc<RetrySlot>,
     store: Arc<Store>,
     solo: bool,
+    tail: bool,
 ) -> std::result::Result<SegOutcome, EngineError> {
     {
         let mut st = state.lock().unwrap();
@@ -5715,6 +6069,7 @@ async fn run_segment(
         retry,
         &store,
         solo,
+        tail,
     )
     .await
 }
@@ -5735,8 +6090,17 @@ async fn run_segment_inner(
     retry: Arc<RetrySlot>,
     store: &Store,
     solo: bool,
+    tail: bool,
 ) -> std::result::Result<SegOutcome, EngineError> {
     let mut attempt: u32 = 0;
+    // Round 72 (C) — how many patient waits this tail has taken:
+    // the backoff grows 5 s / 15 s / 30 s / 60 s and stays at 60 s.
+    let mut tail_waits: u32 = 0;
+    // Round 72 (C) — the patient-tail guard, armed the first time
+    // this task enters a patient wait and held until the task
+    // exits: while it lives, the run watchdogs do not treat the
+    // tail's long waits as a wedge.
+    let mut patient_guard: Option<PatientTailGuard> = None;
     loop {
         let done_before = state.lock().unwrap().done;
         let attempt_started = Instant::now();
@@ -5792,6 +6156,35 @@ async fn run_segment_inner(
                         }
                         continue;
                     }
+                    // Round 72 (C) — patient tail first: this
+                    // segment is the only unfinished one and the
+                    // failure is patient-eligible, so wait it out
+                    // with a growing backoff and try again instead
+                    // of failing the download. The attempt counter
+                    // resets so the next round gets its fast
+                    // retries first; `tail_waits` drives the
+                    // backoff (5 s / 15 s / 30 s / 60 s). A tail
+                    // never defers — there is nobody left to pick
+                    // it up — so this check comes before the
+                    // deferral below.
+                    if tail && is_tail_patient(&e) {
+                        let segment_index = state.lock().unwrap().row.segment_index;
+                        if patient_tail_wait(
+                            &pause,
+                            &retry,
+                            store,
+                            segment_index,
+                            &e,
+                            &mut tail_waits,
+                            &mut patient_guard,
+                        )
+                        .await
+                        {
+                            return Ok(SegOutcome::Done);
+                        }
+                        attempt = 0;
+                        continue;
+                    }
                     // Retries exhausted. Non-solo: DEFERRAL, not
                     // failure — mark the range back as Pending
                     // with a backoff and let a working worker pick
@@ -5816,9 +6209,50 @@ async fn run_segment_inner(
                         ));
                         return Ok(SegOutcome::Deferred(e));
                     }
+                    // Round 72 (C) — solo and patient-eligible:
+                    // the supervisor decides. If this is the only
+                    // unfinished segment it respawns it as a
+                    // patient tail; otherwise the download fails
+                    // exactly as before.
+                    if is_tail_patient(&e) {
+                        return Ok(SegOutcome::TailRetryable(
+                            state.lock().unwrap().row.id.clone(),
+                            e,
+                        ));
+                    }
                     return Err(e);
                 }
                 if attempt >= max_attempts {
+                    // Round 72 (C) — same patient rules for the
+                    // slow path: a failure that was not
+                    // deferrable (bytes flowed, or a 500) but is
+                    // still patient-eligible (a transport error)
+                    // gets the patient wait when this is the tail,
+                    // and a TailRetryable report when it ran solo.
+                    if tail && is_tail_patient(&e) {
+                        let segment_index = state.lock().unwrap().row.segment_index;
+                        if patient_tail_wait(
+                            &pause,
+                            &retry,
+                            store,
+                            segment_index,
+                            &e,
+                            &mut tail_waits,
+                            &mut patient_guard,
+                        )
+                        .await
+                        {
+                            return Ok(SegOutcome::Done);
+                        }
+                        attempt = 0;
+                        continue;
+                    }
+                    if is_tail_patient(&e) {
+                        return Ok(SegOutcome::TailRetryable(
+                            state.lock().unwrap().row.id.clone(),
+                            e,
+                        ));
+                    }
                     return Err(e);
                 }
                 let backoff = Duration::from_secs(1 << attempt.min(4));
@@ -6371,6 +6805,20 @@ fn total_done(states: &[Arc<StdMutex<SegState>>]) -> u64 {
     states.iter().map(|s| s.lock().unwrap().done).sum()
 }
 
+/// Round 72 (C) — how many segments still have bytes left. The
+/// supervisor and `try_split` use it to decide whether a segment
+/// is the tail (the only unfinished one): only a tail gets the
+/// patient retry loop and the 20 s tail client.
+fn unfinished_count(states: &[Arc<StdMutex<SegState>>]) -> usize {
+    states
+        .iter()
+        .filter(|s| {
+            let st = s.lock().unwrap();
+            st.done < segment_len_of(&st)
+        })
+        .count()
+}
+
 fn part_path(save_path: &str) -> PathBuf {
     PathBuf::from(format!("{save_path}.part"))
 }
@@ -6413,29 +6861,19 @@ fn remote_changed(info: &ProbeInfo, row: &DownloadRow) -> Option<bool> {
 /// Initial segment ranges for a probe: as many segments as the
 /// "Connections per download" setting asks for (up to 32) when the
 /// file is large and range-capable, otherwise a single segment.
-/// Segments are never smaller than `MIN_SEGMENT_BYTES`, so a small
-/// file with a high setting still splits sanely.
-///
-/// Round 69 (f) — this used to cap at `INITIAL_SEGMENTS` (4):
-/// `INITIAL_SEGMENTS.min(max_connections)` meant the setting could
-/// only ever REDUCE the segment count below 4, never raise it —
-/// the Round 68 retest's "8 connections set, 4 used". The setting
-/// is the segment count now; the 4-segment tests still pass
-/// because their managers run with max_connections = 4.
-fn initial_ranges(info: &ProbeInfo, max_connections: usize) -> Vec<(i64, Option<i64>)> {
+/// Round 72 (D) — IDM model: a download starts with ONE segment
+/// covering the whole file (or a single open-ended segment when
+/// the size is unknown); `try_split` grows it by halving the
+/// largest remaining segment whenever a worker frees. The
+/// "Connections per download" setting is now only the concurrency
+/// cap, not the segment count — a server that tolerates 3
+/// connections ends with ~3 segments, not 8 with 5 refused (the
+/// OVH pattern). A file too small to split, or a server without
+/// range support, is a single segment exactly as before — there
+/// is no merge step anywhere, whatever the segment count grows
+/// to: every segment writes in place at its own offset.
+fn initial_ranges(info: &ProbeInfo) -> Vec<(i64, Option<i64>)> {
     match (info.size, info.accept_ranges) {
-        (Some(size), true) if size >= MIN_SIZE_TO_SEGMENT => {
-            let by_size = (size / MIN_SEGMENT_BYTES) as usize;
-            let n = max_connections.min(by_size).max(1) as u64;
-            let chunk = size / n;
-            (0..n)
-                .map(|i| {
-                    let start = (i * chunk) as i64;
-                    let end = if i == n - 1 { (size - 1) as i64 } else { ((i + 1) * chunk - 1) as i64 };
-                    (start, Some(end))
-                })
-                .collect()
-        }
         (Some(size), true) => vec![(0, Some((size - 1) as i64))],
         _ => vec![(0, None)],
     }

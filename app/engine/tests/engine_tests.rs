@@ -41,7 +41,13 @@ async fn full_download_multi_segment_matches_bytes() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -70,7 +76,13 @@ async fn list_downloads_carries_updated_at_and_grabber_project() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     let row = mgr.get_download(&id).unwrap().unwrap();
@@ -104,7 +116,13 @@ async fn pause_then_resume_completes_with_correct_bytes() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -134,7 +152,13 @@ async fn resume_restarts_when_remote_file_changes() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -305,7 +329,13 @@ async fn refresh_address_refuses_running_and_complete_downloads() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -847,7 +877,13 @@ async fn add_download_rejects_404() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let err = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap_err();
     assert!(err.to_string().contains("404"), "{err}");
@@ -873,11 +909,23 @@ async fn duplicate_add_gets_different_save_path() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let (first, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     let (second, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     let a = mgr.get_download(&first).unwrap().unwrap();
@@ -894,7 +942,13 @@ async fn second_add_after_first_completes_gets_suffixed_path() {
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     complete_one(&mgr, &server.url, &dir, "file.bin").await;
     let (second, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     let b = mgr.get_download(&second).unwrap().unwrap();
@@ -919,7 +973,13 @@ async fn pause_download_when_not_running_errors() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert!(mgr.pause_download(&id).await.unwrap_err().to_string().contains("not running"));
@@ -939,7 +999,13 @@ async fn resume_restarts_when_only_etag_changes() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -968,7 +1034,13 @@ async fn start_download_on_paused_download_resumes() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -1457,7 +1529,13 @@ async fn resume_fails_when_server_ignores_range() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -1939,69 +2017,131 @@ fn settings_migration_adds_new_columns_to_old_db() {
 
 #[tokio::test]
 async fn max_connections_from_settings_changes_segment_count() {
+    // Round 72 (D) — the "Connections per download" setting is a
+    // CONCURRENCY cap now, not the segment count: every download
+    // starts with ONE segment and grows by splitting (IDM model).
+    // A 4 MiB file at 4 connections grows to 4 segments (the 1 MiB
+    // split floor applies to the bytes REMAINING, so a 2 MiB file
+    // would only reach 2 — its 1 MiB halves shrink below the
+    // floor before the next split tick), at 1 connection it stays
+    // 1, at 2 it grows to 2. The mock is slow (8 KiB chunks at
+    // 50 ms) so the splits have time to happen before the
+    // download finishes.
     let server = MockServer::start(MockConfig {
-        size_bytes: Some(2 * 1024 * 1024),
+        size_bytes: Some(4 * 1024 * 1024),
+        chunk: 8192,
+        delay: Duration::from_millis(50),
         ..Default::default()
     });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
-    // Default (4): a 2 MiB range-capable file is split into 4.
+    // Default (4): one segment at creation, four when it completes.
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
+    assert_eq!(store.get_segments(&id).unwrap().len(), 1);
+    mgr.start_download(&id).await.unwrap();
+    assert!(wait_for_status(&mgr, &id, "complete", 30).await);
     assert_eq!(store.get_segments(&id).unwrap().len(), 4);
-    // Settings say 1 connection: the next download is a single segment.
+    // Settings say 1 connection: the next download stays a single segment.
     let mut s = mgr.get_settings().unwrap();
     s.max_connections = 1;
     mgr.update_settings(&s).unwrap();
     assert_eq!(mgr.max_connections(), 1);
     let (id2, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(store.get_segments(&id2).unwrap().len(), 1);
-    // And 2 connections: two segments.
+    mgr.start_download(&id2).await.unwrap();
+    // One connection at ~160 KiB/s: a 4 MiB file takes ~26 s.
+    assert!(wait_for_status(&mgr, &id2, "complete", 60).await);
+    assert_eq!(store.get_segments(&id2).unwrap().len(), 1);
+    // And 2 connections: grows to two segments.
     s.max_connections = 2;
     mgr.update_settings(&s).unwrap();
     let (id3, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
+    assert_eq!(store.get_segments(&id3).unwrap().len(), 1);
+    mgr.start_download(&id3).await.unwrap();
+    assert!(wait_for_status(&mgr, &id3, "complete", 30).await);
     assert_eq!(store.get_segments(&id3).unwrap().len(), 2);
 }
 
 #[tokio::test]
-async fn max_connections_setting_raises_segment_count() {
-    // Round 69 (f): the "Connections per download" setting IS the
-    // segment count now. It used to cap at INITIAL_SEGMENTS (4),
-    // so a setting of 8 still downloaded with 4 segments — the
-    // Round 68 retest's "8 connections set, 4 used".
+async fn max_connections_setting_is_a_cap_not_a_segment_count() {
+    // Round 72 (D) — the setting caps concurrency, it does not
+    // pre-split: a 4 MiB file starts as ONE segment whatever the
+    // setting, and grows only to the 1 MiB split floor (4
+    // segments of 1 MiB) — never 8, never 32. (Round 69 (f) had
+    // it the other way: the setting WAS the segment count, so 8
+    // connections meant 8 segments; the Round 68 retest's "8
+    // connections set, 4 used" came from the old 4-cap.)
     let server = MockServer::start(MockConfig {
-        size_bytes: Some(2 * 1024 * 1024),
+        size_bytes: Some(4 * 1024 * 1024),
+        chunk: 8192,
+        delay: Duration::from_millis(50),
         ..Default::default()
     });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 8);
-    // Default settings say 8: a 2 MiB range-capable file splits
-    // into 8, not 4.
+    // Default settings say 8: still one segment at creation.
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
-    assert_eq!(store.get_segments(&id).unwrap().len(), 8);
-    // 32 connections on a 2 MiB file: the 256 KiB segment floor
-    // caps it at 8 segments, not 32 tiny ones.
+    assert_eq!(store.get_segments(&id).unwrap().len(), 1);
+    mgr.start_download(&id).await.unwrap();
+    assert!(wait_for_status(&mgr, &id, "complete", 30).await);
+    assert_eq!(store.get_segments(&id).unwrap().len(), 4);
+    // 32 connections on a 4 MiB file: still 4 — the 1 MiB split
+    // floor caps the growth, not the setting.
     let mut s = mgr.get_settings().unwrap();
     s.max_connections = 32;
     mgr.update_settings(&s).unwrap();
     let (id2, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
-    assert_eq!(store.get_segments(&id2).unwrap().len(), 8);
+    assert_eq!(store.get_segments(&id2).unwrap().len(), 1);
+    mgr.start_download(&id2).await.unwrap();
+    assert!(wait_for_status(&mgr, &id2, "complete", 30).await);
+    assert_eq!(store.get_segments(&id2).unwrap().len(), 4);
 }
 
 #[tokio::test]
@@ -2161,7 +2301,13 @@ async fn download_goes_through_http_proxy() {
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     mgr.save_proxy_config(&proxy_input("http", "127.0.0.1", proxy.port as i64)).unwrap();
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -2187,7 +2333,13 @@ async fn download_goes_through_http_proxy_with_auth() {
     input.password = Some("hunter2".to_string());
     mgr.save_proxy_config(&input).unwrap();
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -2213,7 +2365,13 @@ async fn basic_auth_setting_sends_credentials_preemptively() {
     input.auth = Some("basic".to_string());
     mgr.save_proxy_config(&input).unwrap();
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -2232,7 +2390,13 @@ async fn proxy_disabled_download_goes_direct() {
     input.enabled = false;
     mgr.save_proxy_config(&input).unwrap();
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -2251,7 +2415,13 @@ async fn proxy_bypass_list_skips_proxy() {
     input.bypass = vec!["127.0.0.1".to_string()];
     mgr.save_proxy_config(&input).unwrap();
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -2269,7 +2439,13 @@ async fn download_goes_through_socks5_proxy() {
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     mgr.save_proxy_config(&proxy_input("socks", "127.0.0.1", proxy.port as i64)).unwrap();
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -2291,7 +2467,13 @@ async fn socks5_proxy_with_auth() {
     input.password = Some("hunter2".to_string());
     mgr.save_proxy_config(&input).unwrap();
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -2346,7 +2528,13 @@ async fn ftp_proxy_is_stored_but_not_applied() {
     input.enabled = true;
     mgr.save_proxy_config(&input).unwrap();
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -2367,7 +2555,13 @@ async fn speed_limit_caps_download() {
     mgr.set_speed_limit(Some(32)).unwrap();
     assert_eq!(mgr.speed_limit_bps(), 32 * 1024);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     let start = Instant::now();
@@ -2394,7 +2588,13 @@ async fn speed_limit_unlimited_is_fast() {
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     assert_eq!(mgr.get_speed_limit().unwrap(), None);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     let start = Instant::now();
@@ -2415,7 +2615,13 @@ async fn speed_limit_change_mid_download_takes_effect() {
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     mgr.set_speed_limit(Some(16)).unwrap();
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     let start = Instant::now();
@@ -2498,12 +2704,16 @@ async fn speed_limit_absurd_value_is_rejected() {
 }
 
 /// S09-H2 (DOC): changing max_connections does NOT change a download
-/// that is already running — it keeps the segment count it started
-/// with. Only downloads added afterwards use the new value.
+/// that is already running — it keeps the segment count it grows
+/// to under the cap it started with. Only downloads added
+/// afterwards use the new value. (Round 72 (D): the count grows
+/// by splitting while the download runs, so the test waits for
+/// the steady state — 4 segments at cap 4 — before changing the
+/// setting, instead of asserting the creation count.)
 #[tokio::test]
 async fn max_connections_change_does_not_alter_running_download() {
     let server = MockServer::start(MockConfig {
-        size_bytes: Some(2 * 1024 * 1024),
+        size_bytes: Some(4 * 1024 * 1024),
         chunk: 8192,
         delay: Duration::from_millis(50),
         ..Default::default()
@@ -2512,12 +2722,32 @@ async fn max_connections_change_does_not_alter_running_download() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
-    assert_eq!(store.get_segments(&id).unwrap().len(), 4);
+    // Round 72 (D): one segment at creation now.
+    assert_eq!(store.get_segments(&id).unwrap().len(), 1);
     mgr.start_download(&id).await.unwrap();
     assert!(wait_for_status(&mgr, &id, "downloading", 10).await);
+    // Wait for the steady state: the download grows to its cap-4
+    // segment count (4 x 1 MiB) in the first second, and 4 is
+    // the ceiling for a 4 MiB file (1 MiB split floor), so the
+    // count is stable from here on.
+    let mut grown = false;
+    for _ in 0..50 {
+        if store.get_segments(&id).unwrap().len() == 4 {
+            grown = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(grown, "segments did not grow to 4");
     let mut s = mgr.get_settings().unwrap();
     s.max_connections = 1;
     mgr.update_settings(&s).unwrap();
@@ -2527,7 +2757,13 @@ async fn max_connections_change_does_not_alter_running_download() {
     assert_eq!(store.get_segments(&id).unwrap().len(), 4);
     assert!(wait_for_status(&mgr, &id, "complete", 30).await);
     let (id2, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(store.get_segments(&id2).unwrap().len(), 1);
@@ -2546,7 +2782,13 @@ async fn max_retries_zero_means_single_attempt_and_fast_error() {
     mgr.update_settings(&s).unwrap();
     server.set_fail_get(true);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     let start = Instant::now();
@@ -2632,7 +2874,13 @@ async fn speed_limit_chunk_larger_than_rate_completes() {
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     mgr.set_speed_limit(Some(16)).unwrap();
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     let start = Instant::now();
@@ -2660,7 +2908,13 @@ async fn http_proxy_wrong_credentials_are_rejected() {
     good.password = Some("hunter2".to_string());
     mgr.save_proxy_config(&good).unwrap();
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -2695,7 +2949,13 @@ async fn proxy_https_only_scope_skips_http_downloads() {
     input.use_for = vec!["https".to_string()];
     mgr.save_proxy_config(&input).unwrap();
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -2715,7 +2975,13 @@ async fn proxy_http_only_scope_uses_proxy_for_http() {
     input.use_for = vec!["http".to_string()];
     mgr.save_proxy_config(&input).unwrap();
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();

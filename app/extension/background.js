@@ -3,7 +3,14 @@
 // What it does, and nothing more:
 //  * Adds a "Download with Fetchline" item to the right-click menu on
 //    links and on image / video / audio elements (the menu API hands
-//    us the URL, so no content script is injected into any page).
+//    us the URL, so no content script is needed for those).
+//  * Auto-injects the video detector into every http(s) page
+//    (manifest.json `content_scripts`, Round 72): the floating
+//    Download button appears next to any video without a click.
+//    The detector asks this worker (`video_allowed`) whether the
+//    page may show the button (integration on, site not opted
+//    out) before it scans — the opt-out check moved there when
+//    injection stopped being a user gesture.
 //  * Watches downloads the browser starts. When catching is on, the
 //    site is not opted out and the file type is in the catch list,
 //    it pauses the browser download, hands the URL to the desktop
@@ -319,7 +326,11 @@ chrome.runtime.onStartup.addListener(() => {
 chrome.contextMenus.onClicked.addListener(async (info) => {
   try {
     if (info.menuItemId === "fetchline-find-videos") {
-      await injectVideoDetector();
+      // Round 72 (A) — the detector is auto-injected now, so ask
+      // it to re-scan (a page that loaded before the injection
+      // landed gets the injection as a fallback inside
+      // `scanActiveTab`).
+      await scanActiveTab();
       return;
     }
     if (info.menuItemId === "fetchline-download-all") {
@@ -359,6 +370,14 @@ chrome.contextMenus.onClicked.addListener(async (info) => {
 chrome.downloads.onCreated.addListener(async (item) => {
   try {
     if (!item || !item.url) return;
+    // Round 72 (B) — the scheme gate is on the FILE's URL, never
+    // the page's: an http(s) download link on a file:// page is
+    // caught normally (the page scheme is irrelevant here). A
+    // file:// download itself is skipped on purpose — the file is
+    // already on disk, and the app cannot fetch it: the engine
+    // probe rejects every non-http(s)/ftp scheme, so handing it
+    // over would only create a Failed row. Chrome downloads the
+    // local file natively instead.
     if (!item.url.startsWith("http://") && !item.url.startsWith("https://")) return;
     if (item.state && item.state !== "in_progress") return;
     const state = await loadState();
@@ -453,14 +472,17 @@ chrome.downloads.onCreated.addListener(async (item) => {
   }
 });
 
-// Video grabber (S08): inject the detector into the ACTIVE tab
-// only, and only because the user asked — the right-click menu's
-// "Find videos on this page" item, or the old popup button's
-// `scan_page_for_videos` message. activeTab grants temporary
-// access to that one tab; there is no content_scripts entry, no
-// host permission and no <all_urls>, so no page is ever scanned
-// unprompted. Excluded sites and a switched-off desktop flag
-// refuse the scan here, before anything is injected.
+// Video grabber (S08): inject the detector into the ACTIVE tab.
+// Round 72 (A) — this is now only the FALLBACK: the detector is
+// auto-injected into every http(s) page (manifest.json
+// `content_scripts`), so a scan normally just messages the
+// already-running content script (`scanActiveTab` below). A page
+// that loaded before the auto-injection landed (fresh install
+// or update) has no content script yet — then this injects it
+// (the `__fetchlineVideoInstalled` guard makes it a no-op when
+// one is already there). Excluded sites and a switched-off
+// desktop flag refuse the scan here, before anything is
+// injected, exactly as before.
 async function injectVideoDetector() {
   const state = await loadState();
   if (state[STORE_KEYS.desktopIntegration] === false) {
@@ -480,6 +502,38 @@ async function injectVideoDetector() {
   });
 }
 
+// Round 72 (A) — scan the active tab: prefer the content script
+// that auto-injection already runs there (it re-scans and replies
+// with the summary), and inject only when the tab has no content
+// script yet (the `tabs.sendMessage` rejects with "Could not
+// establish connection"). The checks are the same as
+// `injectVideoDetector`'s — integration on, site not opted out —
+// so the menu and the popup cannot scan a page the user opted out
+// of. Returns the scan summary when the content script answered
+// one, or `{}` when the fallback injection ran (the injected
+// script reports its own summary to storage a moment later).
+async function scanActiveTab() {
+  const state = await loadState();
+  if (state[STORE_KEYS.desktopIntegration] === false) {
+    throw new Error("Browser integration is turned off in Sonic Manager settings");
+  }
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tab = tabs[0];
+  if (!tab || !tab.id || !tab.url || !tab.url.startsWith("http")) {
+    throw new Error("This page has no web address to scan.");
+  }
+  if (isExcluded(hostOf(tab.url), state)) {
+    throw new Error("This site is opted out — videos here are not scanned.");
+  }
+  try {
+    const reply = await chrome.tabs.sendMessage(tab.id, { type: "rescan_videos" });
+    return reply || {};
+  } catch {
+    await injectVideoDetector();
+    return {};
+  }
+}
+
 // Let the popup ask for a fresh connection check on demand.
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message && message.type === "refresh_desktop_settings") {
@@ -490,6 +544,22 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     sendToHost({ type: "ping" })
       .then((reply) => sendResponse({ ok: !!(reply && reply.ok !== false), reply }))
       .catch((err) => sendResponse({ ok: false, error: String(err) }));
+    return true;
+  }
+  // Round 72 (A) — the auto-injected content script asks once
+  // whether its page may show the button (integration on, site
+  // not opted out). A state-read failure defaults to allowed —
+  // the button must not vanish on a storage hiccup; the opt-out
+  // is a preference, not a security boundary.
+  if (message && message.type === "video_allowed") {
+    loadState()
+      .then((state) => {
+        const allowed =
+          state[STORE_KEYS.desktopIntegration] !== false &&
+          !isExcluded(hostOf(message.page_url || ""), state);
+        sendResponse({ ok: allowed });
+      })
+      .catch(() => sendResponse({ ok: true }));
     return true;
   }
   // Video grabber (S08): the content script reports one chosen
@@ -517,13 +587,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     });
     return false;
   }
-  // Video grabber (S08): inject the detector — the same helper
+  // Video grabber (S08): scan the active tab — the same helper
   // the right-click menu uses now that the popup has no button
-  // for it. Kept as a message so an older popup (or a test) can
-  // still ask for a scan.
+  // for it. Kept as a message so the popup (and a test) can ask
+  // for a fresh scan. The reply carries the summary when the
+  // content script answered one, so the popup can show this
+  // page's result without waiting on storage.
   if (message && message.type === "scan_page_for_videos") {
-    injectVideoDetector()
-      .then(() => sendResponse({ ok: true }))
+    scanActiveTab()
+      .then((result) => sendResponse({ ok: true, ...(result || {}) }))
       .catch((err) => sendResponse({ ok: false, error: String(err) }));
     return true;
   }

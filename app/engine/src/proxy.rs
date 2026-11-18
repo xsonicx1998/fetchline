@@ -373,6 +373,25 @@ pub fn build_client_with_total_timeout(
     Ok(build_with_proxy(builder, proxy)?.build()?)
 }
 
+/// Round 72 (C) — the tail client: the last segment's connects
+/// may take longer than the 8 s cap (OVH drops SYNs in bursts;
+/// a connect that lands in 20 s still beats failing the
+/// download). 20 s stays under `SEGMENT_STALL_TIMEOUT` (30 s) in
+/// manager.rs, so the send timeout still bounds a hung request.
+pub const TAIL_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// The client a patient tail task uses: connect timeout only, no
+/// total timeout — same shape as `build_segment_client`, but with
+/// the 20 s tail cap instead of the 8 s one. The user's
+/// `connection_timeout_secs` setting does not apply here: the
+/// tail deliberately waits longer than the setting allows.
+pub fn build_tail_segment_client(proxy: Option<&ProxyConfig>) -> Result<Client> {
+    let builder = Client::builder()
+        .user_agent("Fetchline/0.1")
+        .connect_timeout(TAIL_CONNECT_TIMEOUT);
+    Ok(build_with_proxy(builder, proxy)?.build()?)
+}
+
 /// The client segment downloads use: connect timeout only, no
 /// total timeout — a segment's body legitimately streams for
 /// longer than any total budget on a slow connection (the test

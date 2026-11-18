@@ -32,6 +32,7 @@ import {
   openErrorDialog,
   openProgressWindow,
   pauseDownload,
+  redownloadDownload,
   reloadWebviewWindow,
   removeFromQueue,
   resolvePendingLink,
@@ -142,6 +143,16 @@ export default function App() {
    *  the poll. The banner shows it first, else the transient poll
    *  error. */
   const [bannerError, setBannerError] = useState<string | null>(null)
+  /** Round 72 (C) — row-action busy feedback: Resume /
+   *  Redownload re-probe first, and against a flaky server the
+   *  probe takes up to 16 s with no UI change — the Round 71
+   *  retest read that as "clicks do nothing". While any `run()`
+   *  action is in flight for more than 400 ms the status bar
+   *  shows "Working…" so a slow probe is visibly doing
+   *  something. The delay keeps fast actions from flickering
+   *  the bar. */
+  const [actionBusy, setActionBusy] = useState(false)
+  const actionBusyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   /** Round 71 (D2) — the banner's X must STICK. The 1 s poll
    *  re-ran `list_downloads` (and the secondary polls) and every
    *  failure re-populated `error` from the same old error rows,
@@ -541,33 +552,19 @@ export default function App() {
     }
   }
 
-  /** Round 65 — Redownload (right-click menu): start the same URL
-   *  over from scratch — cancel a running attempt, delete the row
-   *  and its file, then re-add the same link (same folder,
-   *  category and queue). The new row is selected so it is
-   *  visible at once. A dead link leaves the row deleted and the
-   *  probe error in the banner — the honest outcome of asking
-   *  for a fresh download of a link that no longer answers. */
+  /** Round 65 — Redownload (right-click menu): start the same
+   *  URL over from scratch IN PLACE — the engine resets the
+   *  row's segments and starts it, and the row survives a failed
+   *  probe as Failed with the new error. The old delete-first
+   *  flow (delete the row, re-add the link, start it) lost the
+   *  row entirely when the re-add probe failed on a flaky server
+   *  (Round 71 retest). */
   async function handleRedownload(download: DownloadRow) {
-    const folder = download.save_path.replace(/[/\\][^/\\]*$/, '')
     if (download.status === 'downloading') {
       await cancelDownload(download.id).catch(() => undefined)
     }
-    await deleteDownload(download.id, true)
-    const [id] = await addDownload({
-      url: download.url,
-      folder: folder === '' ? null : folder,
-      category: download.category_id === '' ? null : download.category_id,
-      queue: download.queue_id,
-    })
-    // Round 69 (b) — Redownload means "download the same link
-    // again", so the new row must START. The old code only added
-    // it (status `queued`, never started) — the Round 68 retest's
-    // "Redownload did nothing" on the stuck Waiting row. If the
-    // start itself fails the row stays queued and is now resumable
-    // from the toolbar / menu.
-    await startDownload(id)
-    setSelectedId(id)
+    await redownloadDownload(download.id)
+    setSelectedId(download.id)
   }
 
   const selected = useMemo(
@@ -602,6 +599,9 @@ export default function App() {
   const hasComplete = downloads.some((d) => d.status === 'complete')
 
   async function run(action: () => Promise<void>) {
+    // Round 72 (C) — busy feedback, delayed so fast actions do
+    // not flicker the status bar (see `actionBusy` above).
+    actionBusyTimerRef.current = setTimeout(() => setActionBusy(true), 400)
     try {
       await action()
       // A successful action clears a previous sticky error (the
@@ -611,6 +611,12 @@ export default function App() {
       await refreshAll()
     } catch (e) {
       actionError(e)
+    } finally {
+      if (actionBusyTimerRef.current !== null) {
+        clearTimeout(actionBusyTimerRef.current)
+        actionBusyTimerRef.current = null
+      }
+      setActionBusy(false)
     }
   }
 
@@ -1046,8 +1052,14 @@ export default function App() {
 
       <footer className="flex h-7 shrink-0 items-center justify-between border-t border-border bg-surface px-4 text-xs text-text-muted">
         <span>
-          {runningCount} downloading · {runningCount > 0 ? formatSpeed(totalSpeed) : '—'} ·{' '}
-          {downloads.filter((d) => d.status === 'complete').length} finished
+          {actionBusy ? (
+            'Working…'
+          ) : (
+            <>
+              {runningCount} downloading · {runningCount > 0 ? formatSpeed(totalSpeed) : '—'} ·{' '}
+              {downloads.filter((d) => d.status === 'complete').length} finished
+            </>
+          )}
         </span>
         <span className="flex items-center gap-3">
           {quotaStatus?.enabled && quotaStatus.limit_mb != null ? (
