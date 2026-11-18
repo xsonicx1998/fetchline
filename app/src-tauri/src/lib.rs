@@ -2128,22 +2128,18 @@ fn set_taskbar_progress(
         (Some(p), Some("paused")) => tauri::window::ProgressBarState {
             status: Some(tauri::window::ProgressBarStatus::Paused),
             progress: Some(p.min(100)),
-            desktop_filename: None,
         },
         (Some(p), Some("error")) => tauri::window::ProgressBarState {
             status: Some(tauri::window::ProgressBarStatus::Error),
             progress: Some(p.min(100)),
-            desktop_filename: None,
         },
         (Some(p), _) => tauri::window::ProgressBarState {
             status: Some(tauri::window::ProgressBarStatus::Normal),
             progress: Some(p.min(100)),
-            desktop_filename: None,
         },
         (None, _) => tauri::window::ProgressBarState {
             status: Some(tauri::window::ProgressBarStatus::None),
             progress: None,
-            desktop_filename: None,
         },
     };
     let _ = window.set_progress_bar(state);
