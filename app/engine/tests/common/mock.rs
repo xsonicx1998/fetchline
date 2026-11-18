@@ -40,6 +40,13 @@ pub struct MockConfig {
     /// for the Last-Modified comparison path, which the default
     /// mock never exercised.
     pub send_last_modified: bool,
+    /// Round 71 (B5) — when set, the server tolerates at most
+    /// this many concurrent GETs: the (max+1)th in-flight GET is
+    /// refused with 429 (OVH rate-limits parallel range requests
+    /// from one IP). HEAD is never counted. The download must
+    /// still complete — the refused segments defer and retry
+    /// under the ratcheted concurrency instead of failing.
+    pub max_concurrent_gets: Option<usize>,
 }
 
 impl Default for MockConfig {
@@ -54,6 +61,7 @@ impl Default for MockConfig {
             size_bytes: None,
             no_etag: false,
             send_last_modified: false,
+            max_concurrent_gets: None,
         }
     }
 }
@@ -95,6 +103,10 @@ pub struct MockServer {
     /// and zero GETs — these counters prove it.
     get_requests: Arc<AtomicUsize>,
     head_requests: Arc<AtomicUsize>,
+    /// Round 71 (B5) — GETs currently in flight (for the
+    /// concurrency limit) and GETs refused with 429 so far.
+    inflight_gets: Arc<AtomicUsize>,
+    rate_limited: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
 }
 
@@ -111,6 +123,8 @@ impl MockServer {
         let gone = Arc::new(AtomicBool::new(false));
         let get_requests = Arc::new(AtomicUsize::new(0));
         let head_requests = Arc::new(AtomicUsize::new(0));
+        let inflight_gets = Arc::new(AtomicUsize::new(0));
+        let rate_limited = Arc::new(AtomicUsize::new(0));
         let lm_version = Arc::new(AtomicU64::new(1));
         let size_override = Arc::new(AtomicUsize::new(0));
         let stop = Arc::new(AtomicBool::new(false));
@@ -126,6 +140,8 @@ impl MockServer {
         let g = Arc::clone(&gone);
         let gr = Arc::clone(&get_requests);
         let hr = Arc::clone(&head_requests);
+        let ig0 = Arc::clone(&inflight_gets);
+        let rl0 = Arc::clone(&rate_limited);
         let s = Arc::clone(&stop);
         thread::spawn(move || {
             listener.set_nonblocking(true).unwrap();
@@ -144,6 +160,8 @@ impl MockServer {
                         let gg = Arc::clone(&g);
                         let grr = Arc::clone(&gr);
                         let hrr = Arc::clone(&hr);
+                        let ig = Arc::clone(&ig0);
+                        let rl = Arc::clone(&rl0);
                         let cc = Arc::clone(&config);
                         thread::spawn(move || {
                             handle(
@@ -160,6 +178,8 @@ impl MockServer {
                                 gg.load(Ordering::SeqCst),
                                 grr,
                                 hrr,
+                                ig,
+                                rl,
                             )
                         });
                     }
@@ -178,6 +198,8 @@ impl MockServer {
             gone,
             get_requests,
             head_requests,
+            inflight_gets,
+            rate_limited,
             lm_version,
             size_override,
             stop,
@@ -260,11 +282,43 @@ impl MockServer {
     pub fn head_requests(&self) -> usize {
         self.head_requests.load(Ordering::SeqCst)
     }
+
+    /// Round 71 (B5) — GETs refused with 429 so far: the test
+    /// asserts this is > 0, proving the download completed
+    /// DESPITE refusals, not because the limit never fired.
+    pub fn rate_limited(&self) -> usize {
+        self.rate_limited.load(Ordering::SeqCst)
+    }
 }
 
 impl Drop for MockServer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Round 71 (B5) — counts one in-flight GET; drops the count on
+/// every exit path (all the early `return`s in `handle`).
+struct InflightGet {
+    count: Arc<AtomicUsize>,
+}
+
+impl InflightGet {
+    fn new(count: &Arc<AtomicUsize>) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        InflightGet {
+            count: Arc::clone(count),
+        }
+    }
+
+    fn current(&self) -> usize {
+        self.count.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for InflightGet {
+    fn drop(&mut self) {
+        self.count.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -282,6 +336,8 @@ pub fn handle(
     gone: bool,
     get_requests: Arc<AtomicUsize>,
     head_requests: Arc<AtomicUsize>,
+    inflight_gets: Arc<AtomicUsize>,
+    rate_limited: Arc<AtomicUsize>,
 ) {
     let mut buf = [0u8; 8192];
     let Ok(n) = stream.read(&mut buf) else { return };
@@ -309,6 +365,26 @@ pub fn handle(
     } else if method == "HEAD" {
         head_requests.fetch_add(1, Ordering::SeqCst);
     }
+    // Round 71 (B5) — concurrency limit (OVH): the (max+1)th
+    // concurrent GET is refused with 429. HEAD is never counted
+    // (the probe's HEAD must succeed). The guard counts this GET
+    // as in flight from here until the handler returns — its Drop
+    // keeps the count exact across every early `return` below —
+    // so the binding must live for the whole function.
+    let _inflight = if method == "GET" {
+        let guard = InflightGet::new(&inflight_gets);
+        if let Some(max) = config.max_concurrent_gets {
+            if guard.current() > max {
+                rate_limited.fetch_add(1, Ordering::SeqCst);
+                let head = "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nRetry-After: 1\r\nConnection: close\r\n\r\n";
+                let _ = stream.write_all(head.as_bytes());
+                return;
+            }
+        }
+        Some(guard)
+    } else {
+        None
+    };
     // The file was deleted from the server: every request is a 404.
     if gone {
         let head = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";

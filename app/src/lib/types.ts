@@ -57,6 +57,11 @@ export interface DownloadRow {
   /** Free-text note from the Add URL dialog's Description field
    *  (Round 67, IDM's Download File Info has one). */
   description?: string | null
+  /** Round 71 (D4) — a Completed download whose file no longer
+   *  exists on disk (deleted outside the app). The row stays
+   *  listed as Finished, but the UI says the file is missing
+   *  instead of offering to open a file that is not there. */
+  file_missing?: boolean
 }
 
 export interface SegmentProgress {

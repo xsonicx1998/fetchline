@@ -1,10 +1,16 @@
-// Round 70 — GUI subsystem on Windows: Chrome spawns a fresh host
-// process for every native message (popup ping, startup settings,
-// every hand-off), and a console-subsystem binary flashes a black
-// console window on every spawn. A GUI-subsystem binary shows no
-// window; stdin/stdout pipes keep working (native messaging uses
-// pipes, not a console).
-#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+// Round 71 (A1) — the host MUST stay a console (CUI) binary.
+// Round 70 made it GUI (`windows_subsystem = "windows"`) to stop
+// the console flash, but a stdio native host MUST be console: a
+// GUI binary detaches from its stdio pipes, so Chrome can spawn
+// it and still never talk to it — exactly the "Error when
+// communicating with the native messaging host" the Round 70
+// retest saw, even though a manual framed ping answered pong
+// (the binary works; Chrome's launch of it does not). Chrome
+// spawns native hosts hidden (CREATE_NO_WINDOW) anyway, so a
+// console host does NOT flash a window; the flash the user saw
+// came from the app's own PowerShell spawns, fixed in Round 70
+// with CREATE_NO_WINDOW in lib.rs. The attribute is therefore
+// removed, NOT worked around.
 // Fetchline native-messaging host (S13 / F01).
 //
 // The browser extension cannot touch the desktop app's database

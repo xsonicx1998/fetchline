@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties } from 'react'
 import { X } from 'lucide-react'
 import {
   addDownload,
@@ -141,6 +142,21 @@ export default function App() {
    *  the poll. The banner shows it first, else the transient poll
    *  error. */
   const [bannerError, setBannerError] = useState<string | null>(null)
+  /** Round 71 (D2) — the banner's X must STICK. The 1 s poll
+   *  re-ran `list_downloads` (and the secondary polls) and every
+   *  failure re-populated `error` from the same old error rows,
+   *  so the banner came back a second after the user dismissed
+   *  it. `dismissedBannerRef` remembers the exact message the
+   *  user dismissed; `setPollError` — used by every poll-failure
+   *  path — refuses to re-show that message. A NEW error (a
+   *  different message) still shows, and a successful poll clears
+   *  the memory, so a genuinely new failure with the same text
+   *  is not muted forever. */
+  const dismissedBannerRef = useRef<string | null>(null)
+  const setPollError = useCallback((msg: string) => {
+    if (dismissedBannerRef.current === msg) return
+    setError(msg)
+  }, [])
   /** Round 69 (d) — an Add URL submit failure, shown in the
    *  standalone error dialog (IDM-style, with Details) as an
    *  overlay above the Add dialog. */
@@ -228,7 +244,7 @@ export default function App() {
     try {
       setQueues(await withTimeout(listQueues(), 5000, 'Backend did not respond within 5 seconds'))
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setPollError(e instanceof Error ? e.message : String(e))
     } finally {
       secondaryRefreshInFlight.current = false
     }
@@ -258,7 +274,7 @@ export default function App() {
     try {
       setQueueFiles(await withTimeout(getQueueFiles(selectedQueue), 5000, 'Backend did not respond within 5 seconds'))
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setPollError(e instanceof Error ? e.message : String(e))
     } finally {
       secondaryRefreshInFlight.current = false
     }
@@ -268,7 +284,7 @@ export default function App() {
     try {
       setCategories(await getCategories())
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setPollError(e instanceof Error ? e.message : String(e))
     }
   }, [])
 
@@ -281,13 +297,17 @@ export default function App() {
     try {
       setDownloads(await withTimeout(listDownloads(), 5000, 'Backend did not respond within 5 seconds'))
       setError(null)
+      // Round 71 (D2) — a successful poll clears the dismissed
+      // memory: the old failure is gone, so a later failure with
+      // the same text is a new failure and must show again.
+      dismissedBannerRef.current = null
       lastPollOkAt.current = Date.now()
       if (backendDeadRef.current) {
         backendDeadRef.current = false
         setBackendDead(false)
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setPollError(e instanceof Error ? e.message : String(e))
     } finally {
       refreshInFlight.current = false
     }
@@ -389,7 +409,7 @@ export default function App() {
       } else {
         void executeQueueAction(action.queue_id)
           .then(() => void refreshAll())
-          .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
+          .catch((e: unknown) => setPollError(e instanceof Error ? e.message : String(e)))
       }
     }).then((fn) => {
       unlistenAction = fn
@@ -729,6 +749,14 @@ export default function App() {
   useEffect(() => {
     if (prevCompleteStatus.current === null) {
       prevCompleteStatus.current = new Map(downloads.map((d) => [d.id, d.status]))
+      // Round 71 (D3) — seed the handled set with downloads
+      // already complete at startup, so a poll refresh never
+      // re-triggers the dialog for an earlier finished download
+      // (the ISO completion dialog re-appeared after the fwlink
+      // Start in the Round 70 retest).
+      for (const d of downloads) {
+        if (d.status === 'complete') completeDialogHandled.current.add(d.id)
+      }
       return
     }
     if (settings === null) return
@@ -909,11 +937,16 @@ export default function App() {
             <button
               type="button"
               onClick={() => {
+                // Round 71 (D2) — remember the dismissed message
+                // so the next poll cannot re-populate the banner
+                // with it; see `dismissedBannerRef` above.
+                dismissedBannerRef.current = banner
                 setBannerError(null)
                 setError(null)
               }}
               aria-label="Dismiss error"
               className="rounded-md p-1 hover:bg-surface-2"
+              style={{ WebkitAppRegion: 'no-drag' } as CSSProperties}
             >
               <X className="h-4 w-4" aria-hidden="true" />
             </button>

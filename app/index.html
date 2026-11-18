@@ -4,6 +4,17 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Fetchline</title>
+    <!-- Round 71 (C1) — the app's own background (#0B0F24) on the
+         page itself, so a first paint before the CSS bundle loads
+         is dark, never white. The boot shell below is already
+         dark; this covers the page behind it. -->
+    <style>
+      html,
+      body,
+      #root {
+        background-color: #0b0f24;
+      }
+    </style>
   </head>
   <body>
     <div id="root">

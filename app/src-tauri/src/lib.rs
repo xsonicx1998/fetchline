@@ -437,6 +437,21 @@ fn maybe_auto_reload(
     let now = epoch_ms();
     let log = startup_log_path_from_app(app);
     let log = log.as_deref();
+    // Round 71 (C2) — a closed window's heartbeat entry must not
+    // keep triggering auto-reloads: the monitor only ever sees a
+    // frozen last_seen_ms, flags "lost", and reload_webview_now
+    // fails with "No progress window open" — the dozens of FAILED
+    // lines in startup.log. Drop the entry silently when the
+    // window is gone (a window whose creation never completed has
+    // no window either, so this also covers the created_ok guard
+    // below). The main window is never closed (its X hides it to
+    // the tray), so it is unaffected.
+    if app.get_webview_window(label).is_none() {
+        if let Ok(mut map) = heartbeats.lock() {
+            map.remove(label);
+        }
+        return Ok(false);
+    }
     {
         let Ok(mut map) = heartbeats.lock() else {
             return Ok(false);
@@ -711,6 +726,30 @@ fn main_webview_environment(
 /// runs, and `main.tsx` reads it (falling back to the hash). The
 /// fragment path stays working as the fallback, so an old window
 /// or a missed script still renders the progress view.
+/// Round 71 (C3) — show-when-ready FALLBACK: a window built
+/// hidden must never stay hidden if the frontend's ready signal
+/// never arrives (JS error, slow bundle). Show it after 3 s
+/// unconditionally; `show()` on an already-visible window is a
+/// no-op. Detached thread, so it can never block the caller.
+fn spawn_show_fallback(window: &tauri::WebviewWindow) {
+    let window = window.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(3));
+        let _ = window.show();
+    });
+}
+
+/// Round 71 (C3) — show-when-ready: windows are built hidden
+/// (`visible: false`) so they never flash a blank first paint;
+/// the frontend calls this from a `useLayoutEffect` after its
+/// root component mounts, and the window appears WITH content.
+/// Tauri injects the calling window, so one command serves the
+/// main, progress, error and completion windows alike.
+#[tauri::command]
+async fn window_ready(window: tauri::Window) -> Result<(), String> {
+    window.show().map_err(|e| e.to_string())
+}
+
 fn build_progress_window(
     app: &AppHandle,
     manager: &Arc<DownloadManager>,
@@ -776,7 +815,13 @@ fn build_progress_window(
         .min_inner_size(560.0, 380.0)
         .resizable(true)
         .center()
-        .devtools(true);
+        .devtools(true)
+        // Round 71 (C1/C3) — the app's own background (#0B0F24)
+        // so a first paint is never white, and hidden until the
+        // frontend signals ready (show-when-ready; the 3 s
+        // fallback in spawn_show_fallback guarantees it appears).
+        .background_color(tauri::window::Color(11, 15, 36, 255))
+        .visible(false);
     #[cfg(target_os = "windows")]
     if let Some(env) = shared_environment {
         builder = builder.with_environment(env);
@@ -825,6 +870,11 @@ fn build_progress_window(
                 hb.created_ok = true;
             }
             register_process_failed(app, &label, heartbeats, manager);
+            // Round 71 (C3) — the window was built hidden; the
+            // frontend shows it when ready, and this fallback
+            // guarantees it appears even if that signal never
+            // arrives.
+            spawn_show_fallback(&window);
             Ok(window)
         }
         Err(e) => {
@@ -931,7 +981,11 @@ fn build_complete_dialog_window(
         .min_inner_size(520.0, 400.0)
         .resizable(false)
         .center()
-        .devtools(true);
+        .devtools(true)
+        // Round 71 (C1/C3) — #0B0F24 first paint + hidden until
+        // the frontend signals ready (see the progress window).
+        .background_color(tauri::window::Color(11, 15, 36, 255))
+        .visible(false);
     #[cfg(target_os = "windows")]
     if let Some(env) = shared_environment {
         builder = builder.with_environment(env);
@@ -950,6 +1004,9 @@ fn build_complete_dialog_window(
                     "complete dialog {label} created: index.html in {elapsed_ms}ms on thread {build_thread_id:?}"
                 ),
             );
+            // Round 71 (C3) — built hidden; shown when the
+            // frontend is ready (3 s fallback).
+            spawn_show_fallback(&window);
             Ok(window)
         }
         Err(e) => {
@@ -1055,7 +1112,11 @@ fn build_error_dialog_window(
         .min_inner_size(480.0, 320.0)
         .resizable(false)
         .center()
-        .devtools(true);
+        .devtools(true)
+        // Round 71 (C1/C3) — #0B0F24 first paint + hidden until
+        // the frontend signals ready (see the progress window).
+        .background_color(tauri::window::Color(11, 15, 36, 255))
+        .visible(false);
     #[cfg(target_os = "windows")]
     if let Some(env) = shared_environment {
         builder = builder.with_environment(env);
@@ -1074,6 +1135,9 @@ fn build_error_dialog_window(
                     "error dialog {label} created: index.html in {elapsed_ms}ms on thread {build_thread_id:?}"
                 ),
             );
+            // Round 71 (C3) — built hidden; shown when the
+            // frontend is ready (3 s fallback).
+            spawn_show_fallback(&window);
             Ok(window)
         }
         Err(e) => {
@@ -2473,6 +2537,25 @@ fn build_system_tray(app: &AppHandle) -> Result<(), String> {
 /// never fatal: a missing host registration must not stop the app
 /// from starting.
 #[cfg(target_os = "windows")]
+/// Round 71 (A2) — strip the verbatim `\\?\` prefix that
+/// `std::fs::canonicalize` puts on Windows paths, before the path
+/// is written into a native-host manifest or the registry.
+/// Chrome never launched the host from a manifest whose "path"
+/// started with `\\?\` (host.log did not exist until a manual run
+/// used the plain path). Also handles `\\?\UNC\server\share`
+/// -> `\\server\share`. A path without the prefix is returned
+/// unchanged (on non-Windows this is a no-op in practice).
+fn clean_windows_path(p: &std::path::Path) -> String {
+    let s = p.to_string_lossy().into_owned();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        s
+    }
+}
+
 fn register_native_host_best_effort(app: &AppHandle, log: Option<&std::path::Path>) {
     use std::os::windows::process::CommandExt;
     const EXTENSION_ID: &str = "mioamdgogndabpcjbdekggcnlkkfpmbj";
@@ -2526,7 +2609,19 @@ fn register_native_host_best_effort(app: &AppHandle, log: Option<&std::path::Pat
     // Canonicalize so the manifest holds a clean absolute path
     // (no `..\..` components from the dev-build candidate).
     let host_exe = std::fs::canonicalize(&host_exe).unwrap_or(host_exe);
-    let host_path = host_exe.to_string_lossy().into_owned();
+    // Round 71 (A2) — `canonicalize` returns a verbatim path
+    // (`\\?\C:\...`). Chrome never launched the host from a
+    // manifest with that prefix: host.log did not exist until a
+    // manual run used the plain path, and the manual framed ping
+    // answered pong — so the failure is at LAUNCH, and the
+    // `\\?\` prefix is the prime suspect. Strip it before the
+    // path is written anywhere (manifest JSON and registry).
+    // Also handles the `\\?\UNC\server\share` form.
+    let host_path = clean_windows_path(&host_exe);
+    log_startup(
+        log,
+        &format!("native host: host exe resolved to {host_path}"),
+    );
 
     // Manifests live in the app data dir, next to startup.log —
     // a place the app owns in every layout (installed or dev).
@@ -2590,8 +2685,8 @@ fn register_native_host_best_effort(app: &AppHandle, log: Option<&std::path::Pat
     // manifest. `reg query` first: a key already pointing at the
     // same manifest is left alone, so a normal launch spawns no
     // writes at all.
-    let chrome_manifest_str = chrome_manifest.to_string_lossy().into_owned();
-    let firefox_manifest_str = firefox_manifest.to_string_lossy().into_owned();
+    let chrome_manifest_str = clean_windows_path(&chrome_manifest);
+    let firefox_manifest_str = clean_windows_path(&firefox_manifest);
     let keys: [(&str, &str, &str); 3] = [
         (
             "Google Chrome",
@@ -3102,6 +3197,16 @@ pub fn run() {
                 Ok(()) => log_startup(log, "system tray built"),
                 Err(e) => log_startup(log, &format!("system tray unavailable: {e}")),
             }
+            // Round 71 (C3) — the main window is built hidden
+            // (tauri.conf.json `visible: false`, show-when-ready)
+            // so it never shows a blank first paint. The frontend
+            // shows it via `window_ready` when React mounts; this
+            // fallback guarantees it appears even if that signal
+            // never arrives — a main window that stayed hidden
+            // would look like the app never started.
+            if let Some(main) = app.get_webview_window("main") {
+                spawn_show_fallback(&main);
+            }
             log_startup(log, "setup ok");
             Ok(())
         })
@@ -3132,6 +3237,7 @@ pub fn run() {
             open_progress_window,
             open_complete_dialog,
             open_error_dialog,
+            window_ready,
             set_download_completion_options,
             get_download_completion_options,
             exit_app,

@@ -176,6 +176,14 @@ export function AddDownloadDialog({
   // filename from the server when the user has not typed one.
   // A capture's cookies ride the probe, so a cookie-gated link
   // shows its size instead of failing with 401.
+  // Round 71 (D5) — probe ONLY real URLs: the input must start
+  // with http://, https:// or ftp:// AND pass `new URL()`
+  // validation, so a bare word ("X"), a partial scheme, or two
+  // URLs pasted together never reach the engine (startup.log
+  // showed all three being probed). A monotonic request counter
+  // discards stale responses from earlier keystrokes — the old
+  // `probedUrl` string guard stays as a second check.
+  const probeReqId = useRef(0)
   useEffect(() => {
     if (!open) return
     const target = url.trim()
@@ -183,17 +191,33 @@ export function AddDownloadDialog({
       setFileSize(null)
       return
     }
+    const scheme = target.startsWith('http://')
+      ? 'http://'
+      : target.startsWith('https://')
+        ? 'https://'
+        : target.startsWith('ftp://')
+          ? 'ftp://'
+          : null
+    if (scheme === null) return
+    // Two URLs pasted together ("https://a…https://b…").
+    if (target.slice(scheme.length).includes('://')) return
+    try {
+      new URL(target)
+    } catch {
+      return
+    }
+    const reqId = ++probeReqId.current
     const timer = window.setTimeout(async () => {
       try {
         const info: ProbeInfo = await probeUrl(target, initialCookies)
-        if (probedUrl.current !== target) return
+        if (probeReqId.current !== reqId || probedUrl.current !== target) return
         setFileSize(info.size ?? null)
         setProbeError(null)
         if (!userEditedFilename.current && info.filename) {
           setFilename(info.filename)
         }
       } catch (e) {
-        if (probedUrl.current !== target) return
+        if (probeReqId.current !== reqId || probedUrl.current !== target) return
         setFileSize(null)
         setProbeError(e instanceof Error ? e.message : String(e))
       }

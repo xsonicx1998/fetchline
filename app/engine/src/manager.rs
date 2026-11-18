@@ -39,7 +39,7 @@ use tokio::sync::{broadcast, Mutex as AsyncMutex};
 use tokio::task::JoinSet;
 
 use crate::clipboard::{extract_download_link, ClipboardMonitor, ClipboardOffer};
-use crate::error::{EngineError, Result};
+use crate::error::{error_chain_text, EngineError, Result};
 use crate::antivirus::{run_scan, test_scanner, ScanResult, SCAN_INFECTED};
 use crate::grabber::{
     is_page_url, robots_disallows, same_host, type_matches, validate_grabber_input,
@@ -253,6 +253,20 @@ pub enum RefreshAddressResult {
     },
 }
 
+/// Round 71 (B2/B3) — what one segment task returns. `Done`
+/// is the old success path (the segment finished, or the task
+/// was told to pause and exited cleanly). `Deferred` is the new
+/// non-fatal path: the segment could not even START (connect
+/// failure / rate-limit, zero bytes in the attempt) after its
+/// fast deferral, while other workers were still transferring.
+/// The supervisor does NOT fail the download for it — the
+/// segment goes back to Pending and a working worker picks it
+/// up later (possibly alone, where the same failure IS fatal).
+enum SegOutcome {
+    Done,
+    Deferred(EngineError),
+}
+
 /// Mutable per-segment state shared between its task and the supervisor.
 struct SegState {
     row: SegmentRow,
@@ -260,6 +274,53 @@ struct SegState {
     done: u64,
     /// Inclusive end byte the task must stop at; shrinks on a dynamic split.
     end: Option<u64>,
+    /// Round 71 (B3) — true while a task owns this segment.
+    running: bool,
+    /// Round 71 (B3) — bytes done when the current task started.
+    /// A running segment with `done == done_at_start` never
+    /// received a byte in this run: it is stuck in Connecting
+    /// and a proven worker may steal / split it.
+    done_at_start: u64,
+    /// Round 71 (B3) — when the current task started.
+    started_at: Option<Instant>,
+    /// Round 71 (B2) — the segment may not be respawned before
+    /// this instant (connect-failure backoff).
+    deferred_until: Option<Instant>,
+    /// Round 71 (B2) — how many times this segment deferred.
+    deferrals: u32,
+}
+
+impl SegState {
+    fn new(row: SegmentRow, done: u64, end: Option<u64>) -> Self {
+        SegState {
+            row,
+            done,
+            end,
+            running: false,
+            done_at_start: done,
+            started_at: None,
+            deferred_until: None,
+            deferrals: 0,
+        }
+    }
+}
+
+/// Round 71 (B3) — clears `running` when the segment task ends,
+/// INCLUDING on panic: unwinding runs Drop, so a panicked task
+/// cannot leave its segment marked "owned" forever (the
+/// supervisor would then never respawn or split it). The lock
+/// is best-effort — a poisoned mutex means the task died while
+/// holding it, and there is nothing safe left to clear.
+struct RunningGuard {
+    state: Arc<StdMutex<SegState>>,
+}
+
+impl Drop for RunningGuard {
+    fn drop(&mut self) {
+        if let Ok(mut st) = self.state.lock() {
+            st.running = false;
+        }
+    }
 }
 
 struct Running {
@@ -4728,7 +4789,7 @@ impl DownloadManager {
             .map(|r| {
                 let end = r.end_byte.map(|e| e as u64);
                 let done = r.downloaded_bytes as u64;
-                Arc::new(StdMutex::new(SegState { row: r, done, end }))
+                Arc::new(StdMutex::new(SegState::new(r, done, end)))
             })
             .collect();
         // Site logins (S09): the saved credential for this host,
@@ -4785,9 +4846,20 @@ impl DownloadManager {
                     Arc::clone(&file),
                     Arc::clone(pause),
                     Arc::clone(retry),
+                    Arc::clone(&self.store),
+                    false,
                 ));
             }
         }
+
+        // Round 71 (B2) — the concurrency the server has PROVEN
+        // it tolerates, starting at the setting. Every deferral
+        // ratchets it down to the number of workers that actually
+        // received bytes (at least 1); `try_split` never spawns
+        // above it. OVH showed 3 of 8, so after the first
+        // deferrals this drops to 3 instead of hammering 8
+        // connections at a server that only accepts 3.
+        let mut effective_cap = self.max_connections();
 
         // Round 55: checkpoint on the first progress tick, not
         // after a full interval — a download that finishes in ~1 s
@@ -4798,15 +4870,25 @@ impl DownloadManager {
         // table polls (1 s), while the progress window gets live
         // 250 ms emits: checkpointing the single last tick's
         // instantaneous speed wrote 0 to the DB whenever that
-        // tick had no bytes (bursty flow), so the main list
-        // showed "0 B/s" with a dead ETA while the progress
-        // window showed live speed. The checkpoint now carries
-        // the average over the checkpoint interval instead —
-        // positive whenever any bytes arrived in the last
-        // second. The live emit keeps the instantaneous value
-        // (the progress window already holds it, Round 64).
+        // The checkpoint now carries the average over the
+        // checkpoint interval instead — positive whenever any
+        // bytes arrived in the last second. The live emit keeps
+        // the instantaneous value (the progress window already
+        // holds it, Round 64).
+        // Round 71 (D1) — `checkpoint_at` was pre-aged by one
+        // interval so the FIRST checkpoint fired at the first
+        // tick, but its denominator (~1.25 s) then covered only
+        // ~0.25 s of bytes, understating the first sample ~5x.
+        // The formula itself was verified correct in steady
+        // state — bytes / elapsed seconds — so the 1:4 ratio in
+        // the Round 70 retest could NOT be reproduced from code
+        // (the paired numbers were ranges from different moments,
+        // and the list values matched the fixture server's
+        // 32 KiB/s x 8 ceiling while the progress window showed
+        // burst-inflated instantaneous readings). Do NOT multiply
+        // by 4; just start the clock honestly.
         let mut checkpoint_total = total_done(&states);
-        let mut checkpoint_at = Instant::now() - CHECKPOINT_INTERVAL;
+        let mut checkpoint_at = Instant::now();
         let mut last_emit = Instant::now();
         let mut prev_total = total_done(&states);
         let mut prev_instant = Instant::now();
@@ -4836,7 +4918,49 @@ impl DownloadManager {
                 return Ok(());
             }
             if tasks.is_empty() {
-                break;
+                // Round 71 (B2) — no task running does NOT mean
+                // the download is done: every segment may be
+                // deferred (waiting out its backoff) with none
+                // respawned yet. Break only when no segment is
+                // waiting on a deferral: every other incomplete
+                // segment always has a task (the initial spawn
+                // covers all of them, and a task only exits when
+                // its segment is done, deferred or failed) — so
+                // with no deferred segment, an empty task set
+                // means the download is done. A `done >= len`
+                // check would be wrong here: an open-ended
+                // segment's length reads as u64::MAX, so it can
+                // never satisfy it, and the supervisor would spin
+                // forever on an FTP download with unknown size
+                // (caught by `ftp_download_without_size_is_
+                // open_ended_and_byte_exact`).
+                let any_deferred = states.iter().any(|s| {
+                    let st = s.lock().unwrap();
+                    st.deferrals > 0 && st.done < segment_len_of(&st)
+                });
+                if !any_deferred {
+                    break;
+                }
+                self.try_split(
+                    id,
+                    &mut states,
+                    &mut tasks,
+                    effective_cap,
+                    pause,
+                    retry,
+                    &row,
+                    &file,
+                    &site_auth,
+                    &proxy,
+                    &cookies,
+                    per_download_limiter,
+                    &quota_gate,
+                )
+                .await;
+                if tasks.is_empty() {
+                    tokio::time::sleep(PROGRESS_INTERVAL).await;
+                    continue;
+                }
             }
             tokio::select! {
                 finished = tasks.join_next() => {
@@ -4863,10 +4987,67 @@ impl DownloadManager {
                             retry.clear_wait();
                             return Err(e);
                         }
-                        Some(Ok(Ok(()))) | Some(Err(_)) => {
+                        Some(Ok(Ok(SegOutcome::Done))) | Some(Err(_)) => {
                             // One segment finished (or was aborted): try a
                             // dynamic split while connections are idle.
-                            self.try_split(id, &mut states, &mut tasks, pause, retry, &row, &file, &site_auth, &proxy, &cookies, per_download_limiter, &quota_gate).await;
+                            self.try_split(
+                                id,
+                                &mut states,
+                                &mut tasks,
+                                effective_cap,
+                                pause,
+                                retry,
+                                &row,
+                                &file,
+                                &site_auth,
+                                &proxy,
+                                &cookies,
+                                per_download_limiter,
+                                &quota_gate,
+                            )
+                            .await;
+                        }
+                        Some(Ok(Ok(SegOutcome::Deferred(e)))) => {
+                            // Round 71 (B2) — NON-FATAL: this segment
+                            // could not even start (connect failure /
+                            // rate-limit, zero bytes) while other
+                            // workers were transferring. The segment
+                            // marked itself deferred with a backoff;
+                            // the download does NOT fail. Lower the
+                            // effective concurrency to the number of
+                            // workers that actually received bytes
+                            // (at least 1): the server has shown it
+                            // only tolerates that many parallel
+                            // connections from this IP. A freed slot
+                            // is offered to another segment at once.
+                            let working = states
+                                .iter()
+                                .filter(|s| {
+                                    let st = s.lock().unwrap();
+                                    st.running && st.done > st.done_at_start
+                                })
+                                .count();
+                            effective_cap = effective_cap.min(working.max(1));
+                            self.store.log(&format!(
+                                "segment deferred (effective connections now {effective_cap}): {}",
+                                error_chain_text(&e),
+                            ));
+                            self.try_split(
+                                id,
+                                &mut states,
+                                &mut tasks,
+                                effective_cap,
+                                pause,
+                                retry,
+                                &row,
+                                &file,
+                                &site_auth,
+                                &proxy,
+                                &cookies,
+                                per_download_limiter,
+                                &quota_gate,
+                            )
+                            .await;
                         }
                         None => break,
                     }
@@ -4909,6 +5090,34 @@ impl DownloadManager {
                     if last_emit.elapsed() >= PROGRESS_INTERVAL {
                         self.emit(id, &row, &states, speed_bps, "downloading", Some(retry)).await;
                         last_emit = Instant::now();
+                    }
+                    // Round 71 (B2/B3) — offer a freed slot every
+                    // tick, not only when a task finishes: a
+                    // deferred segment's backoff expires between
+                    // completions, and a segment stuck in
+                    // Connecting is only stolen when a slot opens.
+                    // Without this, a download whose workers all
+                    // finished except one stuck segment would wait
+                    // for the 30 s stall timeout instead of
+                    // stealing it at 5 s. `try_split` is a no-op
+                    // when no slot is free or nothing is ready.
+                    if tasks.len() < effective_cap {
+                        self.try_split(
+                            id,
+                            &mut states,
+                            &mut tasks,
+                            effective_cap,
+                            pause,
+                            retry,
+                            &row,
+                            &file,
+                            &site_auth,
+                            &proxy,
+                            &cookies,
+                            per_download_limiter,
+                            &quota_gate,
+                        )
+                        .await;
                     }
                     // Run watchdog (Round 55, defects 1 + 4): a run
                     // that makes no progress at all for
@@ -5012,7 +5221,12 @@ impl DownloadManager {
         &self,
         _download_id: &str,
         states: &mut Vec<Arc<StdMutex<SegState>>>,
-        tasks: &mut JoinSet<std::result::Result<(), EngineError>>,
+        tasks: &mut JoinSet<std::result::Result<SegOutcome, EngineError>>,
+        // Round 71 (B2) — the concurrency the server has proven
+        // it tolerates (ratcheted down on deferrals), not the raw
+        // setting: spawning above it just re-creates the refused
+        // connections.
+        cap: usize,
         pause: &Arc<AtomicBool>,
         retry: &Arc<RetrySlot>,
         row: &DownloadRow,
@@ -5023,28 +5237,103 @@ impl DownloadManager {
         per_download_limiter: &Arc<RateLimiter>,
         quota_gate: &Option<Arc<QuotaGate>>,
     ) {
-        if tasks.len() >= self.max_connections() {
+        if tasks.len() >= cap {
             return;
         }
-        // Largest remaining segment. Round 55: an open-ended
-        // segment (unknown size, `end` is `None`) is never split —
-        // its length reads as `u64::MAX`, so the midpoint lands
-        // near 2^63 and the split was only ever refused by the
-        // schema CHECKs (a latent corruption risk: a mid that
-        // wraps into a valid-looking range would have created a
-        // bogus segment). The DB CHECK stays as the safety net;
-        // the guard here is the application-level one.
+        // Round 71 (B2) — first, respawn a deferred segment whose
+        // backoff expired. A deferred segment is incomplete, owned
+        // by no task, and past its `deferred_until` (deferrals > 0
+        // marks it as one that went through the deferral path).
+        // It runs solo when no other task is alive — then a
+        // deferrable failure IS fatal, the segment had its last
+        // chance. This is what lets a download finish after OVH
+        // refused most of its connections: the refused segments
+        // come back one or a few at a time under the ratcheted cap
+        // instead of failing the whole download.
+        let now = Instant::now();
+        for (i, s) in states.iter().enumerate() {
+            let ready = {
+                let st = s.lock().unwrap();
+                !st.running
+                    && st.done < segment_len_of(&st)
+                    && st.deferrals > 0
+                    && st.deferred_until.map(|d| now >= d).unwrap_or(true)
+            };
+            if !ready {
+                continue;
+            }
+            let solo = tasks.is_empty();
+            tasks.spawn(run_segment(
+                // Round 55: segments use the no-total-timeout client.
+                self.segment_client(),
+                Arc::clone(&self.limiter),
+                Arc::clone(per_download_limiter),
+                quota_gate.clone(),
+                self.max_retries.load(Ordering::Relaxed).max(1),
+                row.url.clone(),
+                site_auth.clone(),
+                proxy.clone(),
+                cookies.clone(),
+                Arc::clone(&states[i]),
+                Arc::clone(file),
+                Arc::clone(pause),
+                Arc::clone(retry),
+                Arc::clone(&self.store),
+                solo,
+            ));
+            return;
+        }
+        // Round 71 (B3) — segment stealing: a segment stuck in
+        // Connecting (running, zero bytes since its task started,
+        // started > 5 s ago) is split FIRST, before the largest
+        // remaining segment. The stuck task keeps its half — its
+        // stream loop re-reads the shared end per chunk and stops
+        // at the split point, so nothing overlaps — and the new
+        // half goes to a proven worker (one that already holds an
+        // open keep-alive socket) instead of waiting out the 30 s
+        // stall timeout for a connection that may never arrive.
         let mut best: Option<(usize, u64)> = None;
         for (i, s) in states.iter().enumerate() {
             let st = s.lock().unwrap();
-            if st.end.is_none() {
+            if !st.running || st.end.is_none() {
+                continue;
+            }
+            let stuck = st.done == st.done_at_start
+                && st
+                    .started_at
+                    .map(|t| t.elapsed() >= Duration::from_secs(5))
+                    .unwrap_or(false);
+            if !stuck {
                 continue;
             }
             let remaining = segment_len_of(&st).saturating_sub(st.done);
-            if remaining > MIN_SPLIT_REMAINING && best.map(|(_, r)| remaining > r).unwrap_or(true) {
+            if remaining > MIN_SPLIT_REMAINING {
                 best = Some((i, remaining));
+                break;
             }
         }
+        if best.is_none() {
+            // Largest remaining segment. Round 55: an open-ended
+            // segment (unknown size, `end` is `None`) is never split —
+            // its length reads as `u64::MAX`, so the midpoint lands
+            // near 2^63 and the split was only ever refused by the
+            // schema CHECKs (a latent corruption risk: a mid that
+            // wraps into a valid-looking range would have created a
+            // bogus segment). The DB CHECK stays as the safety net;
+            // the guard here is the application-level one.
+            for (i, s) in states.iter().enumerate() {
+                let st = s.lock().unwrap();
+                if st.end.is_none() {
+                    continue;
+                }
+                let remaining = segment_len_of(&st).saturating_sub(st.done);
+                if remaining > MIN_SPLIT_REMAINING
+                    && best.map(|(_, r)| remaining > r).unwrap_or(true)
+                {
+                    best = Some((i, remaining));
+                }
+            }
+        } // end `if best.is_none()` — the stuck scan above already picked one
         let Some((idx, remaining)) = best else { return };
         let state = Arc::clone(&states[idx]);
         let (mid, new_row) = {
@@ -5070,11 +5359,10 @@ impl DownloadManager {
             }
         };
         let new_end = new_row_end(&new_row);
-        let new_state = Arc::new(StdMutex::new(SegState {
-            row: new_row,
-            done: 0,
-            end: new_end,
-        }));
+        let new_state = Arc::new(StdMutex::new(SegState::new(new_row, 0, new_end)));
+        // Round 71 (B2) — a split-off half runs solo when it is the
+        // only task alive (same fatal rule as a respawned segment).
+        let solo = tasks.is_empty();
         tasks.spawn(run_segment(
             // Round 55: segments use the no-total-timeout client.
             self.segment_client(),
@@ -5090,6 +5378,8 @@ impl DownloadManager {
             Arc::clone(file),
             Arc::clone(pause),
             Arc::clone(retry),
+            Arc::clone(&self.store),
+            solo,
         ));
         // The supervisor must keep the new state: progress, checkpoint
         // and completion all read from `states`.
@@ -5239,7 +5529,7 @@ impl DownloadManager {
                 .map(|r| {
                     let end = r.end_byte.map(|e| e as u64);
                     let done = r.downloaded_bytes as u64;
-                    Arc::new(StdMutex::new(SegState { row: r, done, end }))
+                    Arc::new(StdMutex::new(SegState::new(r, done, end)))
                 })
                 .collect();
             self.emit(id, &row, &states, 0, status, None).await;
@@ -5285,6 +5575,102 @@ fn write_at_pos(file: &std::fs::File, buf: &[u8], offset: u64) -> std::io::Resul
 /// the slot's flag, and pausing ends it. The backoff itself is the
 /// pre-existing rule — `1 << attempt` seconds, capped at 16 s —
 /// unchanged: this only makes it visible and interruptible.
+/// Round 71 (B2) — the prefix of the message `stall_error`
+/// produces, used to recognise a send-phase stall (the server
+/// accepted the TCP connection but never answered) as a
+/// deferrable "could not start" failure (see `is_deferrable`).
+const STALL_MSG_PREFIX: &str = "No data arrived for ";
+
+/// Round 71 (B2) — the prefix of the message
+/// `send_stall_error` produces: the server accepted the TCP
+/// connection but never sent response headers within the stall
+/// timeout. This IS a "could not start" failure and may be
+/// deferred — unlike a BODY stall (headers arrived, then
+/// silence), which means the connection started and is NOT
+/// deferrable: a wedged body must fail the download (Round 55
+/// `stall_watchdog_fails_a_wedged_download` pins this with
+/// max_retries = 1 — a deferrable body stall would defer forever
+/// instead of failing).
+const SEND_STALL_MSG_PREFIX: &str = "No response headers for ";
+
+/// Round 71 (B2) — is this failure a "could not even start"
+/// failure that may be deferred instead of failing the download?
+/// Only when the attempt received NO bytes: a connect failure
+/// (dropped SYN, refused), a connect timeout, a rate-limit
+/// (429 / 503), or a send-phase stall. A failure AFTER bytes
+/// flowed is a mid-transfer problem and keeps the old retry
+/// path — deferring it would throw away a working connection.
+fn is_deferrable(e: &EngineError, received_bytes: bool) -> bool {
+    if received_bytes {
+        return false;
+    }
+    match e {
+        EngineError::Http(re) => re.is_connect() || re.is_timeout(),
+        EngineError::Status(code, _) => *code == 429 || *code == 503,
+        // Round 71 — ONLY the send-phase stall (no response
+        // headers at all) is deferrable. A body stall — headers
+        // arrived, then silence — is `stall_error()`, a different
+        // prefix, and stays on the old retry-then-fail path.
+        EngineError::InvalidState(m) => m.starts_with(SEND_STALL_MSG_PREFIX),
+        _ => false,
+    }
+}
+
+/// Round 71 (B4) — log one failed segment attempt: segment
+/// index, byte range, attempt number, elapsed time and the FULL
+/// error chain (see `error_chain_text`). "error sending request"
+/// alone never says whether the SYN was dropped, the server
+/// reset the connection, or the handshake failed — the chain
+/// does, and it is what the OVH diagnosis needed.
+fn log_segment_attempt(
+    store: &Store,
+    st: &SegState,
+    attempt: u32,
+    elapsed: Duration,
+    e: &EngineError,
+) {
+    let end = st
+        .end
+        .map(|e| e.to_string())
+        .unwrap_or_else(|| "?".to_string());
+    store.log(&format!(
+        "segment {} [{}..{}] attempt {} failed in {} ms: {}",
+        st.row.segment_index,
+        st.row.start_byte,
+        end,
+        attempt,
+        elapsed.as_millis(),
+        error_chain_text(e),
+    ));
+}
+
+/// Sleep a backoff in 100 ms slices so a pause or "Retry now"
+/// is noticed within 100 ms instead of only when the whole
+/// backoff expires. Returns true when the run is paused (the
+/// caller should exit cleanly). The wait is NOT written to the
+/// retry slot: fast deferral backoffs are sub-second to 3 s,
+/// and a shared slot would flicker the dialog's countdown.
+async fn sleep_backoff(pause: &Arc<AtomicBool>, retry: &Arc<RetrySlot>, backoff: Duration) -> bool {
+    let deadline = Instant::now() + backoff;
+    loop {
+        if pause.load(Ordering::SeqCst) || retry.retry_now.swap(false, Ordering::SeqCst) {
+            break;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    pause.load(Ordering::SeqCst)
+}
+
+/// One segment's task. The wrapper owns the `running` bookkeeping
+/// (B3) so the supervisor can tell a stuck-in-Connecting segment
+/// from a finished one; the inner function owns the retry loop.
+/// `store` is for per-attempt logging (B4). `solo` is true when
+/// this segment is the only task running: a deferrable failure
+/// then ends the download (there is nobody left to pick the
+/// segment up), while a non-solo failure defers it instead.
 async fn run_segment(
     client: Arc<Client>,
     limiter: Arc<RateLimiter>,
@@ -5299,9 +5685,61 @@ async fn run_segment(
     file: Arc<StdMutex<std::fs::File>>,
     pause: Arc<AtomicBool>,
     retry: Arc<RetrySlot>,
-) -> std::result::Result<(), EngineError> {
+    store: Arc<Store>,
+    solo: bool,
+) -> std::result::Result<SegOutcome, EngineError> {
+    {
+        let mut st = state.lock().unwrap();
+        st.running = true;
+        st.done_at_start = st.done;
+        st.started_at = Some(Instant::now());
+        st.deferred_until = None;
+    }
+    // The guard clears `running` on every exit, panic included.
+    let _guard = RunningGuard {
+        state: Arc::clone(&state),
+    };
+    run_segment_inner(
+        client,
+        limiter,
+        per_download,
+        quota,
+        max_attempts,
+        url,
+        site_auth,
+        proxy,
+        cookies,
+        Arc::clone(&state),
+        file,
+        pause,
+        retry,
+        &store,
+        solo,
+    )
+    .await
+}
+
+async fn run_segment_inner(
+    client: Arc<Client>,
+    limiter: Arc<RateLimiter>,
+    per_download: Arc<RateLimiter>,
+    quota: Option<Arc<QuotaGate>>,
+    max_attempts: u32,
+    url: String,
+    site_auth: Option<(String, String)>,
+    proxy: Option<ProxyConfig>,
+    cookies: Option<String>,
+    state: Arc<StdMutex<SegState>>,
+    file: Arc<StdMutex<std::fs::File>>,
+    pause: Arc<AtomicBool>,
+    retry: Arc<RetrySlot>,
+    store: &Store,
+    solo: bool,
+) -> std::result::Result<SegOutcome, EngineError> {
     let mut attempt: u32 = 0;
     loop {
+        let done_before = state.lock().unwrap().done;
+        let attempt_started = Instant::now();
         match download_segment_once(
             &client,
             &limiter,
@@ -5317,12 +5755,69 @@ async fn run_segment(
         )
         .await
         {
-            Ok(()) => return Ok(()),
+            Ok(()) => return Ok(SegOutcome::Done),
             // Pausing is a clean stop, not a failure: report success so
             // the supervisor's pause path (not the error path) runs.
-            Err(EngineError::InvalidState(msg)) if msg == "paused" => return Ok(()),
+            Err(EngineError::InvalidState(msg)) if msg == "paused" => return Ok(SegOutcome::Done),
             Err(e) => {
                 attempt += 1;
+                let received = state.lock().unwrap().done > done_before;
+                let elapsed = attempt_started.elapsed();
+                {
+                    let st = state.lock().unwrap();
+                    log_segment_attempt(store, &st, attempt, elapsed, &e);
+                }
+                // Round 71 (B2) — a segment that could not even
+                // START (no bytes in the attempt) gets a fast
+                // retry loop first: 3 retries at 500 ms / 1500 ms
+                // / 3000 ms. A dropped SYN or a 429 answers in
+                // milliseconds, so the old 2/4/8/16 s backoffs
+                // would waste ~14 s before the segment gives up.
+                if is_deferrable(&e, received) {
+                    // Round 71 (B2) — a segment that never got
+                    // started is worth a fast retry before giving
+                    // up its slot — but never more attempts than
+                    // `max_attempts` allows inside one run (a
+                    // max_retries = 1 segment gets exactly one
+                    // attempt here; the deferral + solo run below
+                    // is its only second chance).
+                    if attempt < max_attempts.min(4) {
+                        let backoff = [
+                            Duration::from_millis(500),
+                            Duration::from_millis(1500),
+                            Duration::from_secs(3),
+                        ][(attempt - 1) as usize];
+                        if sleep_backoff(&pause, &retry, backoff).await {
+                            return Ok(SegOutcome::Done);
+                        }
+                        continue;
+                    }
+                    // Retries exhausted. Non-solo: DEFERRAL, not
+                    // failure — mark the range back as Pending
+                    // with a backoff and let a working worker pick
+                    // it up (the supervisor ratchets the effective
+                    // concurrency down). Solo: there is nobody
+                    // left to pick it up, so this IS the fatal
+                    // path — return the error as before.
+                    if !solo {
+                        let backoff_secs = {
+                            let mut st = state.lock().unwrap();
+                            st.deferrals += 1;
+                            let secs = 1u64 << st.deferrals.min(3);
+                            st.deferred_until = Some(Instant::now() + Duration::from_secs(secs));
+                            secs
+                        };
+                        store.log(&format!(
+                            "segment {} deferred after {} attempts (retry after {} s): {}",
+                            state.lock().unwrap().row.segment_index,
+                            attempt,
+                            backoff_secs,
+                            error_chain_text(&e),
+                        ));
+                        return Ok(SegOutcome::Deferred(e));
+                    }
+                    return Err(e);
+                }
                 if attempt >= max_attempts {
                     return Err(e);
                 }
@@ -5331,22 +5826,11 @@ async fn run_segment(
                 // Sleep in short slices instead of one long sleep, so
                 // a pause or a "Retry now" is noticed within 100 ms
                 // instead of only when the whole backoff expires.
-                let deadline = Instant::now() + backoff;
-                loop {
-                    if pause.load(Ordering::SeqCst)
-                        || retry.retry_now.swap(false, Ordering::SeqCst)
-                    {
-                        break;
-                    }
-                    if Instant::now() >= deadline {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                if sleep_backoff(&pause, &retry, backoff).await {
+                    retry.clear_wait();
+                    return Ok(SegOutcome::Done);
                 }
                 retry.clear_wait();
-                if pause.load(Ordering::SeqCst) {
-                    return Ok(());
-                }
             }
         }
     }
@@ -5358,7 +5842,19 @@ async fn run_segment(
 /// instead of hanging forever at 0% with status `downloading`.
 fn stall_error() -> EngineError {
     EngineError::InvalidState(format!(
-        "No data arrived for {} seconds — the connection appears to have stalled",
+        "{STALL_MSG_PREFIX}{} seconds — the connection appears to have stalled",
+        SEGMENT_STALL_TIMEOUT.as_secs()
+    ))
+}
+
+/// Round 71 (B2) — the error a request that never gets response
+/// headers fails with (the `.send()` timeout in
+/// `download_segment_once`): the server accepted the connection
+/// but never answered. Deferrable, unlike `stall_error()` — see
+/// `SEND_STALL_MSG_PREFIX`.
+fn send_stall_error() -> EngineError {
+    EngineError::InvalidState(format!(
+        "{SEND_STALL_MSG_PREFIX}{} seconds — the server accepted the connection but never answered",
         SEGMENT_STALL_TIMEOUT.as_secs()
     ))
 }
@@ -5431,11 +5927,10 @@ async fn download_segment_once(
     // handshake, a server that never responds) used to block the
     // segment — and the probe, through the same client — for
     // minutes with no error at all.
-    let mut resp = match tokio::time::timeout(SEGMENT_STALL_TIMEOUT, build_req(None).send()).await
-    {
+    let mut resp = match tokio::time::timeout(SEGMENT_STALL_TIMEOUT, build_req(None).send()).await {
         Ok(Ok(resp)) => resp,
         Ok(Err(e)) => return Err(e.into()),
-        Err(_) => return Err(stall_error()),
+        Err(_) => return Err(send_stall_error()),
     };
     let mut status = resp.status();
     if status.as_u16() == 407 {
@@ -5535,7 +6030,7 @@ async fn download_segment_once(
                             {
                                 Ok(Ok(resp)) => resp,
                                 Ok(Err(e)) => return Err(e.into()),
-                                Err(_) => return Err(stall_error()),
+                                Err(_) => return Err(send_stall_error()),
                             };
                             status = resp.status();
                             retried_with_basic = true;

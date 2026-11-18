@@ -323,6 +323,14 @@ pub struct DownloadRow {
     /// so rows written before Round 67 still read.
     #[serde(default)]
     pub description: Option<String>,
+    /// Round 71 (D4) — NOT a column: computed on read (see
+    /// `mark_missing`): a Completed download whose file no
+    /// longer exists on disk (deleted outside the app — the
+    /// Round 70 retest's test files were deleted to free space
+    /// while their rows still said Finished). The UI shows it
+    /// instead of pretending the file is there to open.
+    #[serde(default)]
+    pub file_missing: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2488,7 +2496,11 @@ impl Store {
         )?;
         let mut rows = stmt.query_map(params![id], row_to_download)?;
         match rows.next() {
-            Some(r) => Ok(Some(r?)),
+            Some(r) => {
+                let mut row = r?;
+                mark_missing(&mut row);
+                Ok(Some(row))
+            }
             None => Ok(None),
         }
     }
@@ -2503,7 +2515,13 @@ impl Store {
              FROM downloads WHERE status != 'deleted' ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], row_to_download)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(EngineError::from)
+        let mut rows = rows
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(EngineError::from)?;
+        for row in &mut rows {
+            mark_missing(row);
+        }
+        Ok(rows)
     }
 
     pub fn set_status(&self, id: &str, status: &str, error: Option<&str>) -> Result<()> {
@@ -3004,5 +3022,20 @@ fn row_to_download(r: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadRow> {
         updated_at: r.get(24)?,
         grabber_project_id: r.get(25)?,
         description: r.get(26)?,
+        // Round 71 (D4) — not a column; `mark_missing` sets it
+        // after the read (it needs a filesystem check, and the
+        // row mapper must stay a pure DB read).
+        file_missing: false,
     })
+}
+
+/// Round 71 (D4) — mark Completed downloads whose file no
+/// longer exists on disk. Called on every `list_downloads` /
+/// `get_download` read (a `stat` per complete row per poll is
+/// nothing, and a file deleted mid-session must show up at the
+/// next poll, not only at startup). Only `complete` rows are
+/// checked: every other status is still downloading, paused or
+/// failed, so a missing file there is expected, not stale.
+fn mark_missing(row: &mut DownloadRow) {
+    row.file_missing = row.status == "complete" && !std::path::Path::new(&row.save_path).exists();
 }

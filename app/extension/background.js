@@ -163,6 +163,43 @@ function sendToHost(message) {
   });
 }
 
+// Round 71 (A4) — a cheap liveness probe for the download
+// watcher: true only when the host answers a ping. The watcher
+// calls this BEFORE pausing any browser download, so a dead host
+// never costs the user a paused-then-resumed download (or a
+// swallowed click). A 3 s bound, not 15 s: the host answers in
+// milliseconds when healthy, and a download must not wait on a
+// dead one. Failures are silent here — the popup shows host
+// status from its own ping; the watcher simply lets the browser
+// download proceed natively when the host is down.
+function pingHost() {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve(false);
+    }, 3000);
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    try {
+      chrome.runtime.sendNativeMessage(HOST_NAME, { type: "ping" }, (reply) => {
+        if (chrome.runtime.lastError) {
+          done(false);
+          return;
+        }
+        done(!!(reply && reply.ok));
+      });
+    } catch {
+      done(false);
+    }
+  });
+}
+
 // Cookies for one hand-off (S13 finish): the cookies the browser
 // holds for the exact URL being handed over, as name/value pairs
 // only — no domain, path, expiry or flags, because the Cookie
@@ -358,6 +395,18 @@ chrome.downloads.onCreated.addListener(async (item) => {
     // it, and the browser download sailed past the watcher uncaught
     // with no trace (the Node fake destructured an object, so the
     // unit suite never saw it).
+    // Round 71 (A4) — PING FIRST: never pause the browser
+    // download until the native host has answered a ping (3 s).
+    // Pausing first and handing over second means a dead host
+    // costs a round-trip while the user's download sits paused,
+    // and a crash between pause and resume swallows the click
+    // (the Round 70 retest's auto-capture failure: the download
+    // vanished with no dialog and no Chrome download). With the
+    // ping first, a dead host means the browser download simply
+    // proceeds natively — nothing is ever paused, nothing is
+    // ever lost. The ping is cheap (~ms when the host is alive).
+    const hostUp = await pingHost();
+    if (!hostUp) return;
     let paused = false;
     try {
       await chrome.downloads.pause(item.id);

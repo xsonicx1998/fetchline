@@ -342,6 +342,18 @@ impl ProxyConfig {
 /// submit timeout still bounds the whole submit.
 pub const CLIENT_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Round 71 (B1) — a dropped SYN costs the full Windows TCP
+/// connect timeout (~21 s: 3 + 6 + 12 s) before the request fails.
+/// OVH drops SYNs when too many parallel connections arrive from
+/// one IP, so a 30 s connect timeout turns every rate-limited
+/// segment into a 21 s stall. Cap the connect timeout at 8 s in
+/// BOTH builders (probe and segment): a server that cannot accept
+/// a TCP handshake in 8 s is effectively unreachable, and failing
+/// fast is what lets the per-segment deferral (manager.rs) drop
+/// the excess concurrency instead of hanging the download. The
+/// user's setting still governs shorter values.
+pub const MAX_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+
 pub fn build_client(proxy: Option<&ProxyConfig>, timeout_secs: u64) -> Result<Client> {
     build_client_with_total_timeout(proxy, timeout_secs, CLIENT_TOTAL_TIMEOUT)
 }
@@ -356,7 +368,7 @@ pub fn build_client_with_total_timeout(
 ) -> Result<Client> {
     let builder = Client::builder()
         .user_agent("Fetchline/0.1")
-        .connect_timeout(Duration::from_secs(timeout_secs.max(1)))
+        .connect_timeout(Duration::from_secs(timeout_secs.max(1)).min(MAX_CONNECT_TIMEOUT))
         .timeout(total_timeout);
     Ok(build_with_proxy(builder, proxy)?.build()?)
 }
@@ -370,7 +382,7 @@ pub fn build_client_with_total_timeout(
 pub fn build_segment_client(proxy: Option<&ProxyConfig>, timeout_secs: u64) -> Result<Client> {
     let builder = Client::builder()
         .user_agent("Fetchline/0.1")
-        .connect_timeout(Duration::from_secs(timeout_secs.max(1)));
+        .connect_timeout(Duration::from_secs(timeout_secs.max(1)).min(MAX_CONNECT_TIMEOUT));
     Ok(build_with_proxy(builder, proxy)?.build()?)
 }
 

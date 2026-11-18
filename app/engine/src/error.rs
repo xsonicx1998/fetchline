@@ -37,7 +37,38 @@ impl fmt::Display for EngineError {
     }
 }
 
-impl std::error::Error for EngineError {}
+impl std::error::Error for EngineError {
+    // Round 71 (B4) — expose the inner error so callers can walk
+    // the FULL chain (`error_chain_text` in manager.rs). The
+    // Display text alone hides the cause: "Network error: error
+    // sending request" never says whether the SYN was dropped,
+    // the server reset the connection, or the TLS handshake
+    // failed — the walk does.
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            EngineError::Http(e) => Some(e),
+            EngineError::Db(e) => Some(e),
+            EngineError::Io(e) => Some(e),
+            EngineError::Json(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+/// Round 71 (B4) — the full error chain as one line, e.g.
+/// "Network error: error sending request for url (...) <- client
+/// error (Connect) <- ... <- A connection attempt failed ...".
+/// `Display` alone stops at the first link; the chain is what
+/// names the cause.
+pub fn error_chain_text(e: &EngineError) -> String {
+    let mut parts = vec![e.to_string()];
+    let mut src: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(e);
+    while let Some(s) = src {
+        parts.push(s.to_string());
+        src = s.source();
+    }
+    parts.join(" <- ")
+}
 
 impl From<reqwest::Error> for EngineError {
     fn from(e: reqwest::Error) -> Self {

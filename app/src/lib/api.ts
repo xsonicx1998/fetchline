@@ -61,6 +61,16 @@ export async function webviewHeartbeat(label: string): Promise<void> {
   return invoke('webview_heartbeat', { label })
 }
 
+/** Round 71 (C3) — show-when-ready: the window was built hidden
+ *  (`visible: false`) so it never flashes a blank first paint;
+ *  the frontend calls this once its root component mounts, and
+ *  Rust shows the window WITH content. A failure is swallowed
+ *  by the caller — the 3 s Rust fallback shows the window
+ *  anyway, so a missed signal can never hide a window forever. */
+export async function windowReady(): Promise<void> {
+  return invoke('window_ready')
+}
+
 /** Reload a window's webview (§7.4, Round 56): the recovery
  * action the "Backend not responding" banner offers. The main
  * window reloads in place; a progress window is closed and

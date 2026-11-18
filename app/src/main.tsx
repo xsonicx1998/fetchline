@@ -1,11 +1,27 @@
-import React from 'react'
+import React, { useLayoutEffect } from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'
 import { DownloadCompleteDialog } from './components/DownloadCompleteDialog'
 import { DownloadErrorDialog } from './components/DownloadErrorDialog'
 import { ProgressWindow } from './components/ProgressWindow'
-import { webviewHeartbeat } from './lib/api'
+import { webviewHeartbeat, windowReady } from './lib/api'
 import './index.css'
+
+/** Round 71 (C3) — show-when-ready: every window is built
+ *  hidden (`visible: false`) so it never flashes a blank first
+ *  paint. This fires once, in `useLayoutEffect` after the root
+ *  component's first commit, and Rust shows the window WITH
+ *  content. A failure is swallowed — the 3 s Rust fallback in
+ *  `spawn_show_fallback` shows the window anyway, so a missed
+ *  signal can never hide a window forever. One component serves
+ *  all four window kinds (main / progress / complete / error):
+ *  it renders nothing and sits next to the real root. */
+function WindowReady() {
+  useLayoutEffect(() => {
+    void windowReady().catch(() => undefined)
+  }, [])
+  return null
+}
 
 /** A progress window loads the same bundle and renders the
  *  progress view instead of the main window (S03). The download
@@ -130,6 +146,7 @@ window.setTimeout(() => {
 
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
   <React.StrictMode>
+    <WindowReady />
     {progressId !== null ? (
       <ProgressWindow downloadId={progressId} />
     ) : completeId !== null ? (

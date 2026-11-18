@@ -32,7 +32,7 @@ const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
 // Test-only dummy cookie values, never real ones.
 const DUMMY_COOKIES = [{ name: "session", value: "test-dummy-value" }];
 
-function loadBackground({ seed = {}, cookiesForUrl = () => [], cancelThrows = false, hostError = null } = {}) {
+function loadBackground({ seed = {}, cookiesForUrl = () => [], cancelThrows = false, hostError = null, failHandover = false } = {}) {
   const storage = { ...seed };
   const sentMessages = [];
   const cancelled = [];
@@ -61,8 +61,13 @@ function loadBackground({ seed = {}, cookiesForUrl = () => [], cancelThrows = fa
       onMessage: { addListener(fn) { listeners.message = fn; } },
       sendNativeMessage(_host, message, cb) {
         sentMessages.push(message);
-        if (hostError) {
-          chrome.runtime.lastError = { message: hostError };
+        // Round 71 (A4) — `failHandover` fails only the hand-off,
+        // not the ping: the watcher pings first, so a host that
+        // answers the ping but fails the hand-off must still
+        // resume the browser download (the Round 69 safety rule).
+        // `hostError` fails everything, ping included.
+        if (hostError || (failHandover && message.type !== "ping")) {
+          chrome.runtime.lastError = { message: hostError || "Could not establish connection" };
           cb(null);
           return;
         }
@@ -137,9 +142,12 @@ test("watcher cancels a downloadable link and hands it to Fetchline", async () =
   assert.deepEqual(env.resumed, []);
   assert.deepEqual(env.cancelled, [1]);
   assert.deepEqual(env.erased, [1]);
-  assert.equal(env.sentMessages.length, 1);
+  // Round 71 (A4) — the watcher pings first: message 0 is the
+  // ping, message 1 is the hand-off.
+  assert.equal(env.sentMessages.length, 2);
+  assert.equal(env.sentMessages[0].type, "ping");
   assert.equal(
-    JSON.stringify(env.sentMessages[0]),
+    JSON.stringify(env.sentMessages[1]),
     JSON.stringify({
       type: "download_link",
       url: "http://127.0.0.1/file.zip",
@@ -154,18 +162,39 @@ test("watcher resumes the browser download when the hand-off fails", async () =>
   // download until the app confirms receipt. The old order
   // cancelled first, so a failed hand-off silently swallowed the
   // file (Round 68 retest). Now the paused browser download is
-  // resumed and proceeds normally in Chrome.
+  // resumed and proceeds normally in Chrome. Round 71: the ping
+  // succeeds here (failHandover fails only the hand-off), so the
+  // pause-then-resume path is what is under test.
   const env = loadBackground({
     seed: { desktopIntegration: true },
-    hostError: "Could not establish connection",
+    failHandover: true,
   });
   await env.fireDownload(zipDownload(1));
   assert.deepEqual(env.paused, [1]);
   assert.deepEqual(env.resumed, [1]);
   assert.deepEqual(env.cancelled, []);
   assert.deepEqual(env.erased, []);
-  assert.equal(env.sentMessages.length, 1);
+  assert.equal(env.sentMessages.length, 2);
   assert.equal(env.storage.lastHandoff.ok, false);
+});
+
+test("watcher never pauses when the host does not answer the ping (Round 71)", async () => {
+  // Round 71 (A4) — ping first: a dead host means the browser
+  // download is never paused at all, so there is nothing to
+  // resume and nothing to swallow — the file simply downloads
+  // in Chrome. Only the ping itself was sent.
+  const env = loadBackground({
+    seed: { desktopIntegration: true },
+    hostError: "Could not establish connection",
+  });
+  await env.fireDownload(zipDownload(1));
+  assert.deepEqual(env.paused, []);
+  assert.deepEqual(env.resumed, []);
+  assert.deepEqual(env.cancelled, []);
+  assert.deepEqual(env.erased, []);
+  assert.equal(env.sentMessages.length, 1);
+  assert.equal(env.sentMessages[0].type, "ping");
+  assert.equal(env.storage.lastHandoff, undefined);
 });
 
 test("watcher attaches the target URL's cookies to the hand-off", async () => {
@@ -174,20 +203,21 @@ test("watcher attaches the target URL's cookies to the hand-off", async () => {
     cookiesForUrl: (url) => (url === "http://127.0.0.1/file.zip" ? DUMMY_COOKIES : []),
   });
   await env.fireDownload(zipDownload(1));
-  assert.equal(env.sentMessages.length, 1);
+  // Round 71 (A4) — message 0 is the ping, message 1 the hand-off.
+  assert.equal(env.sentMessages.length, 2);
   assert.equal(
-    JSON.stringify(env.sentMessages[0].cookies),
+    JSON.stringify(env.sentMessages[1].cookies),
     JSON.stringify(DUMMY_COOKIES),
   );
   // Only name/value pairs travel — no domain, path, expiry or flags.
-  assert.deepEqual(Object.keys(env.sentMessages[0].cookies[0]).sort(), ["name", "value"]);
+  assert.deepEqual(Object.keys(env.sentMessages[1].cookies[0]).sort(), ["name", "value"]);
 });
 
 test("watcher sends no cookies field when the browser has none for the URL", async () => {
   const env = loadBackground({ seed: { desktopIntegration: true } });
   await env.fireDownload(zipDownload(1));
-  assert.equal(env.sentMessages.length, 1);
-  assert.ok(!("cookies" in env.sentMessages[0]));
+  assert.equal(env.sentMessages.length, 2);
+  assert.ok(!("cookies" in env.sentMessages[1]));
 });
 
 test("watcher reads the type from a full local download path", async () => {
@@ -203,8 +233,8 @@ test("watcher reads the type from a full local download path", async () => {
     referrer: "https://127.0.0.1/page.html",
   });
   assert.deepEqual(env.cancelled, [1]);
-  assert.equal(env.sentMessages.length, 1);
-  assert.equal(env.sentMessages[0].url, "https://127.0.0.1/download?id=7");
+  assert.equal(env.sentMessages.length, 2);
+  assert.equal(env.sentMessages[1].url, "https://127.0.0.1/download?id=7");
 });
 
 test("watcher leaves an excluded site's download alone", async () => {
@@ -243,9 +273,10 @@ test("the same URL twice is handed over twice (the drain de-duplicates by path)"
   await env.fireDownload(zipDownload(1));
   await env.fireDownload(zipDownload(2));
   assert.deepEqual(env.cancelled, [1, 2]);
-  assert.equal(env.sentMessages.length, 2);
-  assert.equal(env.sentMessages[0].url, "http://127.0.0.1/file.zip");
+  // Round 71 (A4) — each download sends a ping then a hand-off.
+  assert.equal(env.sentMessages.length, 4);
   assert.equal(env.sentMessages[1].url, "http://127.0.0.1/file.zip");
+  assert.equal(env.sentMessages[3].url, "http://127.0.0.1/file.zip");
 });
 
 test("watcher ignores non-http(s) downloads and downloads that already finished", async () => {
@@ -275,7 +306,7 @@ test("watcher calls cancel with the bare download id, not a query object (BUG-04
   const env = loadBackground({ seed: { desktopIntegration: true } });
   await env.fireDownload(zipDownload(7));
   assert.deepEqual(env.cancelled, [7]);
-  assert.equal(env.sentMessages.length, 1);
+  assert.equal(env.sentMessages.length, 2);
 });
 
 test("watcher still hands over when cancel fails because the download already finished (BUG-049)", async () => {
@@ -287,7 +318,7 @@ test("watcher still hands over when cancel fails because the download already fi
   await env.fireDownload(zipDownload(1));
   assert.deepEqual(env.cancelled, []);
   assert.deepEqual(env.erased, []);
-  assert.equal(env.sentMessages.length, 1);
-  assert.equal(env.sentMessages[0].url, "http://127.0.0.1/file.zip");
+  assert.equal(env.sentMessages.length, 2);
+  assert.equal(env.sentMessages[1].url, "http://127.0.0.1/file.zip");
   assert.equal(env.storage.lastHandoff.ok, true);
 });

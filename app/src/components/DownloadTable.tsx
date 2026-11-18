@@ -52,6 +52,9 @@ function descriptionFor(d: DownloadRow): string {
   if (d.scan_status === 'infected') {
     return `Threat found${d.scan_detail ? `: ${d.scan_detail}` : ''}`
   }
+  // Round 71 (D4) — a Finished row whose file was deleted
+  // outside the app must say so, not pretend it can be opened.
+  if (d.status === 'complete' && d.file_missing) return 'File missing from disk'
   return ''
 }
 
@@ -169,7 +172,7 @@ export function DownloadTable({
   }
 
   return (
-    <div className="relative">
+    <div className="relative bg-[#0B0F24]">
       <table className="w-full border-collapse text-base" aria-label="Downloads">
         <thead className="sticky top-0 bg-surface">
           <tr className="border-b border-border text-left text-xs font-semibold uppercase text-text-muted">

@@ -345,6 +345,35 @@
     video.addEventListener("mouseleave", scheduleHide);
   });
 
+  // Round 71 (A4) — the button must appear even when the mouse
+  // is ALREADY over the video when this script is injected (the
+  // user clicks the context menu while hovering the player, so
+  // no fresh mouseenter ever fires — the Round 70 retest hovered
+  // and saw nothing). Two fixes:
+  //   1. document-level mouseover delegation (mouseenter does
+  //      not bubble, mouseover does): any video in the map shows
+  //      the button when the pointer moves over it, including
+  //      videos added after injection;
+  //   2. show the button immediately for the first video with
+  //      variants, so a video page shows it without any hover.
+  // The button is NEVER gated on native-host health (a dead host
+  // must not hide it — the user still sees the qualities, and
+  // native messaging is re-attempted only when they click a
+  // Download button, in sendVariant).
+  document.addEventListener("mouseover", (e) => {
+    const t = e && e.target;
+    if (t && byElement.has(t)) {
+      clearTimeout(hideTimer);
+      showButton(t);
+    }
+  });
+  for (const [video, variants] of byElement) {
+    if (variants.length > 0) {
+      showButton(video);
+      break;
+    }
+  }
+
   // Keep the button glued to the video while the page scrolls.
   window.addEventListener("scroll", () => {
     if (button && button.style.display !== "none" && currentVideo) {
