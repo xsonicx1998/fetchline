@@ -73,6 +73,25 @@ export function DownloadErrorDialog({
     document.documentElement.setAttribute('data-theme', 'dark')
   }, [])
 
+  // Round 70 — keyboard dismissal: the dialog opens with OK
+  // focused (autoFocus on the button, so Enter confirms at
+  // once) and Escape closes it. The Round 69 retest found OK /
+  // Enter / X / Tab+Enter all "failed" and only Escape worked —
+  // the close paths were correct in code, but the dialog never
+  // took focus (Enter had nowhere to land) and had no Escape
+  // handler of its own (the Escape that worked belonged to the
+  // Add dialog underneath the overlay, which left the overlay
+  // itself open). Both variants (separate window and
+  // main-window overlay) share this component, so both get the
+  // same keys.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') closeDialog()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose, downloadId, message])
+
   // The error alert, once, when the dialog shows.
   useEffect(() => {
     if (soundPlayedRef.current) return
@@ -190,6 +209,7 @@ export function DownloadErrorDialog({
       </div>
       <div className="flex shrink-0 justify-end px-6 pb-5">
         <Button
+          autoFocus
           variant="primary"
           size="md"
           onClick={closeDialog}

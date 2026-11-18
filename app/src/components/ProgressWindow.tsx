@@ -666,8 +666,18 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
             {segments.length > 0 ? (
               <div>
                 <div className="mb-1 flex items-baseline justify-between gap-2">
+                  {/* Round 70 — "Parts (N parts)", not "connections":
+                      the engine splits the largest remaining segment
+                      whenever a connection frees up (dynamic split),
+                      so the part count grows past the connections
+                      setting during a download (e.g. 8 connections
+                      can show 11 parts) while the concurrent
+                      connections never exceed the setting. Calling
+                      the count "connections" made the setting look
+                      ignored in the Round 69 retest (OVH showed
+                      11 with the setting at 8). */}
                   <p className="text-sm font-semibold">
-                    Parts ({segments.length} connection{segments.length === 1 ? '' : 's'})
+                    Parts ({segments.length} part{segments.length === 1 ? '' : 's'})
                   </p>
                   <p className="text-xs text-accent">
                     {segments.filter((s) => s.status === 'done').length}/{segments.length} completed

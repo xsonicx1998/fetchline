@@ -22,6 +22,11 @@ pub struct MockConfig {
     /// When true, the server answers HEAD with 405 (some servers
     /// refuse HEAD; the probe must fall back to a ranged GET).
     pub head_405: bool,
+    /// When true, the server drops HEAD connections without any
+    /// response (Round 70 — the downet.net file hosts kill HEAD at
+    /// the transport level while GET downloads fine; the probe must
+    /// fall back to a ranged GET, not fail on the HEAD error).
+    pub head_reset: bool,
     /// When set, every request answers with this HTTP status and no body.
     pub fail_status: Option<u16>,
     /// File size in bytes (default 512 KiB; the version bump adds
@@ -44,6 +49,7 @@ impl Default for MockConfig {
             delay: Duration::ZERO,
             hide_length: false,
             head_405: false,
+            head_reset: false,
             fail_status: None,
             size_bytes: None,
             no_etag: false,
@@ -324,6 +330,12 @@ pub fn handle(
         let head =
             "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         let _ = stream.write_all(head.as_bytes());
+        return;
+    }
+    // Dropped HEAD (Round 70): no response at all — the socket just
+    // goes away, so the client sees a connection error, not a status.
+    // The probe must fall back to a ranged GET, not fail on the HEAD.
+    if method == "HEAD" && config.head_reset {
         return;
     }
     // GET failures (probe HEAD still works, so adds succeed).

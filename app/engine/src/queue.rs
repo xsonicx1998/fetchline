@@ -71,8 +71,11 @@ pub fn execute_action(action: &PendingAction) -> Result<()> {
             })?;
             #[cfg(target_os = "windows")]
             {
+                use std::os::windows::process::CommandExt;
                 std::process::Command::new("rasdial")
                     .args([name.as_str(), "/disconnect"])
+                    // Round 70 — no console flash for the hang-up.
+                    .creation_flags(0x0800_0000)
                     .spawn()
                     .map_err(EngineError::from)?;
                 Ok(())
@@ -103,8 +106,11 @@ pub fn execute_action(action: &PendingAction) -> Result<()> {
         "shutdown" => {
             #[cfg(target_os = "windows")]
             {
+                use std::os::windows::process::CommandExt;
                 std::process::Command::new("shutdown")
                     .args(["/s", "/t", "0"])
+                    // Round 70 — no console flash for the shutdown.
+                    .creation_flags(0x0800_0000)
                     .spawn()
                     .map_err(EngineError::from)?;
                 Ok(())
@@ -119,8 +125,11 @@ pub fn execute_action(action: &PendingAction) -> Result<()> {
         "hibernate" => {
             #[cfg(target_os = "windows")]
             {
+                use std::os::windows::process::CommandExt;
                 std::process::Command::new("shutdown")
                     .args(["/h"])
+                    // Round 70 — no console flash for hibernate.
+                    .creation_flags(0x0800_0000)
                     .spawn()
                     .map_err(EngineError::from)?;
                 Ok(())
@@ -146,8 +155,11 @@ pub fn execute_action(action: &PendingAction) -> Result<()> {
 pub(crate) fn open_path(path: &str) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
         std::process::Command::new("cmd")
             .args(["/C", "start", "", path])
+            // Round 70 — no console flash for Open file/folder.
+            .creation_flags(0x0800_0000)
             .spawn()
             .map_err(EngineError::from)?;
     }

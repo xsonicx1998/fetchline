@@ -71,7 +71,15 @@ pub async fn probe_with_cookies(
         ));
     }
 
-    let head = apply_cookies(client.head(url), cookies).send().await?;
+    // Round 70 — a transport-level HEAD failure (the server kills
+    // HEAD outright, ...) falls back to a ranged GET, like the
+    // 405/501/403 fallback below. A 407 that surfaces as a
+    // transport error is handled inside the ranged path, which
+    // walks the same proxy-auth fallback with ranged=true.
+    let head = match apply_cookies(client.head(url), cookies).send().await {
+        Ok(r) => r,
+        Err(_) => return probe_with_ranged_get_cookies(client, url, cookies, proxy).await,
+    };
     let status = head.status();
     if status.as_u16() == 407 {
         return probe_cookies_407_fallback(client, url, cookies, proxy, false).await;
@@ -329,7 +337,7 @@ pub async fn probe_with_proxy(
     // network error. Only on failure, so the fast path pays nothing.
     let head = match apply_auth(client.head(url), auth).send().await {
         Ok(r) => r,
-        Err(e) => {
+        Err(_) => {
             if parsed.scheme() == "https" {
                 if let Some(cfg) = proxy {
                     if cfg.proxy_type == "http" && cfg.username.is_some() {
@@ -357,7 +365,16 @@ pub async fn probe_with_proxy(
                     }
                 }
             }
-            return Err(e.into());
+            // Round 70 — the HEAD itself failed at the transport
+            // level (connection reset, a TLS failure, a server that
+            // kills HEAD outright — the downet.net file hosts do
+            // this while a plain GET downloads fine): a ranged GET
+            // asks the same question another way, exactly like the
+            // 405/501/403 fallback below. Only if the GET fails too
+            // is the address really unreachable — and then the GET's
+            // error is the one reported, since GET is the request a
+            // browser would have made.
+            return probe_with_ranged_get(client, url, auth, proxy).await;
         }
     };
     let status = head.status();

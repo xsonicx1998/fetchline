@@ -1,3 +1,10 @@
+// Round 70 — GUI subsystem on Windows: Chrome spawns a fresh host
+// process for every native message (popup ping, startup settings,
+// every hand-off), and a console-subsystem binary flashes a black
+// console window on every spawn. A GUI-subsystem binary shows no
+// window; stdin/stdout pipes keep working (native messaging uses
+// pipes, not a console).
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 // Fetchline native-messaging host (S13 / F01).
 //
 // The browser extension cannot touch the desktop app's database
@@ -177,6 +184,65 @@ fn is_browser_launch_arg(arg: &str) -> bool {
         || arg.starts_with("--parent-window=")
 }
 
+/// Append one line to the host log, best-effort: the file lives next
+/// to the database (host.log beside app.db). Never stdout — anything
+/// but framed replies on stdout corrupts the native-messaging
+/// protocol. A failed write is silently ignored: logging must never
+/// break the host. Chrome discards the host's stderr, so this file
+/// is the only place a startup or message failure is visible.
+fn log_line(log_path: &std::path::Path, msg: &str) {
+    use std::io::Write as _;
+    if let Some(parent) = log_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+    {
+        let _ = writeln!(f, "[{secs}] {msg}");
+    }
+}
+
+/// Open the store (and the manager built on it) on first use — the
+/// host must answer a ping even when the database cannot be opened.
+/// Round 70: on the user's PC the host died at startup with
+/// exit(1) while the desktop app held app.db, so Chrome reported
+/// "Error when communicating with the native messaging host" and
+/// the real error went to a stderr nobody reads. A failed open is
+/// reported to the caller as a framed error reply, never an exit,
+/// and logged to host.log.
+fn ensure_store(
+    db_path: &std::path::Path,
+    log_path: &std::path::Path,
+    store: &mut Option<Arc<Store>>,
+    manager: &mut Option<Arc<DownloadManager>>,
+) -> Result<(Arc<Store>, Arc<DownloadManager>), String> {
+    if let (Some(s), Some(m)) = (store.as_ref(), manager.as_ref()) {
+        return Ok((Arc::clone(s), Arc::clone(m)));
+    }
+    match Store::open(db_path) {
+        Ok(opened) => {
+            let opened = Arc::new(opened);
+            let mgr = DownloadManager::new(Arc::clone(&opened), 8);
+            *store = Some(Arc::clone(&opened));
+            *manager = Some(Arc::clone(&mgr));
+            Ok((opened, mgr))
+        }
+        Err(e) => {
+            let msg = format!("cannot open database {}: {e}", db_path.display());
+            log_line(log_path, &format!("fetchline-host: {msg}"));
+            Err(msg)
+        }
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let parsed = match parse_host_args(std::env::args().skip(1)) {
@@ -193,17 +259,16 @@ async fn main() {
     }
 
     let db_path = resolve_db_path(parsed.db_path);
-    let store = match Store::open(&db_path) {
-        Ok(s) => Arc::new(s),
-        Err(e) => {
-            // The extension gets no reply if we die here — but
-            // writing a framed error to stdout would corrupt the
-            // protocol, so stderr is the only channel left.
-            eprintln!("fetchline-host: cannot open database {}: {e}", db_path.display());
-            std::process::exit(1);
-        }
-    };
-    let manager = DownloadManager::new(Arc::clone(&store), 8);
+    // Round 70 — the host log lives next to the database.
+    let log_path = db_path.with_file_name("host.log");
+    log_line(
+        &log_path,
+        &format!("fetchline-host: started (db {})", db_path.display()),
+    );
+    // Round 70 — the store opens lazily, on the first message that
+    // needs it. A ping is answered with no store at all.
+    let mut store: Option<Arc<Store>> = None;
+    let mut manager: Option<Arc<DownloadManager>> = None;
 
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
@@ -234,37 +299,64 @@ async fn main() {
                     continue;
                 }
                 eprintln!("fetchline-host: bad native message: {e}");
+                log_line(
+                    &log_path,
+                    &format!("fetchline-host: bad native message: {e}"),
+                );
                 break;
             }
         };
         let msg: std::result::Result<HostMessage, _> = serde_json::from_value(value);
+        // Round 70 — ping is store-free: the popup's connectivity
+        // check must succeed even when the database cannot be
+        // opened, so the extension reports the real problem instead
+        // of "Error when communicating with the native messaging
+        // host".
+        if let Ok(HostMessage::Ping) = &msg {
+            let reply = serde_json::json!({"type": "pong", "ok": true});
+            if write_message(&mut output, &reply).is_err() {
+                break; // stdout closed: the browser is gone
+            }
+            let _ = output.flush();
+            continue;
+        }
         let reply_value = match msg {
             Ok(HostMessage::DownloadAll { page_url, links }) if links.is_empty() => {
                 // No links supplied: expand the page with the engine
                 // (fetch + probe), then enqueue what it found.
-                match manager.enqueue_page_links(&page_url).await {
-                    Ok(n) => {
-                        let pending = store
-                            .list_pending_links(Some("pending"))
-                            .map(|rows| rows.len())
-                            .unwrap_or(0);
-                        serde_json::json!({
-                            "type": "queued", "ok": true, "enqueued": n,
-                            "pending_count": pending,
-                            "message": format!("Queued {n} link(s) from the page"),
-                        })
-                    }
+                match ensure_store(&db_path, &log_path, &mut store, &mut manager) {
+                    Ok((store, manager)) => match manager.enqueue_page_links(&page_url).await {
+                        Ok(n) => {
+                            let pending = store
+                                .list_pending_links(Some("pending"))
+                                .map(|rows| rows.len())
+                                .unwrap_or(0);
+                            serde_json::json!({
+                                "type": "queued", "ok": true, "enqueued": n,
+                                "pending_count": pending,
+                                "message": format!("Queued {n} link(s) from the page"),
+                            })
+                        }
+                        Err(e) => serde_json::json!({
+                            "type": "error", "ok": false, "error": e.to_string(),
+                        }),
+                    },
                     Err(e) => serde_json::json!({
-                        "type": "error", "ok": false, "error": e.to_string(),
+                        "type": "error", "ok": false, "error": e,
                     }),
                 }
             }
-            Ok(m) => {
-                let reply = handle_host_message(&store, &m);
-                serde_json::to_value(reply).unwrap_or_else(|_| {
-                    serde_json::json!({"type": "error", "ok": false, "error": "Could not serialise the reply"})
-                })
-            }
+            Ok(m) => match ensure_store(&db_path, &log_path, &mut store, &mut manager) {
+                Ok((store, _)) => {
+                    let reply = handle_host_message(&store, &m);
+                    serde_json::to_value(reply).unwrap_or_else(|_| {
+                        serde_json::json!({"type": "error", "ok": false, "error": "Could not serialise the reply"})
+                    })
+                }
+                Err(e) => serde_json::json!({
+                    "type": "error", "ok": false, "error": e,
+                }),
+            },
             Err(e) => serde_json::json!({
                 "type": "error", "ok": false,
                 "error": format!("Could not understand the message from the browser: {e}"),

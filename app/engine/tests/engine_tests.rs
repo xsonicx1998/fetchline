@@ -1345,6 +1345,38 @@ async fn probe_falls_back_when_head_refused() {
 }
 
 #[tokio::test]
+async fn probe_falls_back_when_head_drops_connection() {
+    let server = MockServer::start(MockConfig {
+        head_reset: true,
+        ..Default::default()
+    });
+    let client = reqwest::Client::new();
+    // Round 70 — HEAD is killed at the transport level (no status
+    // at all, like the downet.net file hosts): the probe must fall
+    // back to a ranged GET instead of failing on the HEAD error.
+    let info = probe(&client, &server.url).await.unwrap();
+    assert_eq!(info.size, Some(512 * 1024));
+    assert!(info.accept_ranges);
+    assert_eq!(info.etag.as_deref(), Some("\"v1\""));
+}
+
+#[tokio::test]
+async fn probe_with_cookies_falls_back_when_head_drops_connection() {
+    let server = MockServer::start(MockConfig {
+        head_reset: true,
+        ..Default::default()
+    });
+    let client = reqwest::Client::new();
+    // Round 70 — same transport-level HEAD kill on the cookie probe
+    // path (the Add URL dialog's capture probe): ranged GET fallback.
+    let info = fetchline_engine::probe::probe_with_cookies(&client, &server.url, None, None)
+        .await
+        .unwrap();
+    assert_eq!(info.size, Some(512 * 1024));
+    assert!(info.accept_ranges);
+}
+
+#[tokio::test]
 async fn add_download_keeps_unicode_filename() {
     let server = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: false, ..Default::default() });
     let dir = tmpdir();

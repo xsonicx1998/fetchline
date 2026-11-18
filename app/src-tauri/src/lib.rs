@@ -28,6 +28,16 @@ use tauri::{
     WindowEvent,
 };
 
+/// CREATE_NO_WINDOW (Win32): keep spawned console programs invisible
+/// — no console window flashing on the user's screen. Round 70: the
+/// PowerShell sound player and the shutdown/rundll32/reg spawns all
+/// run with this flag; without it every notification sound (and
+/// every failed download, which plays the error sound twice — once
+/// from the engine, once from the error dialog) flashed a black
+/// console window.
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// Shared state: one manager for the whole app lifetime.
 pub struct AppState {
     pub manager: Arc<DownloadManager>,
@@ -1167,8 +1177,11 @@ fn exit_app(app: AppHandle) -> Result<(), String> {
 fn shutdown_computer() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
         std::process::Command::new("shutdown")
             .args(["/s", "/t", "0"])
+            // Round 70 — no console flash for the shutdown call.
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(|e| e.to_string())?;
         Ok(())
@@ -1363,8 +1376,11 @@ fn open_file_with(state: State<'_, AppState>, id: String) -> Result<(), String> 
     }
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
         std::process::Command::new("rundll32.exe")
             .args(["shell32.dll,OpenAs_RunDLL", &row.save_path])
+            // Round 70 — no console flash for the Open With dialog.
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(|e| e.to_string())?;
         Ok(())
@@ -2018,6 +2034,7 @@ fn play_notification_sound(
 }
 #[cfg(target_os = "windows")]
 fn play_wav_with_sound_player(path: &std::path::Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
     let escaped = path.to_string_lossy().replace('\'', "''");
     std::process::Command::new("powershell")
         .args([
@@ -2025,6 +2042,10 @@ fn play_wav_with_sound_player(path: &std::path::Path) -> Result<(), String> {
             "-Command",
             &format!("(New-Object Media.SoundPlayer '{escaped}').PlaySync()"),
         ])
+        // Round 70 — without this the player flashes a black console
+        // window on every sound (a failed download plays the error
+        // sound twice: engine + error dialog).
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -2034,12 +2055,15 @@ fn play_wav_with_sound_player(path: &std::path::Path) -> Result<(), String> {
 /// sound when the built-in chime cannot be written or played.
 #[cfg(target_os = "windows")]
 fn play_default_system_sound() -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
     std::process::Command::new("powershell")
         .args([
             "-NoProfile",
             "-Command",
             "[System.Media.SystemSounds]::Asterisk.Play()",
         ])
+        // Round 70 — see play_wav_with_sound_player: no console flash.
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -2451,9 +2475,6 @@ fn build_system_tray(app: &AppHandle) -> Result<(), String> {
 #[cfg(target_os = "windows")]
 fn register_native_host_best_effort(app: &AppHandle, log: Option<&std::path::Path>) {
     use std::os::windows::process::CommandExt;
-    // CREATE_NO_WINDOW (Win32): keep the reg.exe calls invisible —
-    // no console window flashing on every launch.
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const EXTENSION_ID: &str = "mioamdgogndabpcjbdekggcnlkkfpmbj";
     const FIREFOX_EXTENSION_ID: &str = "fetchline@fetchline.app";
 
@@ -2476,6 +2497,10 @@ fn register_native_host_best_effort(app: &AppHandle, log: Option<&std::path::Pat
     };
     let candidates = [
         exe_dir.join("fetchline-host.exe"),
+        // Round 70 — the portable ZIP ships the host beside the app
+        // exe under its full triple name; the first ZIP missed this
+        // candidate and the extension reported "host not found".
+        exe_dir.join("fetchline-host-x86_64-pc-windows-msvc.exe"),
         exe_dir
             .join("binaries")
             .join("fetchline-host.exe"),

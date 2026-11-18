@@ -4794,6 +4794,19 @@ impl DownloadManager {
         // used to report nothing at all. Pre-age the clock so the
         // first tick checkpoints at once.
         let mut last_checkpoint = Instant::now() - CHECKPOINT_INTERVAL;
+        // Round 70 — the checkpoint persists the speed the main
+        // table polls (1 s), while the progress window gets live
+        // 250 ms emits: checkpointing the single last tick's
+        // instantaneous speed wrote 0 to the DB whenever that
+        // tick had no bytes (bursty flow), so the main list
+        // showed "0 B/s" with a dead ETA while the progress
+        // window showed live speed. The checkpoint now carries
+        // the average over the checkpoint interval instead —
+        // positive whenever any bytes arrived in the last
+        // second. The live emit keeps the instantaneous value
+        // (the progress window already holds it, Round 64).
+        let mut checkpoint_total = total_done(&states);
+        let mut checkpoint_at = Instant::now() - CHECKPOINT_INTERVAL;
         let mut last_emit = Instant::now();
         let mut prev_total = total_done(&states);
         let mut prev_instant = Instant::now();
@@ -4879,7 +4892,18 @@ impl DownloadManager {
                     prev_total = total;
                     prev_instant = now;
                     if last_checkpoint.elapsed() >= CHECKPOINT_INTERVAL {
-                        self.checkpoint(id, &states, speed_bps).await;
+                        // Round 70 — interval average, not the last
+                        // tick's instantaneous speed (see the
+                        // checkpoint baselines above).
+                        let cdt = checkpoint_at.elapsed().as_secs_f64();
+                        let checkpoint_speed = if cdt > 0.0 {
+                            ((total.saturating_sub(checkpoint_total)) as f64 / cdt) as u64
+                        } else {
+                            0
+                        };
+                        checkpoint_total = total;
+                        checkpoint_at = Instant::now();
+                        self.checkpoint(id, &states, checkpoint_speed).await;
                         last_checkpoint = Instant::now();
                     }
                     if last_emit.elapsed() >= PROGRESS_INTERVAL {
@@ -6013,6 +6037,12 @@ fn unique_path(folder: &Path, name: &str, is_taken: &dyn Fn(&Path) -> bool) -> P
 fn play_wav_file(path: &str) -> Result<String> {
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW (Win32): keep the player invisible.
+        // Round 70 — a failed download plays the error sound here
+        // (emit_sound "download_failed") and the visible PowerShell
+        // console flashed on the user's screen.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let escaped = path.replace('\'', "''");
         std::process::Command::new("powershell")
             .args([
@@ -6020,6 +6050,7 @@ fn play_wav_file(path: &str) -> Result<String> {
                 "-Command",
                 &format!("(New-Object Media.SoundPlayer '{escaped}').PlaySync()"),
             ])
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(EngineError::from)?;
         Ok(path.to_string())

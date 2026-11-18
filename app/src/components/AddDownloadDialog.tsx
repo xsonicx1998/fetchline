@@ -112,6 +112,13 @@ export function AddDownloadDialog({
   /** File size from the URL probe, for the cyan size on the
    *  remember-path row; null while unknown / unprobed. */
   const [fileSize, setFileSize] = useState<number | null>(null)
+  /** Round 70 — the debounced probe's failure, shown muted next
+   *  to the size: the probe used to fail silently (size stayed
+   *  blank, no signal at all), so a dead link looked like
+   *  "Start Download did nothing" in the Round 69 retest. This
+   *  is advisory only — the submit re-probes and reports its own
+   *  error — so it is muted text, not the pink submit error. */
+  const [probeError, setProbeError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const urlRef = useRef<HTMLInputElement>(null)
@@ -142,6 +149,7 @@ export function AddDownloadDialog({
       setDescription('')
       setRememberPath(false)
       setFileSize(null)
+      setProbeError(null)
       setError(null)
       setBusy(false)
       folderEdited.current = false
@@ -180,12 +188,14 @@ export function AddDownloadDialog({
         const info: ProbeInfo = await probeUrl(target, initialCookies)
         if (probedUrl.current !== target) return
         setFileSize(info.size ?? null)
+        setProbeError(null)
         if (!userEditedFilename.current && info.filename) {
           setFilename(info.filename)
         }
-      } catch {
+      } catch (e) {
         if (probedUrl.current !== target) return
         setFileSize(null)
+        setProbeError(e instanceof Error ? e.message : String(e))
       }
     }, 500)
     probedUrl.current = target
@@ -559,6 +569,14 @@ export function AddDownloadDialog({
             {fileSize !== null && (
               <span className="shrink-0 text-[13px] font-semibold text-info">
                 {formatBytes(fileSize)}
+              </span>
+            )}
+            {fileSize === null && probeError !== null && (
+              <span
+                className="shrink-0 truncate text-[12px] text-text-muted"
+                title={probeError}
+              >
+                Could not check this link — Start will try again
               </span>
             )}
           </div>
