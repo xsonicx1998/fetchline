@@ -16,12 +16,17 @@ use std::time::Duration;
 
 use fetchline_engine::{
     BatchResult, CategoryRow, DetectedVideo, DownloadManager, DownloadRow, DrainSummary,
-    GrabberProjectRow, HistoryRow, PageLink, PendingAction, ProbeInfo, ProxyConfigInput,
-    ProxyConfigRow, QueueRow, QuotaStatus, RefreshAddressResult, ScanResult, Settings,
-    SiteLoginInput, SiteLoginRow, SoundSetting, SoundSettingInput, Store, SyncResult,
+    GrabberProjectRow, HistoryRow, PageLink, PendingAction, PendingLinkRow, ProbeInfo,
+    ProxyConfigInput, ProxyConfigRow, QueueRow, QuotaStatus, RefreshAddressResult, ScanResult,
+    Settings, SiteLoginInput, SiteLoginRow, SoundSetting, SoundSettingInput, Store, SyncResult,
     UpdateCheckResult,
 };
-use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::menu::{MenuBuilder, MenuEvent, MenuItemBuilder};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{
+    AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+    WindowEvent,
+};
 
 /// Shared state: one manager for the whole app lifetime.
 pub struct AppState {
@@ -844,11 +849,265 @@ async fn open_progress_window(
     let label = progress_window_label(&download_id);
     if let Some(window) = app.get_webview_window(&label) {
         // Already open — bring it forward instead of a second copy.
+        // `show()` first: a window hidden to the tray (Round 65)
+        // does not come back on `set_focus()` alone.
+        let _ = window.show();
         window.set_focus().map_err(|e| e.to_string())?;
         log_startup(log, &format!("progress window {label} already open — focused"));
         return Ok(());
     }
     build_progress_window(&app, &state.manager, &download_id, &state.webview_heartbeats)?;
+    Ok(())
+}
+
+/// Label of a download's "Download complete" dialog window
+/// (Round 66): `complete-<download id>`, mirroring
+/// `progress-<download id>`.
+fn complete_window_label(download_id: &str) -> String {
+    format!("complete-{download_id}")
+}
+
+/// Build one "Download complete" dialog window (Round 66): a
+/// separate OS window like the progress window — same bundle,
+/// frameless with the shared `TitleBar.tsx`, the real Sonic logo
+/// in the title bar (the window icon) — but a dialog, not a
+/// progress view: fixed size (~560x440, the approved mockup),
+/// not resizable, and with no heartbeat registration and no
+/// auto-reload (it is transient — a dead renderer there just
+/// leaves a window the user closes; `main.tsx` sends no
+/// heartbeat for it, so the monitor never sees it). The download
+/// id arrives through an initialization script
+/// (`window.__COMPLETE_ID__`), the same Round 57 mechanism as
+/// the progress window, with the `#complete=<id>` hash as the
+/// fallback.
+fn build_complete_dialog_window(
+    app: &AppHandle,
+    manager: &Arc<DownloadManager>,
+    download_id: &str,
+) -> Result<WebviewWindow, String> {
+    let log = startup_log_path_from_app(app);
+    let log = log.as_deref();
+    let _row = manager
+        .get_download(download_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Download not found: {download_id}"))?;
+    let label = complete_window_label(download_id);
+    let url = WebviewUrl::App("index.html".into());
+    let init_script = format!("window.__COMPLETE_ID__ = {download_id:?};");
+    log_startup(
+        log,
+        &format!("creating complete dialog {label}: index.html (id via init script)"),
+    );
+    // Round 58 (§9.1): share the main window's WebView2
+    // environment instead of creating a fresh one per window —
+    // a fresh environment creation waits unbounded on the main
+    // thread (`wait_with_pump`), the Round 58 wedge. Windows
+    // only; other platforms build exactly as before.
+    #[cfg(target_os = "windows")]
+    let shared_environment = main_webview_environment(app, log);
+    #[cfg(target_os = "windows")]
+    if shared_environment.is_some() {
+        log_startup(
+            log,
+            &format!("complete dialog {label}: sharing main WebView2 environment"),
+        );
+    }
+    let build_started = std::time::Instant::now();
+    let mut builder = WebviewWindowBuilder::new(app, &label, url)
+        .initialization_script(init_script)
+        .title("Download complete")
+        .decorations(false)
+        .inner_size(560.0, 440.0)
+        .min_inner_size(520.0, 400.0)
+        .resizable(false)
+        .center()
+        .devtools(true);
+    #[cfg(target_os = "windows")]
+    if let Some(env) = shared_environment {
+        builder = builder.with_environment(env);
+    }
+    let build_thread_id = std::thread::current().id();
+    log_startup(
+        log,
+        &format!("complete dialog {label}: build() entered on thread {build_thread_id:?}"),
+    );
+    match builder.build() {
+        Ok(window) => {
+            let elapsed_ms = build_started.elapsed().as_millis();
+            log_startup(
+                log,
+                &format!(
+                    "complete dialog {label} created: index.html in {elapsed_ms}ms on thread {build_thread_id:?}"
+                ),
+            );
+            Ok(window)
+        }
+        Err(e) => {
+            let elapsed_ms = build_started.elapsed().as_millis();
+            log_startup(
+                log,
+                &format!(
+                    "complete dialog {label} FAILED to create after {elapsed_ms}ms on thread {build_thread_id:?}: {e}"
+                ),
+            );
+            Err(e.to_string())
+        }
+    }
+}
+
+/// Open (or focus, when it already exists) the "Download
+/// complete" dialog for a finished download (Round 66). The
+/// main window calls this when a download flips to 'complete';
+/// the progress window closes itself at the same moment, so
+/// the dialog replaces it. Errors when the download does not
+/// exist.
+#[tauri::command]
+async fn open_complete_dialog(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    download_id: String,
+) -> Result<(), String> {
+    let log = startup_log_path_from_app(&app);
+    let log = log.as_deref();
+    let label = complete_window_label(&download_id);
+    if let Some(window) = app.get_webview_window(&label) {
+        // Already open — bring it forward instead of a second
+        // copy (the main window and a progress window can both
+        // notice the same completion).
+        let _ = window.show();
+        window.set_focus().map_err(|e| e.to_string())?;
+        log_startup(
+            log,
+            &format!("complete dialog {label} already open — focused"),
+        );
+        return Ok(());
+    }
+    build_complete_dialog_window(&app, &state.manager, &download_id)?;
+    Ok(())
+}
+
+/// Label of a download's "Download failed" dialog window
+/// (Round 68): `error-<download id>`, mirroring
+/// `complete-<download id>`.
+fn error_window_label(download_id: &str) -> String {
+    format!("error-{download_id}")
+}
+
+/// Build one "Download failed" dialog window (Round 68): a
+/// separate OS window like the "Download complete" dialog — the
+/// same bundle, frameless with the shared `TitleBar.tsx`, the
+/// real Sonic logo in the title bar — but the title is the
+/// FILENAME (like IDM's error popup, whose title bar is the
+/// file's name), fixed size (~520x360, the approved mockup),
+/// not resizable, and with no heartbeat registration and no
+/// auto-reload (transient, like the complete dialog). The
+/// download id arrives through an initialization script
+/// (`window.__ERROR_ID__`), with the `#error=<id>` hash as the
+/// fallback.
+fn build_error_dialog_window(
+    app: &AppHandle,
+    manager: &Arc<DownloadManager>,
+    download_id: &str,
+) -> Result<WebviewWindow, String> {
+    let log = startup_log_path_from_app(app);
+    let log = log.as_deref();
+    let row = manager
+        .get_download(download_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Download not found: {download_id}"))?;
+    let label = error_window_label(download_id);
+    let url = WebviewUrl::App("index.html".into());
+    let init_script = format!("window.__ERROR_ID__ = {download_id:?};");
+    log_startup(
+        log,
+        &format!("creating error dialog {label}: index.html (id via init script)"),
+    );
+    // Round 58 (§9.1): share the main window's WebView2
+    // environment instead of creating a fresh one per window —
+    // a fresh environment creation waits unbounded on the main
+    // thread (`wait_with_pump`), the Round 58 wedge. Windows
+    // only; other platforms build exactly as before.
+    #[cfg(target_os = "windows")]
+    let shared_environment = main_webview_environment(app, log);
+    #[cfg(target_os = "windows")]
+    if shared_environment.is_some() {
+        log_startup(
+            log,
+            &format!("error dialog {label}: sharing main WebView2 environment"),
+        );
+    }
+    let build_started = std::time::Instant::now();
+    let mut builder = WebviewWindowBuilder::new(app, &label, url)
+        .initialization_script(init_script)
+        .title(row.filename.clone())
+        .decorations(false)
+        .inner_size(520.0, 360.0)
+        .min_inner_size(480.0, 320.0)
+        .resizable(false)
+        .center()
+        .devtools(true);
+    #[cfg(target_os = "windows")]
+    if let Some(env) = shared_environment {
+        builder = builder.with_environment(env);
+    }
+    let build_thread_id = std::thread::current().id();
+    log_startup(
+        log,
+        &format!("error dialog {label}: build() entered on thread {build_thread_id:?}"),
+    );
+    match builder.build() {
+        Ok(window) => {
+            let elapsed_ms = build_started.elapsed().as_millis();
+            log_startup(
+                log,
+                &format!(
+                    "error dialog {label} created: index.html in {elapsed_ms}ms on thread {build_thread_id:?}"
+                ),
+            );
+            Ok(window)
+        }
+        Err(e) => {
+            let elapsed_ms = build_started.elapsed().as_millis();
+            log_startup(
+                log,
+                &format!(
+                    "error dialog {label} FAILED to create after {elapsed_ms}ms on thread {build_thread_id:?}: {e}"
+                ),
+            );
+            Err(e.to_string())
+        }
+    }
+}
+
+/// Open (or focus, when it already exists) the "Download
+/// failed" dialog for a failed download (Round 68). The main
+/// window calls this when a download flips to 'error'; the
+/// progress window stays open behind it (IDM shows the same
+/// popup over its progress window), and pressing OK returns
+/// there — Resume continues from where the download stopped.
+/// Errors when the download does not exist.
+#[tauri::command]
+async fn open_error_dialog(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    download_id: String,
+) -> Result<(), String> {
+    let log = startup_log_path_from_app(&app);
+    let log = log.as_deref();
+    let label = error_window_label(&download_id);
+    if let Some(window) = app.get_webview_window(&label) {
+        // Already open — bring it forward instead of a second
+        // copy (the main window can notice the same failure
+        // twice across polls).
+        let _ = window.show();
+        window.set_focus().map_err(|e| e.to_string())?;
+        log_startup(
+            log,
+            &format!("error dialog {label} already open — focused"),
+        );
+        return Ok(());
+    }
+    build_error_dialog_window(&app, &state.manager, &download_id)?;
     Ok(())
 }
 
@@ -1085,6 +1344,35 @@ fn quarantine_download(state: State<'_, AppState>, id: String) -> Result<String,
 #[tauri::command]
 fn open_file(state: State<'_, AppState>, id: String) -> Result<(), String> {
     state.manager.open_file(&id).map_err(|e| e.to_string())
+}
+
+/// Round 65 — "Open with..." (right-click menu): show the Windows
+/// "Open with" dialog for a download's file, via
+/// `rundll32 shell32.dll,OpenAs_RunDLL <path>`. The file must
+/// exist on disk. Windows only; anywhere else it is an error and
+/// the menu item is disabled by the frontend's state rules.
+#[tauri::command]
+fn open_file_with(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let row = state
+        .manager
+        .get_download(&id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Download not found: {id}"))?;
+    if !std::path::Path::new(&row.save_path).exists() {
+        return Err(format!("File not found: {}", row.save_path));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("rundll32.exe")
+            .args(["shell32.dll,OpenAs_RunDLL", &row.save_path])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("Open with is only available on Windows".to_string())
+    }
 }
 
 #[tauri::command]
@@ -1565,6 +1853,306 @@ async fn test_sound_file(state: State<'_, AppState>, path: String) -> Result<Str
     state.manager.test_sound_file(&path).map_err(|e| e.to_string())
 }
 
+/// Round 66 — the built-in "Download complete" chime,
+/// synthesized at runtime (no binary asset to ship through the
+/// connector, which cannot push binaries): two sine tones —
+/// A5 (880 Hz) for 0.22 s, then D6 (1174.66 Hz) for 0.32 s —
+/// 22050 Hz 16-bit mono PCM with a short attack and an
+/// exponential decay, so it sounds like a chime, not a beep.
+/// The bytes are deterministic: the same code always makes the
+/// same WAV.
+fn builtin_complete_wav() -> Vec<u8> {
+    const SAMPLE_RATE: u32 = 22_050;
+    const TONES: [(f64, f64); 2] = [(880.0, 0.22), (1174.66, 0.32)];
+    let mut samples: Vec<i16> = Vec::new();
+    for (freq, seconds) in TONES {
+        let count = (seconds * SAMPLE_RATE as f64) as usize;
+        for n in 0..count {
+            let t = n as f64 / SAMPLE_RATE as f64;
+            // 10 ms linear attack, then exponential decay —
+            // no click at the start, no abrupt cut at the end.
+            let attack = (t / 0.01).min(1.0);
+            let decay = (-3.0 * t / seconds).exp();
+            let value = (freq * 2.0 * std::f64::consts::PI * t).sin() * attack * decay;
+            samples.push((value * 0.8 * i16::MAX as f64) as i16);
+        }
+    }
+    let data_len = (samples.len() * 2) as u32;
+    let mut wav = Vec::with_capacity(44 + data_len as usize);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVE");
+    wav.extend_from_slice(b"fmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+    wav.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
+    wav.extend_from_slice(&(SAMPLE_RATE * 2).to_le_bytes()); // byte rate
+    wav.extend_from_slice(&2u16.to_le_bytes()); // block align
+    wav.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    for sample in samples {
+        wav.extend_from_slice(&sample.to_le_bytes());
+    }
+    wav
+}
+
+/// Round 68 — the built-in "Download failed" alert, synthesized
+/// at runtime exactly like `builtin_complete_wav()` (same sample
+/// rate, same attack/decay envelope, deterministic bytes) but
+/// DESCENDING, so the ear tells failure from completion at once:
+/// 740 Hz for 0.16 s, then 494 Hz for 0.32 s. The user heard this
+/// render (`workspace/sonic-error-alert.wav`) and approved it over
+/// the Windows error sounds.
+fn builtin_error_wav() -> Vec<u8> {
+    const SAMPLE_RATE: u32 = 22_050;
+    const TONES: [(f64, f64); 2] = [(740.0, 0.16), (494.0, 0.32)];
+    let mut samples: Vec<i16> = Vec::new();
+    for (freq, seconds) in TONES {
+        let count = (seconds * SAMPLE_RATE as f64) as usize;
+        for n in 0..count {
+            let t = n as f64 / SAMPLE_RATE as f64;
+            // 10 ms linear attack, then exponential decay —
+            // no click at the start, no abrupt cut at the end.
+            let attack = (t / 0.01).min(1.0);
+            let decay = (-3.0 * t / seconds).exp();
+            let value = (freq * 2.0 * std::f64::consts::PI * t).sin() * attack * decay;
+            samples.push((value * 0.8 * i16::MAX as f64) as i16);
+        }
+    }
+    let data_len = (samples.len() * 2) as u32;
+    let mut wav = Vec::with_capacity(44 + data_len as usize);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVE");
+    wav.extend_from_slice(b"fmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+    wav.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
+    wav.extend_from_slice(&(SAMPLE_RATE * 2).to_le_bytes()); // byte rate
+    wav.extend_from_slice(&2u16.to_le_bytes()); // block align
+    wav.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    for sample in samples {
+        wav.extend_from_slice(&sample.to_le_bytes());
+    }
+    wav
+}
+
+/// Round 68 — one shared playback path for both notification
+/// sounds (completion + error). Order: (0) the master sounds
+/// switch in Settings — off means silence, no matter what else
+/// is configured; (1) when the user configured a sound for the
+/// event, the engine already played it at the event
+/// (manager.rs `emit_sound`), so this is a no-op and the sound
+/// never plays twice; (2) a bundled asset for the event
+/// (`tada.wav` for completion — shipped in the app so nothing
+/// external is needed), resolved from the Tauri resources and
+/// played straight from there; (3) the synthesized built-in,
+/// written to the app data dir (temp dir when that is
+/// unavailable) and played with the SoundPlayer; (4) when that
+/// fails, the Windows default Asterisk sound. Best-effort — a
+/// failure is an error to the caller, and the dialogs swallow
+/// it (a silent dialog is better than an error banner).
+/// Windows only, like every other sound in the app.
+#[cfg(target_os = "windows")]
+fn play_notification_sound(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    event: &str,
+    builtin_asset: Option<&str>,
+    builtin_file: &str,
+    builtin_wav: Vec<u8>,
+    builtin_desc: &str,
+) -> Result<String, String> {
+    if let Ok(settings) = state.manager.get_settings() {
+        if !settings.sounds_enabled {
+            return Ok("sounds are turned off in Settings".to_string());
+        }
+    }
+    if let Ok(Some(file)) = state.manager.resolve_sound(event) {
+        if std::path::Path::new(&file).is_file() {
+            return Ok(format!(
+                "user-configured {event} sound (already played by the engine)"
+            ));
+        }
+    }
+    if let Some(asset) = builtin_asset {
+        if let Ok(path) = app
+            .path()
+            .resolve(asset, tauri::path::BaseDirectory::Resource)
+        {
+            if path.is_file() {
+                return match play_wav_with_sound_player(&path) {
+                    Ok(()) => Ok(format!("bundled {asset}")),
+                    Err(_) => play_default_system_sound().map(|()| {
+                        "Windows default sound (bundled sound could not play)".to_string()
+                    }),
+                };
+            }
+        }
+    }
+    let dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let path = dir.join(builtin_file);
+    if std::fs::create_dir_all(&dir)
+        .and_then(|()| std::fs::write(&path, builtin_wav))
+        .is_err()
+    {
+        // Writing the built-in failed — fall back to the
+        // Windows default sound instead of silence.
+        return play_default_system_sound().map(|()| {
+            "Windows default sound (built-in sound could not be written)".to_string()
+        });
+    }
+    match play_wav_with_sound_player(&path) {
+        Ok(()) => Ok(builtin_desc.to_string()),
+        Err(_) => play_default_system_sound()
+            .map(|()| "Windows default sound (built-in sound could not play)".to_string()),
+    }
+}
+#[cfg(target_os = "windows")]
+fn play_wav_with_sound_player(path: &std::path::Path) -> Result<(), String> {
+    let escaped = path.to_string_lossy().replace('\'', "''");
+    std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            &format!("(New-Object Media.SoundPlayer '{escaped}').PlaySync()"),
+        ])
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Windows default Asterisk sound, the last-resort completion
+/// sound when the built-in chime cannot be written or played.
+#[cfg(target_os = "windows")]
+fn play_default_system_sound() -> Result<(), String> {
+    std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "[System.Media.SystemSounds]::Asterisk.Play()",
+        ])
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Round 66 — play the completion sound when the "Download
+/// complete" dialog shows. Round 68: the built-in is the bundled
+/// Windows "tada" (`assets/tada.wav`, shipped in the app), with
+/// the synthesized chime as the fallback when the asset is
+/// missing — the user picked tada and ordered it bundled so
+/// nothing external is needed. The shared
+/// `play_notification_sound` helper owns the order (master
+/// switch → user-configured file → bundled tada → chime →
+/// Windows default).
+#[tauri::command]
+async fn play_completion_sound(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        play_notification_sound(
+            &app,
+            &state,
+            "download_complete",
+            Some("tada.wav"),
+            "complete.wav",
+            builtin_complete_wav(),
+            "built-in download-complete chime",
+        )
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (&app, &state);
+        Err("Sound playback is only available on Windows".to_string())
+    }
+}
+
+/// Round 68 — play the error alert when the "Download failed"
+/// dialog shows. Same shared path as the completion sound: the
+/// master switch, then the user-configured `download_failed`
+/// file (the engine already played it), then the synthesized
+/// descending alert, then the Windows default sound.
+#[tauri::command]
+async fn play_error_sound(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        play_notification_sound(
+            &app,
+            &state,
+            "download_failed",
+            None,
+            "error.wav",
+            builtin_error_wav(),
+            "built-in download-failed alert",
+        )
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (&app, &state);
+        Err("Sound playback is only available on Windows".to_string())
+    }
+}
+
+/// Round 68 — taskbar progress (Windows): show the overall
+/// download progress on the main window's taskbar button, and
+/// put the file / speed / time-left summary in the native window
+/// title — that is what the taskbar tooltip shows (Windows has
+/// no API for a custom taskbar tooltip). `progress` is 0–100 or
+/// None to clear the bar; `status` is "normal" | "paused" |
+/// "error". The frontend calls this from App.tsx whenever the
+/// rounded percent or the summary text changes — never more than
+/// once per refresh poll. Best-effort: a missing main window is
+/// a no-op, and every call is swallowed by the caller.
+#[tauri::command]
+fn set_taskbar_progress(
+    app: AppHandle,
+    progress: Option<u64>,
+    status: Option<String>,
+    title: Option<String>,
+) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("main") else {
+        return Ok(());
+    };
+    let state = match (progress, status.as_deref()) {
+        (Some(p), Some("paused")) => tauri::window::ProgressBarState {
+            status: Some(tauri::window::ProgressBarStatus::Paused),
+            progress: Some(p.min(100)),
+            desktop_filename: None,
+        },
+        (Some(p), Some("error")) => tauri::window::ProgressBarState {
+            status: Some(tauri::window::ProgressBarStatus::Error),
+            progress: Some(p.min(100)),
+            desktop_filename: None,
+        },
+        (Some(p), _) => tauri::window::ProgressBarState {
+            status: Some(tauri::window::ProgressBarStatus::Normal),
+            progress: Some(p.min(100)),
+            desktop_filename: None,
+        },
+        (None, _) => tauri::window::ProgressBarState {
+            status: Some(tauri::window::ProgressBarStatus::None),
+            progress: None,
+            desktop_filename: None,
+        },
+    };
+    let _ = window.set_progress_bar(state);
+    if let Some(title) = title {
+        let _ = window.set_title(&title);
+    }
+    Ok(())
+}
+
 /// Change a category's save folder and/or file extensions
 /// (S09 Save To + File Types tabs).
 #[tauri::command]
@@ -1615,11 +2203,102 @@ async fn check_for_updates(state: State<'_, AppState>) -> Result<UpdateCheckResu
 /// `add_download` path. Milestone 2: the drain STARTS each created
 /// download at once when `settings.browser_start_drained` is on
 /// (the default); with it off the downloads are left `queued`.
+/// Round 67: the drain only handles 'download_all' rows now —
+/// 'browser' and 'video' captures are interactive and wait for
+/// the Add URL dialog (`confirm_pending_link`).
 #[tauri::command]
 async fn drain_pending_links(state: State<'_, AppState>) -> Result<DrainSummary, String> {
     state
         .manager
         .drain_pending_links()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Round 67 — the Add URL dialog's queue: pending
+/// browser-extension rows, oldest first. The app polls these and
+/// opens the dialog for each browser/video capture in turn.
+#[tauri::command]
+fn list_pending_links(state: State<'_, AppState>) -> Result<Vec<PendingLinkRow>, String> {
+    state.manager.list_pending_links().map_err(|e| e.to_string())
+}
+
+/// Round 67 — decide one pending row from the Add URL dialog:
+/// 'accepted' with the created download id, or 'rejected' with
+/// the reason (Cancel / close dismisses a capture).
+#[tauri::command]
+fn resolve_pending_link(
+    state: State<'_, AppState>,
+    id: String,
+    status: String,
+    download_id: Option<String>,
+    error: Option<String>,
+) -> Result<(), String> {
+    state
+        .manager
+        .resolve_pending_link(&id, &status, download_id.as_deref(), error.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+/// Round 67 — probe a URL for the Add URL dialog (file size and
+/// name, for the cyan size on the remember-path row). `cookies`
+/// is a browser capture's stored cookies JSON, or `None` — a
+/// cookie-gated link probes 401 without them.
+#[tauri::command]
+async fn probe_url(
+    state: State<'_, AppState>,
+    url: String,
+    cookies: Option<String>,
+) -> Result<ProbeInfo, String> {
+    state
+        .manager
+        .probe_url_for_capture(&url, cookies.as_deref())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Round 67 — set the Add URL dialog's Description note on a
+/// download (`None` / empty clears it).
+#[tauri::command]
+fn set_download_description(
+    state: State<'_, AppState>,
+    id: String,
+    description: Option<String>,
+) -> Result<(), String> {
+    state
+        .manager
+        .set_download_description(&id, description.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+/// Round 67 — confirm one pending browser/video capture through
+/// the real add path, with the Add URL dialog's choices (like
+/// IDM: the download only starts when the user presses Start
+/// Download). The row's cookies ride the probe and the segments;
+/// the speed cap is applied before the start.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn confirm_pending_link(
+    state: State<'_, AppState>,
+    id: String,
+    filename: Option<String>,
+    folder: Option<String>,
+    category: Option<String>,
+    queue: Option<String>,
+    speed_limit_kbps: Option<i64>,
+    start_now: bool,
+) -> Result<(String, ProbeInfo), String> {
+    state
+        .manager
+        .confirm_pending_link(
+            &id,
+            filename,
+            folder,
+            category,
+            queue,
+            speed_limit_kbps,
+            start_now,
+        )
         .await
         .map_err(|e| e.to_string())
 }
@@ -1693,6 +2372,64 @@ async fn list_grabber_projects(state: State<'_, AppState>) -> Result<Vec<Grabber
     state.manager.list_grabber_projects().map_err(|e| e.to_string())
 }
 
+/// Round 65 — system tray, like IDM: a tray icon (the app logo)
+/// lives by the clock while the app runs. Left-click shows the
+/// main window again; right-click opens the menu (Show / Exit).
+/// The menu events live here so the tray works even when every
+/// window is hidden. Built best-effort in setup: if the icon or
+/// the tray cannot be created the app still runs — the tray is a
+/// convenience, not a requirement.
+fn build_system_tray(app: &AppHandle) -> Result<(), String> {
+    let Some(icon) = app.default_window_icon() else {
+        return Err("no default window icon for the tray".to_string());
+    };
+    let menu = MenuBuilder::new(app)
+        .items(&[
+            &MenuItemBuilder::with_id("tray-show", "Show")
+                .build(app)
+                .map_err(|e| e.to_string())?,
+            &MenuItemBuilder::with_id("tray-exit", "Exit")
+                .build(app)
+                .map_err(|e| e.to_string())?,
+        ])
+        .build()
+        .map_err(|e| e.to_string())?;
+    TrayIconBuilder::new()
+        .menu(&menu)
+        .icon(icon.clone())
+        .tooltip("Sonic Manager")
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event: MenuEvent| match event.id().as_ref() {
+            "tray-show" => {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+            "tray-exit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            // Left-click (release) shows the main window again.
+            // Right-click pops the menu (handled by the tray
+            // itself); no action is needed here for it.
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                if let Some(window) = tray.app_handle().get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        })
+        .build(app)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // BUG-029: a panic on the main thread exits silently in a
@@ -1764,6 +2501,9 @@ pub fn run() {
     // panic); it used to be reported as "run failed" by the
     // Builder::run wrapper, which this split replaces.
     let app = match tauri::Builder::default()
+        // Round 67 — the Add URL dialog's "..." browse button
+        // needs the native folder picker.
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let log = startup_log_path_from_app(app.handle());
             let log = log.as_deref();
@@ -2131,8 +2871,29 @@ pub fn run() {
                 }
                 None => log_startup(log, "main window not found in setup"),
             }
+            // Round 65 — system tray (best-effort): a tray failure
+            // must never fail startup — the app runs fine without
+            // it, the windows just cannot hide to the tray.
+            match build_system_tray(app.handle()) {
+                Ok(()) => log_startup(log, "system tray built"),
+                Err(e) => log_startup(log, &format!("system tray unavailable: {e}")),
+            }
             log_startup(log, "setup ok");
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // Round 65 — the MAIN window never really closes: its
+            // X (and Alt+F4 / taskbar Close) hides it to the tray
+            // instead, like IDM. The tray menu's Exit is the way
+            // out (`app.exit`, not a window close). Progress
+            // windows keep the default close behaviour — their X
+            // closes just the window, the download keeps running.
+            if window.label() == "main" {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    let _ = window.hide();
+                    api.prevent_close();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             add_download,
@@ -2145,6 +2906,8 @@ pub fn run() {
             retry_now,
             open_folder,
             open_progress_window,
+            open_complete_dialog,
+            open_error_dialog,
             set_download_completion_options,
             get_download_completion_options,
             exit_app,
@@ -2158,6 +2921,7 @@ pub fn run() {
             test_antivirus_scanner,
             quarantine_download,
             open_file,
+            open_file_with,
             delete_download,
             list_downloads,
             list_download_history,
@@ -2210,7 +2974,15 @@ pub fn run() {
             get_sound_settings,
             save_sound_settings,
             test_sound_file,
-            update_category
+            play_completion_sound,
+            play_error_sound,
+            set_taskbar_progress,
+            update_category,
+            list_pending_links,
+            resolve_pending_link,
+            probe_url,
+            set_download_description,
+            confirm_pending_link,
         ])
         .build(tauri::generate_context!())
     {

@@ -199,8 +199,8 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
 
   function validate(): string | null {
     if (!settings) return 'Settings are still loading.'
-    if (settings.max_connections < 1 || settings.max_connections > 16) {
-      return 'Connections per download must be between 1 and 16.'
+    if (settings.max_connections < 1 || settings.max_connections > 32) {
+      return 'Connections per download must be between 1 and 32.'
     }
     if (settings.connection_timeout_secs < 1 || settings.connection_timeout_secs > 300) {
       return 'The connection timeout must be between 1 and 300 seconds.'
@@ -556,6 +556,22 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                 double-clicking a download opens its window again. Off leaves the table as the
                 only progress view.
               </p>
+              <label className="flex items-center gap-2 text-base">
+                <input
+                  type="checkbox"
+                  checked={settings.show_download_complete_dialog}
+                  onChange={(e) => set('show_download_complete_dialog', e.target.checked)}
+                  className="h-4 w-4 accent-accent"
+                />
+                Show the &ldquo;Download complete&rdquo; dialog when a download finishes
+              </label>
+              <p className={hintCls}>
+                On (the default), a finished download closes its progress window and shows a
+                small dialog with the file, size, address and save path, and buttons to open
+                it. Off leaves the progress window open with its Open file / Open folder
+                buttons. The dialog&apos;s own &ldquo;Don&apos;t show this dialog again&rdquo;
+                checkbox turns this off.
+              </p>
               <div>
                 <label htmlFor="set-excluded" className={labelCls}>
                   Excluded sites
@@ -696,13 +712,13 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
             <div className="flex flex-col gap-4">
               <div>
                 <label htmlFor="set-connections" className={labelCls}>
-                  Connections per download <span className="font-normal text-text-muted">(1–16)</span>
+                  Connections per download <span className="font-normal text-text-muted">(1–32)</span>
                 </label>
                 <input
                   id="set-connections"
                   type="number"
                   min={1}
-                  max={16}
+                  max={32}
                   value={settings.max_connections}
                   onChange={(e) => set('max_connections', Number(e.target.value) || 0)}
                   className={inputCls}
@@ -1441,6 +1457,22 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
             </div>
           ) : (
             <div className="flex flex-col gap-4">
+              {/* Round 68 — master sounds switch: off silences
+                  both the completion sound and the error alert,
+                  including any WAVs set below. */}
+              <label className="flex cursor-pointer items-center gap-2 text-base">
+                <input
+                  type="checkbox"
+                  checked={settings.sounds_enabled}
+                  onChange={(e) => set('sounds_enabled', e.target.checked)}
+                  className="h-4 w-4 accent-accent"
+                />
+                Play notification sounds
+              </label>
+              <p className={hintCls}>
+                The completion sound and the download-failed alert. Turned off, Sonic Manager stays
+                silent — no built-in sound and no WAV below plays.
+              </p>
               <p className="text-sm text-text-muted">
                 A sound for each event. Pick a WAV file per event and turn it on; the sound plays
                 when the event happens. Sounds play on Windows only — on this Linux build the Test

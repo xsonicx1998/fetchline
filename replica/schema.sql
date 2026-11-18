@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS downloads (
   url TEXT NOT NULL,
   final_url TEXT,                    -- after redirects
   filename TEXT NOT NULL,
+  description TEXT,                -- Round 67 (2026-11-18): the Add URL dialog's Description field (IDM's Download File Info has one)
   save_path TEXT NOT NULL,           -- final path (without .part)
   category_id TEXT NOT NULL REFERENCES categories(id) ON DELETE RESTRICT,
   queue_id TEXT REFERENCES queues(id) ON DELETE SET NULL,
@@ -196,6 +197,16 @@ CREATE TABLE IF NOT EXISTS settings (
   -- progress window when a download starts (default); 0 = the
   -- table is the only progress view (double-click still opens it).
   show_progress_window INTEGER NOT NULL DEFAULT 1,
+  -- "Download complete" dialog (Round 66, 2026-11-18): 1 = when
+  -- a download finishes, its progress window closes and a
+  -- separate dialog shows the file, size, URL and save path
+  -- (default); 0 = no dialog, the progress window stays open.
+  show_download_complete_dialog INTEGER NOT NULL DEFAULT 1,
+  -- Notification sounds (Round 68, 2026-11-18): the master
+  -- on/off switch for the completion sound and the error alert
+  -- (default on); 0 silences both the built-in sounds and any
+  -- user-configured WAVs.
+  sounds_enabled INTEGER NOT NULL DEFAULT 1,
   antivirus_command TEXT,             -- NULL = no scanner configured
   -- Antivirus hook (S14, 2026-11-15): the on/off switch for the
   -- scan (default on — the command being empty still means no

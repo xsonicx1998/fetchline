@@ -30,38 +30,86 @@ h1 {
   font-weight: 600;
 }
 
-.status { margin: 0; font-size: 13px; color: #AAB4D0; }
-.status-ok { color: #32d583; }
-.status-bad { color: #F02DCD; }
+/* Round 68 (popup v2) — the connection pill, the developer card
+   and the Facebook circle, from the approved mockup
+   (workspace/extension-popup-preview.html). */
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 0;
+  padding: 2px 9px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #AAB4D0;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+}
+.status .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #AAB4D0;
+}
+.status-ok { color: #32d583; background: rgba(50, 213, 131, 0.12); border-color: rgba(50, 213, 131, 0.35); }
+.status-ok .dot { background: #32d583; box-shadow: 0 0 8px #32d583; }
+.status-bad { color: #F02DCD; background: rgba(240, 45, 205, 0.12); border-color: rgba(240, 45, 205, 0.35); }
+.status-bad .dot { background: #F02DCD; box-shadow: 0 0 8px #F02DCD; }
 
-main { display: flex; flex-direction: column; gap: 12px; }
+main { display: flex; flex-direction: column; gap: 14px; }
 
-.row {
+.dev-card {
   display: flex;
-  justify-content: space-between;
   align-items: center;
   gap: 12px;
-  cursor: pointer;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
 }
-
-.row input { width: 18px; height: 18px; accent-color: #8B20FF; }
-.row input:disabled { cursor: not-allowed; }
-
-button {
-  padding: 8px 12px;
-  border: 0;
-  border-radius: 8px;
-  font: inherit;
-  font-weight: 600;
+.dev-card .avatar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  font-size: 18px;
+  font-weight: 800;
   color: #FFFFFF;
-  background: #8B20FF;
-  box-shadow: 0 0 12px rgba(139, 32, 255, .60);
-  cursor: pointer;
+  background: linear-gradient(135deg, #8B20FF, #00C8FF 60%, #F02DCD);
 }
-button:hover { background: #a44dff; }
-button:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; }
-button.secondary { color: #FFFFFF; background: #1a2342; box-shadow: none; }
-button.secondary:hover { background: #202a4d; }
+.dev-card .who { flex: 1; min-width: 0; }
+.dev-card .who .label { font-size: 11.5px; letter-spacing: 0.3px; color: #AAB4D0; }
+.dev-card .who .name { font-size: 15px; font-weight: 700; color: #FFFFFF; }
+.dev-card .fb {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  font-family: Arial, sans-serif;
+  font-size: 22px;
+  font-weight: 800;
+  text-decoration: none;
+  color: #FFFFFF;
+  background: #1877F2;
+  box-shadow: 0 0 14px rgba(24, 119, 242, 0.55);
+}
+.dev-card .fb:hover { filter: brightness(1.15); }
 
-.note { margin: 0; font-size: 13px; line-height: 18px; color: #AAB4D0; }
+.note { margin: 0; font-size: 12.5px; line-height: 18px; color: #AAB4D0; text-align: center; }
+.note b { color: #00C8FF; font-weight: 600; }
 .note:empty { display: none; }
+
+.foot {
+  margin: 0;
+  padding: 0 16px 14px;
+  font-size: 11.5px;
+  color: #6E7896;
+  text-align: center;
+}

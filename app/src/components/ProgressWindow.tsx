@@ -77,7 +77,9 @@ function partInfo(
  *  (Cancel restored in Round 63b per the user's decision, after
  *  its Round 63 removal; it cancels the download), and on
  *  completion it offers Open file / Open folder (Round 63)
- *  instead. The title-bar X still closes the window.
+ *  instead. The title-bar X still closes the window — the
+ *  in-page footer Close button was removed in Round 64 per
+ *  the user's decision.
  *
  *  Live feed: the window polls `list_downloads` (the row) and
  *  `get_progress_snapshot` (the latest progress event) every
@@ -136,6 +138,21 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
    *  acted (so the 500 ms poll cannot fire it twice). */
   const prevStatusRef = useRef<string | null>(null)
   const completionActedRef = useRef(false)
+  /** Round 66 — the settings, mirrored so the completion
+   *  effect below reads the freshest value without a stale
+   *  closure (same pattern as the completion-options refs). */
+  const settingsRef = useRef<Settings | null>(null)
+  /** Round 64 — hold the last known speed / ETA while
+   *  downloading: the engine reports an instantaneous
+   *  per-tick speed (250 ms ticks), so a tick with no new
+   *  bytes carries speed 0 and eta null, and the stats row
+   *  flickered between a value and '—'. These refs keep the
+   *  last positive speed / ETA and when it was seen; the
+   *  render holds them for up to 5 s, then the download is
+   *  genuinely idle and the fields show 0 B/s / '—'. */
+  const lastSpeedRef = useRef<number | null>(null)
+  const lastEtaRef = useRef<number | null>(null)
+  const lastSpeedAtRef = useRef(0)
 
   // The window runs the same bundle as the main window. Dark only
   // (Round 45): the stored theme is ignored, the attribute stays
@@ -161,6 +178,9 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
   useEffect(() => {
     shutdownAfterRef.current = shutdownAfter
   }, [shutdownAfter])
+  useEffect(() => {
+    settingsRef.current = settings
+  }, [settings])
 
   // Seed the limiter input when its tab opens, from the freshest
   // row — typing in it must not be clobbered by the 500 ms poll.
@@ -248,6 +268,29 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
     }
   }, [downloadId])
 
+  // Round 64 — raw (unheld) speed / ETA from the latest
+  // snapshot or row. The effect keeps the hold refs fresh: a
+  // positive speed (re)starts the 5 s hold window, and a
+  // non-null ETA is remembered with it. A status other than
+  // 'downloading' clears the hold, so a later run never shows
+  // a stale value from the previous one.
+  const rawSpeed = live?.speed_bps ?? download?.speed_bps
+  const rawEta = live?.eta_seconds ?? download?.eta_seconds
+  useEffect(() => {
+    if (download?.status !== 'downloading') {
+      lastSpeedRef.current = null
+      lastEtaRef.current = null
+      return
+    }
+    if (typeof rawSpeed === 'number' && rawSpeed > 0) {
+      lastSpeedRef.current = rawSpeed
+      lastSpeedAtRef.current = Date.now()
+    }
+    if (rawEta !== null && rawEta !== undefined) {
+      lastEtaRef.current = rawEta
+    }
+  }, [download?.status, rawSpeed, rawEta])
+
   /** Resume polling after the backend-dead banner (§7.3): clear
    *  the stop flag and reset the staleness clock. The interval
    *  is still alive (its ticks no-op while stopped), so the next
@@ -277,7 +320,13 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
    *  the program would stop the shutdown). A download that was
    *  already complete when the window opened does not fire
    *  them: the options were chosen for a run that already
-   *  ended. */
+   *  ended. Round 66: with neither option checked, this window
+   *  closes itself — the main window opens the "Download
+   *  complete" dialog at the same moment, and the dialog
+   *  replaces this window. Suppressed (the dialog turned off
+   *  in Settings, or settings not loaded yet) keeps today's
+   *  behaviour: the window stays open with Open file /
+   *  Open folder in the footer. */
   useEffect(() => {
     const status = download?.status ?? null
     const prev = prevStatusRef.current
@@ -294,6 +343,8 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
         void exitApp().catch((e: unknown) =>
           setActionError(e instanceof Error ? e.message : String(e)),
         )
+      } else if (settingsRef.current?.show_download_complete_dialog) {
+        void getCurrentWindow().close()
       }
     }
   }, [download?.status])
@@ -472,8 +523,29 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
 
   const downloaded = live?.downloaded_bytes ?? download.downloaded_bytes
   const size = live?.size_bytes ?? download.size_bytes
-  const speed = live?.speed_bps ?? download.speed_bps
-  const eta = live?.eta_seconds ?? download.eta_seconds
+  // Round 64 — displayed speed / ETA: while downloading, a
+  // zero/null tick holds the last positive value (up to 5 s)
+  // instead of blanking to '—'; only a sustained idle shows
+  // 0 (rendered as '0 B/s') for speed and null (rendered as
+  // '—') for ETA, which needs a speed to exist. Outside
+  // 'downloading' the raw values are shown as-is — a paused
+  // or finished row shows '—' by design.
+  const freshSpeed = live?.speed_bps ?? download.speed_bps
+  const freshEta = live?.eta_seconds ?? download.eta_seconds
+  const holding =
+    download.status === 'downloading' && Date.now() - lastSpeedAtRef.current <= 5_000
+  const speed =
+    download.status === 'downloading'
+      ? freshSpeed > 0
+        ? freshSpeed
+        : holding && lastSpeedRef.current !== null
+          ? lastSpeedRef.current
+          : 0
+      : freshSpeed
+  const eta =
+    download.status === 'downloading'
+      ? freshEta ?? (holding ? lastEtaRef.current : null)
+      : freshEta
   const percent = progressPercent(downloaded, size)
   const segments = live?.segments ?? []
   // The countdown is the engine's: `retry` arrives on the live
@@ -575,7 +647,9 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
           </div>
           <div>
             <dt className="text-text-muted">Speed</dt>
-            <dd className="mt-0.5 font-mono">{formatSpeed(speed)}</dd>
+            <dd className="mt-0.5 font-mono">
+              {download.status === 'downloading' ? formatSpeed(speed, '0 B/s') : formatSpeed(speed)}
+            </dd>
           </div>
           <div>
             <dt className="text-text-muted">Time left</dt>
@@ -751,7 +825,7 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
             <Play className="h-4 w-4" aria-hidden="true" /> Resume
           </Button>
         ) : null}
-        {download.status === 'downloading' || download.status === 'paused' ? (
+        {download.status === 'downloading' || download.status === 'paused' || download.status === 'error' ? (
           <Button variant="danger" onClick={handleCancel}>
             Cancel
           </Button>
@@ -766,9 +840,6 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
             </Button>
           </>
         ) : null}
-        <Button variant="ghost" onClick={() => getCurrentWindow().close()}>
-          Close
-        </Button>
       </div>
 
       {shutdownCountdown !== null ? (

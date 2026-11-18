@@ -19,8 +19,35 @@ import { Copy, Minus, Square, X } from 'lucide-react'
  *
  *  The icon is `/icon.png` — the chosen logo, copied into
  *  `app/public/` so Vite bundles it (the src-tauri icons are
- *  not in the frontend dist). */
-export function TitleBar({ title, icon = true }: { title: string; icon?: boolean }) {
+ *  not in the frontend dist).
+ *
+ *  Round 65 — minimize to tray, like IDM: the minimize button
+ *  HIDES the window to the system tray instead of dropping it
+ *  to the taskbar (the tray icon brings it back). The MAIN
+ *  window's X hides it to the tray too (`hideOnClose`) — the
+ *  tray menu's Exit is the only way to quit the app. A
+ *  progress window's X still closes just that window (the
+ *  download keeps running); its minimize hides it to the tray
+ *  like the main window's. */
+export function TitleBar({
+  title,
+  icon = true,
+  hideOnClose = false,
+  showMinimize = true,
+  showMaximize = true,
+}: {
+  title: string
+  icon?: boolean
+  /** Round 65 — main window only: X hides to the tray instead
+   *  of closing. Progress windows leave this off. */
+  hideOnClose?: boolean
+  /** Round 66 — the "Download complete" dialog hides both:
+   *  minimize would hide the dialog to the tray (Round 65),
+   *  where the tray menu could never bring it back, and a
+   *  fixed-size dialog has nothing to maximize. */
+  showMinimize?: boolean
+  showMaximize?: boolean
+}) {
   const [maximized, setMaximized] = useState(false)
 
   useEffect(() => {
@@ -46,7 +73,7 @@ export function TitleBar({ title, icon = true }: { title: string; icon?: boolean
   }, [])
 
   function minimize() {
-    void getCurrentWindow().minimize().catch(() => undefined)
+    void getCurrentWindow().hide().catch(() => undefined)
   }
 
   function toggleMaximize() {
@@ -54,7 +81,11 @@ export function TitleBar({ title, icon = true }: { title: string; icon?: boolean
   }
 
   function close() {
-    void getCurrentWindow().close().catch(() => undefined)
+    if (hideOnClose) {
+      void getCurrentWindow().hide().catch(() => undefined)
+    } else {
+      void getCurrentWindow().close().catch(() => undefined)
+    }
   }
 
   return (
@@ -75,33 +106,37 @@ export function TitleBar({ title, icon = true }: { title: string; icon?: boolean
         <span className="truncate text-[13.5px] font-semibold text-text">{title}</span>
       </div>
       <div className="flex shrink-0 items-center">
-        <button
-          type="button"
-          onClick={minimize}
-          aria-label="Minimize"
-          title="Minimize"
-          className="flex h-10 w-11 items-center justify-center text-text-muted hover:bg-surface-2 hover:text-text"
-        >
-          <Minus className="h-4 w-4" aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          onClick={toggleMaximize}
-          aria-label={maximized ? 'Restore' : 'Maximize'}
-          title={maximized ? 'Restore' : 'Maximize'}
-          className="flex h-10 w-11 items-center justify-center text-text-muted hover:bg-surface-2 hover:text-text"
-        >
-          {maximized ? (
-            <Copy className="h-3.5 w-3.5" aria-hidden="true" />
-          ) : (
-            <Square className="h-3.5 w-3.5" aria-hidden="true" />
-          )}
-        </button>
+        {showMinimize ? (
+          <button
+            type="button"
+            onClick={minimize}
+            aria-label="Minimize to tray"
+            title="Minimize to tray"
+            className="flex h-10 w-11 items-center justify-center text-text-muted hover:bg-surface-2 hover:text-text"
+          >
+            <Minus className="h-4 w-4" aria-hidden="true" />
+          </button>
+        ) : null}
+        {showMaximize ? (
+          <button
+            type="button"
+            onClick={toggleMaximize}
+            aria-label={maximized ? 'Restore' : 'Maximize'}
+            title={maximized ? 'Restore' : 'Maximize'}
+            className="flex h-10 w-11 items-center justify-center text-text-muted hover:bg-surface-2 hover:text-text"
+          >
+            {maximized ? (
+              <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+            ) : (
+              <Square className="h-3.5 w-3.5" aria-hidden="true" />
+            )}
+          </button>
+        ) : null}
         <button
           type="button"
           onClick={close}
-          aria-label="Close"
-          title="Close"
+          aria-label={hideOnClose ? 'Hide to tray' : 'Close'}
+          title={hideOnClose ? 'Hide to tray' : 'Close'}
           className="flex h-10 w-11 items-center justify-center text-text-muted hover:bg-danger-soft hover:text-danger"
         >
           <X className="h-4 w-4" aria-hidden="true" />

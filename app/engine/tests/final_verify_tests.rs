@@ -303,7 +303,11 @@ async fn final_drain_starts_download_not_just_queued() {
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
     let store = mgr.store();
-    let row = store.enqueue_pending_link(&server.url, Some("http://example.com/page"), "browser").unwrap();
+    // Round 67: a 'download_all' row — a browser capture waits
+    // for the Add URL dialog and is never drained.
+    let row = store
+        .enqueue_pending_link(&server.url, Some("http://example.com/page"), "download_all")
+        .unwrap();
     let summary = mgr.drain_pending_links().await.unwrap();
     assert_eq!(summary.accepted.len(), 1);
     assert_eq!(summary.accepted[0].0, row.id);
@@ -337,8 +341,10 @@ async fn final_drain_duplicate_links_get_different_paths() {
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
     let store = mgr.store();
-    store.enqueue_pending_link(&server.url, None, "browser").unwrap();
-    store.enqueue_pending_link(&server.url, None, "browser").unwrap();
+    // Round 67: 'download_all' rows — a browser capture waits
+    // for the Add URL dialog and is never drained.
+    store.enqueue_pending_link(&server.url, None, "download_all").unwrap();
+    store.enqueue_pending_link(&server.url, None, "download_all").unwrap();
     let summary = mgr.drain_pending_links().await.unwrap();
     assert_eq!(summary.accepted.len(), 2, "both copies are accepted (the guard renames, not rejects)");
     let ids: Vec<&String> = summary.accepted.iter().map(|(_, d)| d).collect();

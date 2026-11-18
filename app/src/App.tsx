@@ -3,12 +3,14 @@ import { X } from 'lucide-react'
 import {
   addDownload,
   addToQueue,
+  cancelDownload,
   checkForUpdates,
   deleteCategory,
   deleteDownload,
   dismissClipboardOffer,
   executeQueueAction,
   getCategories,
+  getDownloadCompletionOptions,
   getFreeDiskSpace,
   getPendingAction,
   getQueueFiles,
@@ -16,25 +18,33 @@ import {
   getSettings,
   listDownloads,
   listGrabberProjects,
+  listPendingLinks,
   listQueues,
   moveToCategory,
   onClipboardLink,
   onQueueAction,
   onUpdateAvailable,
+  openFile,
+  openFileWith,
   openFolder,
+  openCompleteDialog,
+  openErrorDialog,
   openProgressWindow,
   pauseDownload,
   reloadWebviewWindow,
+  removeFromQueue,
+  resolvePendingLink,
   resumeDownload,
   runGrabber,
+  setTaskbarProgress,
   startQueue,
   stopQueue,
   syncQueueNow,
   updateSettings,
   withTimeout,
 } from './lib/api'
-import { formatBytes, formatSpeed } from './lib/format'
-import type { CategoryRow, ClipboardOffer, DownloadRow, GrabberProjectRow, PendingAction, QueueRow, QuotaStatus, Settings, UpdateCheckResult } from './lib/types'
+import { formatBytes, formatEta, formatSpeed } from './lib/format'
+import type { CategoryRow, ClipboardOffer, DownloadRow, GrabberProjectRow, PendingAction, PendingLinkRow, QueueRow, QuotaStatus, Settings, UpdateCheckResult } from './lib/types'
 import { AddCategoryDialog } from './components/AddCategoryDialog'
 import { AddDownloadDialog } from './components/AddDownloadDialog'
 import { AddQueueDialog } from './components/AddQueueDialog'
@@ -43,6 +53,7 @@ import { Button } from './components/Button'
 import { CategorySidebar, type SidebarFilter } from './components/CategorySidebar'
 import { ClipboardOfferDialog } from './components/ClipboardOfferDialog'
 import { DownloadAllDialog } from './components/DownloadAllDialog'
+import { DownloadPropertiesDialog } from './components/DownloadPropertiesDialog'
 import { DownloadTable } from './components/DownloadTable'
 import { HistoryView } from './components/HistoryView'
 import { MenuBar, type MenuBarActions } from './components/MenuBar'
@@ -63,11 +74,10 @@ import { VideoGrabberDialog } from './components/VideoGrabberDialog'
  *  then the menu bar (File, Tasks, View, Downloads, Options,
  *  Help), the slim toolbar (gradient Add URL, Resume, Pause,
  *  Stop, Delete, search), the TOOLS strip (Queue, Scheduler,
- *  History, Video Grabber, Site Grabber, Refresh Address,
- *  Clipboard), the categories tree on the left and the file
- *  table. Dark only — the light theme was deleted at the user's
- *  instruction. No settings gear anywhere: Settings is reached
- *  from the Options menu.
+ *  Video Grabber, Site Grabber, Clipboard), the categories
+ *  tree on the left and the file table. Dark only — the light
+ *  theme was deleted at the user's instruction. No settings
+ *  gear anywhere: Settings is reached from the Options menu.
  *  The list is refreshed once a second and that refresh is the
  *  live path for the table — the `download-progress` listener that
  *  used to patch rows between polls is gone (BUG-044: it never
@@ -93,6 +103,23 @@ export default function App() {
   const [selectedFilter, setSelectedFilter] = useState<SidebarFilter>('all')
   const [selectedGrabberId, setSelectedGrabberId] = useState<string | null>(null)
   const [showAdd, setShowAdd] = useState(false)
+  /** Round 67 — browser-extension captures waiting for the Add
+   *  URL dialog (like IDM: the download only starts when the
+   *  user presses Start Download). The queue is polled with the
+   *  1 s refresh; one capture at a time opens the dialog, and a
+   *  capture that arrives while the dialog is open waits its
+   *  turn — dialogs never stack. `seenCaptureIds` is the set of
+   *  ids already queued (or showing), so a poll never queues
+   *  the same capture twice; an id leaves the set when its
+   *  capture is decided. */
+  const [captureQueue, setCaptureQueue] = useState<PendingLinkRow[]>([])
+  const [activeCapture, setActiveCapture] = useState<PendingLinkRow | null>(null)
+  const seenCaptureIds = useRef<Set<string>>(new Set())
+  /** Round 67 — the open capture's dialog already submitted
+   *  it, so closing the dialog must not resolve it as
+   *  rejected. Set in `onAdded`, read in `onClose`. */
+  const captureAddedRef = useRef(false)
+  const refreshCapturesInFlight = useRef(false)
   const [showDownloadAll, setShowDownloadAll] = useState(false)
   const [showBatch, setShowBatch] = useState(false)
   const [showVideoGrabber, setShowVideoGrabber] = useState(false)
@@ -150,6 +177,9 @@ export default function App() {
   /** Round 51 — refresh download address: the row whose expired
    *  link is being replaced; null when the dialog is closed. */
   const [refreshTarget, setRefreshTarget] = useState<DownloadRow | null>(null)
+  /** Round 65 — Properties (right-click menu): the row whose
+   *  details are showing; null when the dialog is closed. */
+  const [propertiesTarget, setPropertiesTarget] = useState<DownloadRow | null>(null)
   /** Round 52 — clipboard monitoring: the copied link currently
    *  offered to the user; null when no offer is showing. */
   const [clipboardOffer, setClipboardOffer] = useState<ClipboardOffer | null>(null)
@@ -277,6 +307,32 @@ export default function App() {
     await refreshQueueFiles()
   }, [refresh, refreshQueues, refreshGrabberProjects, refreshQueueFiles])
 
+  /** Round 67 — poll the pending browser captures and queue any
+   *  unseen browser/video rows for the Add URL dialog. The
+   *  engine's drain leaves those rows pending (only
+   *  'download_all' rows auto-add), so this is the only path
+   *  that surfaces them. A failed list is silent — the poll
+   *  retries next second, and a failure must not clear the
+   *  queue or surface a banner. */
+  const refreshPendingCaptures = useCallback(async () => {
+    if (refreshCapturesInFlight.current) return
+    refreshCapturesInFlight.current = true
+    try {
+      const rows = await listPendingLinks()
+      const fresh = rows.filter(
+        (r) => (r.source === 'browser' || r.source === 'video') && !seenCaptureIds.current.has(r.id),
+      )
+      if (fresh.length > 0) {
+        for (const r of fresh) seenCaptureIds.current.add(r.id)
+        setCaptureQueue((current) => [...current, ...fresh])
+      }
+    } catch {
+      // The poll retries next second.
+    } finally {
+      refreshCapturesInFlight.current = false
+    }
+  }, [])
+
   useEffect(() => {
     if (!pollStoppedRef.current) void refresh()
     void refreshCategories()
@@ -286,6 +342,8 @@ export default function App() {
     const timer = window.setInterval(() => {
       if (pollStoppedRef.current) return
       void refreshAll()
+      // Round 67 — surface browser captures in the Add URL dialog.
+      void refreshPendingCaptures()
       // Backend-dead detection (§7.3): no successful poll for
       // ~10 s — stop issuing invokes and show the banner. A poll
       // still in flight is not a dead backend (its 5 s timeout
@@ -366,7 +424,22 @@ export default function App() {
       unlistenUpdate?.()
       unlistenClipboard?.()
     }
-  }, [refresh, refreshAll, refreshCategories, refreshQueues, refreshGrabberProjects, refreshSettings])
+  }, [refresh, refreshAll, refreshCategories, refreshQueues, refreshGrabberProjects, refreshSettings, refreshPendingCaptures])
+
+  /** Round 67 — open the Add URL dialog for the next queued
+   *  capture, one at a time and only when no dialog is open
+   *  (the video panel and the clipboard offer also open it —
+   *  this effect waits while `showAdd` is true, so dialogs
+   *  never stack). */
+  useEffect(() => {
+    if (showAdd || captureQueue.length === 0) return
+    const [next, ...rest] = captureQueue
+    setCaptureQueue(rest)
+    setActiveCapture(next)
+    captureAddedRef.current = false
+    setPickedVideoUrl(next.url)
+    setShowAdd(true)
+  }, [showAdd, captureQueue])
 
   /** Dark only (Round 45): the theme is a constant now, but the
    *  attribute stays set so the Tailwind dark-mode selector keeps
@@ -440,6 +513,28 @@ export default function App() {
     } else {
       void run(() => deleteDownload(download.id, false).then(() => setSelectedId(null)))
     }
+  }
+
+  /** Round 65 — Redownload (right-click menu): start the same URL
+   *  over from scratch — cancel a running attempt, delete the row
+   *  and its file, then re-add the same link (same folder,
+   *  category and queue). The new row is selected so it is
+   *  visible at once. A dead link leaves the row deleted and the
+   *  probe error in the banner — the honest outcome of asking
+   *  for a fresh download of a link that no longer answers. */
+  async function handleRedownload(download: DownloadRow) {
+    const folder = download.save_path.replace(/[/\\][^/\\]*$/, '')
+    if (download.status === 'downloading') {
+      await cancelDownload(download.id).catch(() => undefined)
+    }
+    await deleteDownload(download.id, true)
+    const [id] = await addDownload({
+      url: download.url,
+      folder: folder === '' ? null : folder,
+      category: download.category_id === '' ? null : download.category_id,
+      queue: download.queue_id,
+    })
+    setSelectedId(id)
   }
 
   const selected = useMemo(
@@ -603,6 +698,139 @@ export default function App() {
     }
   }, [downloads, settings])
 
+  /** Round 66 — "Download complete" dialog: when a download
+   *  flips into 'complete', open its dialog (the progress
+   *  window closes itself at the same moment). The first
+   *  snapshot only seeds the map — downloads already complete
+   *  at startup do not pop dialogs, and neither does a download
+   *  first seen already complete unless it finished within the
+   *  last 30 s (a tiny file can complete between two 1 s polls).
+   *  Skipped when the dialog is turned off in Settings, and
+   *  when the download's Options say close the program / shut
+   *  the computer down — those take precedence and the progress
+   *  window acts on them instead. A failure to open the dialog
+   *  is silent: the dialog is a nicety, not the download, and
+   *  must never spam the error banner. */
+  const prevCompleteStatus = useRef<Map<string, string> | null>(null)
+  const completeDialogHandled = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    if (prevCompleteStatus.current === null) {
+      prevCompleteStatus.current = new Map(downloads.map((d) => [d.id, d.status]))
+      return
+    }
+    if (settings === null) return
+    const now = Date.now()
+    for (const d of downloads) {
+      const prev = prevCompleteStatus.current.get(d.id)
+      prevCompleteStatus.current.set(d.id, d.status)
+      if (d.status !== 'complete') continue
+      if (completeDialogHandled.current.has(d.id)) continue
+      const fresh =
+        prev === 'downloading' ||
+        prev === 'paused' ||
+        (prev === undefined &&
+          d.completed_at !== null &&
+          now - Date.parse(d.completed_at) < 30_000)
+      if (!fresh) continue
+      completeDialogHandled.current.add(d.id)
+      if (!settings.show_download_complete_dialog) continue
+      void (async () => {
+        try {
+          const opts = await getDownloadCompletionOptions(d.id)
+          if (opts.close_after || opts.shutdown_after) return
+          await openCompleteDialog(d.id)
+        } catch {
+          // Silent — see the comment above.
+        }
+      })()
+    }
+    for (const id of [...prevCompleteStatus.current.keys()]) {
+      if (!downloads.some((d) => d.id === id)) prevCompleteStatus.current.delete(id)
+    }
+  }, [downloads, settings])
+
+  /** Round 68 — "Download failed" dialog: when a download
+   *  flips into 'error', open its dialog over the progress
+   *  window (the progress window stays open behind it — the
+   *  dialog's OK returns there, and Resume continues from where
+   *  the download stopped). Same seeding rule as the complete
+   *  dialog, stricter: only a flip from a previously-seen
+   *  downloading / paused / queued status fires — a download
+   *  first seen already in error (an old failure at startup)
+   *  never pops a dialog. Deduped per id; a failure to open the
+   *  dialog is silent, like the complete dialog. */
+  const prevErrorStatus = useRef<Map<string, string> | null>(null)
+  const errorDialogHandled = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    if (prevErrorStatus.current === null) {
+      prevErrorStatus.current = new Map(downloads.map((d) => [d.id, d.status]))
+      return
+    }
+    for (const d of downloads) {
+      const prev = prevErrorStatus.current.get(d.id)
+      prevErrorStatus.current.set(d.id, d.status)
+      if (d.status !== 'error') continue
+      if (errorDialogHandled.current.has(d.id)) continue
+      const fresh = prev === 'downloading' || prev === 'paused' || prev === 'queued'
+      if (!fresh) continue
+      errorDialogHandled.current.add(d.id)
+      void (async () => {
+        try {
+          await openErrorDialog(d.id)
+        } catch {
+          // Silent — see the complete-dialog comment above.
+        }
+      })()
+    }
+    for (const id of [...prevErrorStatus.current.keys()]) {
+      if (!downloads.some((d) => d.id === id)) prevErrorStatus.current.delete(id)
+    }
+  }, [downloads])
+
+  /** Round 68 — taskbar progress: the overall percent of the
+   *  active downloads on the main window's taskbar button, with
+   *  the file / speed / time-left summary in the window title
+   *  (the taskbar tooltip). Aggregate = bytes downloaded over
+   *  bytes total across the downloading rows with a known size;
+   *  one active download is its own percent. All-paused shows
+   *  the paused state at the same aggregate; nothing active
+   *  clears the bar and restores the plain title. The command
+   *  is only invoked when the rounded percent or the summary
+   *  text actually changes — never more than once per refresh
+   *  poll. */
+  const lastTaskbar = useRef<string | null>(null)
+  useEffect(() => {
+    const active = downloads.filter((d) => d.status === 'downloading')
+    const paused = downloads.filter((d) => d.status === 'paused')
+    const known = active.filter((d) => d.size_bytes !== null && d.size_bytes > 0)
+    if (active.length === 0 && paused.length === 0) {
+      if (lastTaskbar.current !== 'clear') {
+        lastTaskbar.current = 'clear'
+        void setTaskbarProgress(null, null, 'Sonic Manager').catch(() => undefined)
+      }
+      return
+    }
+    const rows = active.length > 0 ? known : paused.filter((d) => d.size_bytes !== null && d.size_bytes > 0)
+    const total = rows.reduce((sum, d) => sum + (d.size_bytes ?? 0), 0)
+    const done = rows.reduce((sum, d) => sum + Math.min(d.downloaded_bytes, d.size_bytes ?? 0), 0)
+    const percent = total > 0 ? Math.round((done / total) * 100) : 0
+    const status = active.length > 0 ? 'normal' : 'paused'
+    const speed = active.reduce((sum, d) => sum + d.speed_bps, 0)
+    const eta = active
+      .map((d) => d.eta_seconds)
+      .filter((e): e is number => e !== null)
+    const summary =
+      active.length === 1
+        ? `${percent}% · ${active[0].filename} · ${formatSpeed(speed)}${eta.length > 0 ? ` · ${formatEta(Math.min(...eta))}` : ''}`
+        : `${percent}% · ${active.length > 0 ? active.length : paused.length} downloads · ${formatSpeed(speed)}`
+    const title = `Sonic Manager — ${summary}`
+    const key = `${status}:${percent}:${title}`
+    if (lastTaskbar.current !== key) {
+      lastTaskbar.current = key
+      void setTaskbarProgress(percent, status, title).catch(() => undefined)
+    }
+  }, [downloads])
+
   const toolbarActions = {
     add: () => setShowAdd(true),
     resume: () => selected && void run(() => resumeDownload(selected.id)),
@@ -632,7 +860,7 @@ export default function App() {
 
   return (
     <div className="flex h-full flex-col text-text">
-      <TitleBar title="Sonic Manager" />
+      <TitleBar title="Sonic Manager" hideOnClose />
       <MenuBar
         actions={menuActions}
         selected={selected}
@@ -654,10 +882,6 @@ export default function App() {
         onScheduler={() => openScheduler()}
         onVideoGrabber={() => setShowVideoGrabber(true)}
         onSiteGrabber={() => setShowSiteGrabber(true)}
-        onRefreshAddress={() => selected && setRefreshTarget(selected)}
-        canRefreshAddress={
-          selected !== null && (selected.status === 'paused' || selected.status === 'error')
-        }
         clipboardOn={settings?.clipboard_monitoring ?? false}
         onToggleClipboard={() => void toggleClipboardMonitoring()}
       />
@@ -752,13 +976,23 @@ export default function App() {
             <DownloadTable
               downloads={visible}
               categories={categories}
+              queues={queues}
               selectedId={selectedId}
               onSelect={setSelectedId}
               onOpenProgress={(id) => void openProgressWindowFor(id, false)}
               onAdd={() => setShowAdd(true)}
+              onOpenFile={(id) => void run(() => openFile(id))}
+              onOpenWith={(id) => void run(() => openFileWith(id))}
               onOpenFolder={(id) => void run(() => openFolder(id))}
+              onRedownload={(download) => void run(() => handleRedownload(download))}
+              onResume={(id) => void run(() => resumeDownload(id))}
+              onPause={(id) => void run(() => pauseDownload(id))}
               onMoveToCategory={(id, categoryId) => void run(() => moveToCategory(id, categoryId))}
               onRefreshAddress={(download) => setRefreshTarget(download)}
+              onRemove={(download) => requestRemove(download)}
+              onMoveToQueue={(id, queueId) => void run(() => addToQueue(id, queueId))}
+              onDeleteFromQueue={(id) => void run(() => removeFromQueue(id))}
+              onShowProperties={(download) => setPropertiesTarget(download)}
             />
           )}
         </main>
@@ -797,10 +1031,50 @@ export default function App() {
         defaultFolder={settings?.default_download_folder ?? ''}
         initialUrl={pickedVideoUrl}
         onClose={() => {
+          // Round 67 — a dismissed capture is resolved as
+          // rejected, unless the dialog already submitted it
+          // (captureAddedRef) or the engine already rejected
+          // it (re-list first, so the engine's real error is
+          // not clobbered with "Dismissed..."). The row stays
+          // pending when the resolve fails, so the next poll
+          // offers it again.
+          const capture = activeCapture
+          if (capture) {
+            setActiveCapture(null)
+            if (!captureAddedRef.current) {
+              void (async () => {
+                try {
+                  const rows = await listPendingLinks()
+                  if (rows.some((r) => r.id === capture.id)) {
+                    await resolvePendingLink({
+                      id: capture.id,
+                      status: 'rejected',
+                      error: 'Dismissed in the Add URL dialog',
+                    })
+                  }
+                } catch {
+                  // Best effort — the row stays pending.
+                } finally {
+                  seenCaptureIds.current.delete(capture.id)
+                }
+              })()
+            } else {
+              seenCaptureIds.current.delete(capture.id)
+            }
+          }
           setShowAdd(false)
           setPickedVideoUrl('')
         }}
         onAdded={(id) => {
+          // Round 67 — a confirmed capture: the dialog's confirm
+          // already marked the row accepted (the store only
+          // decides a row while it is still pending, so there is
+          // nothing left to resolve here). Just remember the
+          // submit happened, so `onClose` does not resolve the
+          // row as rejected afterwards.
+          if (activeCapture) {
+            captureAddedRef.current = true
+          }
           // Round 55 (defect 3a): the new row must be visible — a
           // download auto-assigned to another category used to be
           // hidden by the sidebar filter and look like a silent
@@ -811,6 +1085,9 @@ export default function App() {
           void refreshAll()
         }}
         onLateError={(message) => setBannerError(message)}
+        onAddCategory={() => setShowAddCategory(true)}
+        pendingLinkId={activeCapture?.id ?? null}
+        initialCookies={activeCapture?.cookies ?? null}
       />
       <RefreshAddressDialog
         open={refreshTarget !== null}
@@ -820,6 +1097,13 @@ export default function App() {
           setRefreshTarget(null)
           void refreshAll()
         }}
+      />
+      <DownloadPropertiesDialog
+        open={propertiesTarget !== null}
+        download={propertiesTarget}
+        categories={categories}
+        queues={queues}
+        onClose={() => setPropertiesTarget(null)}
       />
       {clipboardOffer ? (
         <ClipboardOfferDialog

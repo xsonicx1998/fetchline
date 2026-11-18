@@ -430,10 +430,12 @@ async fn detect_page_videos_lists_media_with_probe_results() {
     assert!(dead.error.is_some());
 }
 
-// -- (d) end to end: video_found -> pending_links -> drain -> add_download -
-// Milestone 2: the drain STARTS the download now (browser_start_drained
-// defaults on), so there is no separate manual start in this test any
-// more — the drain's own start must carry it to completion.
+// -- (d) end to end: video_found -> pending_links -> Add URL dialog
+// (confirm_pending_link) -> add_download --
+// Round 67: a video capture is interactive — the drain leaves it
+// pending for the Add URL dialog (like IDM), and the dialog's
+// confirm starts the download (browser_start_drained defaults
+// on), so the confirm's own start must carry it to completion.
 
 #[tokio::test]
 async fn video_found_end_to_end_drains_into_a_real_download() {
@@ -452,17 +454,25 @@ async fn video_found_end_to_end_drains_into_a_real_download() {
     );
     assert!(reply.ok, "reply: {:?}", reply);
     assert_eq!(reply.enqueued, Some(1));
+    let pending_id = store.list_pending_links(Some("pending")).unwrap()[0].id.clone();
     let summary = mgr.drain_pending_links().await.unwrap();
-    assert_eq!(summary.accepted.len(), 1);
+    assert!(
+        summary.accepted.is_empty(),
+        "the drain must not auto-add a video capture: {:?}",
+        summary
+    );
     assert!(summary.rejected.is_empty());
-    let (_, download_id) = &summary.accepted[0];
-    let dl = mgr.get_download(download_id).unwrap().unwrap();
+    let (download_id, _) = mgr
+        .confirm_pending_link(&pending_id, None, None, None, None, None, true)
+        .await
+        .unwrap();
+    let dl = mgr.get_download(&download_id).unwrap().unwrap();
     assert_eq!(dl.url, video_url);
     assert_eq!(dl.category_id, "cat-video");
     assert_eq!(dl.filename, "video.mp4");
-    // The drain started it: it completes byte-exact from the fixture.
-    assert!(wait_for_status(&mgr, download_id, "complete", 15).await);
-    let dl = mgr.get_download(download_id).unwrap().unwrap();
+    // The confirm started it: it completes byte-exact from the fixture.
+    assert!(wait_for_status(&mgr, &download_id, "complete", 15).await);
+    let dl = mgr.get_download(&download_id).unwrap().unwrap();
     assert_eq!(dl.downloaded_bytes, 100 * 1024);
     let bytes = std::fs::read(&dl.save_path).unwrap();
     assert_eq!(bytes, payload(100 * 1024));
@@ -857,11 +867,21 @@ async fn video_found_m3u8_drains_into_a_real_playlist_download() {
     );
     assert!(reply.ok, "reply: {:?}", reply);
     assert_eq!(reply.enqueued, Some(1));
+    let pending_id = store.list_pending_links(Some("pending")).unwrap()[0].id.clone();
+    // Round 67: the drain leaves the video capture pending for
+    // the Add URL dialog; the dialog's confirm adds it.
     let summary = mgr.drain_pending_links().await.unwrap();
-    assert_eq!(summary.accepted.len(), 1);
-    let (_, download_id) = &summary.accepted[0];
-    assert!(wait_for_status(&mgr, download_id, "complete", 15).await);
-    let dl = mgr.get_download(download_id).unwrap().unwrap();
+    assert!(
+        summary.accepted.is_empty(),
+        "the drain must not auto-add a video capture: {:?}",
+        summary
+    );
+    let (download_id, _) = mgr
+        .confirm_pending_link(&pending_id, None, None, None, None, None, true)
+        .await
+        .unwrap();
+    assert!(wait_for_status(&mgr, &download_id, "complete", 15).await);
+    let dl = mgr.get_download(&download_id).unwrap().unwrap();
     // The playlist is saved as-is: the bytes on disk are exactly
     // the playlist text — no segments fetched, nothing merged.
     let bytes = std::fs::read(&dl.save_path).unwrap();

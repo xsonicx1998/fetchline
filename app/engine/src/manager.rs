@@ -61,7 +61,9 @@ use crate::proxy::{
 };
 use crate::queue::PendingAction;
 use crate::quota::{window_end_unix, window_expired, QuotaGate, QuotaStatus, QUOTA_MB_BYTES};
-use crate::store::{CategoryRow, DownloadRow, HistoryRow, QueueRow, SegmentRow, Settings, Store};
+use crate::store::{
+    CategoryRow, DownloadRow, HistoryRow, PendingLinkRow, QueueRow, SegmentRow, Settings, Store,
+};
 use crate::timeutil::{now_unix, parse_iso_to_unix, unix_to_iso};
 use crate::update::{
     fetch_manifest, result_from_manifest, weekly_check_due, UpdateCheckResult,
@@ -372,7 +374,7 @@ pub struct DownloadManager {
     /// (`RUN_STALL_TIMEOUT`) instead of a total budget.
     segment_client: RwLock<Arc<Client>>,
     store: Arc<Store>,
-    /// Connections per download (settings.max_connections, 1–16).
+    /// Connections per download (settings.max_connections, 1–32).
     /// Atomic so a settings save changes the segment count of the
     /// NEXT download immediately; running downloads keep theirs.
     max_connections: AtomicUsize,
@@ -931,7 +933,7 @@ impl DownloadManager {
     /// `ftp://` URLs probe through the FTP transport (direct or via
     /// an FTP proxy) and an NTLM proxy can answer a 407 with the
     /// handshake instead of a bare failure.
-    async fn probe_url(&self, url: &str) -> Result<ProbeInfo> {
+    pub async fn probe_url(&self, url: &str) -> Result<ProbeInfo> {
         // Round 56 (§7.1d): probe duration is logged (throttled by
         // the call itself — a probe is one network round trip, not
         // a hot loop) so a slow or hanging probe is visible in
@@ -1014,6 +1016,15 @@ impl DownloadManager {
     /// build log. A disabled event, an unset file, or a file that
     /// no longer exists on disk records nothing and plays nothing.
     fn emit_sound(&self, event: &str) {
+        // Round 68 — the master sounds switch: when it is off,
+        // no sound plays at all, including a user-configured file
+        // for this event. A settings read failure fails open
+        // (sounds on), the same as before this switch existed.
+        if let Ok(settings) = self.store.get_settings() {
+            if !settings.sounds_enabled {
+                return;
+            }
+        }
         let file = match self.store.get_sound_file(event) {
             Ok(Some(f)) if std::path::Path::new(&f).is_file() => f,
             _ => return,
@@ -1519,6 +1530,15 @@ impl DownloadManager {
     /// that host only. Deciding the row (accepted or rejected)
     /// wipes the cookies column — the drain is the last place they
     /// exist on disk.
+    ///
+    /// Round 67: 'browser' and 'video' captures are INTERACTIVE —
+    /// the desktop app opens the Add URL dialog for them (like
+    /// IDM) instead of auto-adding, so the drain leaves those
+    /// rows pending for the dialog (`confirm_pending_link` is the
+    /// path that adds them). Only 'download_all' rows — and any
+    /// future non-interactive source — are drained here. The
+    /// exclusion check above still runs first, so an excluded
+    /// capture is rejected here and never reaches the dialog.
     pub async fn drain_pending_links(self: &Arc<Self>) -> Result<DrainSummary> {
         let settings = self.store.get_settings().unwrap_or_default();
         let pending = self.store.list_pending_links(Some("pending"))?;
@@ -1547,6 +1567,14 @@ impl DownloadManager {
                     summary.rejected.push((row.id, err));
                     continue;
                 }
+            }
+            // Round 67: 'browser' and 'video' captures are
+            // interactive — the desktop app opens the Add URL
+            // dialog for them (like IDM) instead of auto-adding,
+            // so the drain leaves them pending for the dialog.
+            // Only 'download_all' rows are drained here.
+            if row.source == "browser" || row.source == "video" {
+                continue;
             }
             // Browser cookies (S13 finish): rebuild the validated
             // header from the row's stored pairs. A corrupt value
@@ -1581,6 +1609,153 @@ impl DownloadManager {
             }
         }
         Ok(summary)
+    }
+
+    // -- Round 67: interactive browser captures ---------------------------
+    //
+    // A 'browser' / 'video' capture no longer auto-adds in the
+    // drain — the desktop app opens the Add URL dialog for it
+    // (like IDM) and the download only starts when the user
+    // presses Start Download. These methods are that dialog's
+    // path: list what is waiting, probe one (with its cookies),
+    // confirm it through the real add path, or dismiss it.
+
+    /// Pending browser-extension rows, oldest first: the Add URL
+    /// dialog's queue — the app polls these and opens the dialog
+    /// for each browser/video capture in turn.
+    pub fn list_pending_links(&self) -> Result<Vec<PendingLinkRow>> {
+        self.store.list_pending_links(Some("pending"))
+    }
+
+    /// Decide one pending row from the Add URL dialog: 'accepted'
+    /// with the created download id, or 'rejected' with the
+    /// reason. Thin wrapper over the store — the dialog resolves
+    /// a capture it did not submit (Cancel / close dismisses it).
+    pub fn resolve_pending_link(
+        &self,
+        id: &str,
+        status: &str,
+        download_id: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<()> {
+        self.store.mark_pending_link(id, status, download_id, error)
+    }
+
+    /// Set the Add URL dialog's Description note on a download
+    /// (`None` / empty clears it).
+    pub fn set_download_description(&self, id: &str, description: Option<&str>) -> Result<()> {
+        self.store.set_download_description(id, description)
+    }
+
+    /// Probe a URL for the Add URL dialog: the plain probe, or
+    /// with a browser capture's cookies when the pending row
+    /// carries them — a cookie-gated link probes 401 without
+    /// them, exactly as the drain's `probe_url_with_cookies`
+    /// path. `cookies_json` is the pending row's stored JSON array
+    /// of name/value pairs (or `None`); a corrupt value reads as
+    /// no cookies rather than failing the probe.
+    pub async fn probe_url_for_capture(
+        &self,
+        url: &str,
+        cookies_json: Option<&str>,
+    ) -> Result<ProbeInfo> {
+        let header = cookies_json
+            .and_then(|json| cookies_to_header(&cookies_from_json(json)).ok());
+        match header {
+            Some(h) if !h.is_empty() => self.probe_url_with_cookies(url, Some(&h)).await,
+            _ => self.probe_url(url).await,
+        }
+    }
+
+    /// Confirm one pending browser/video capture through the REAL
+    /// add path, with the Add URL dialog's choices: the row's
+    /// cookies ride the probe and the segments (a cookie-gated
+    /// link downloads instead of failing with 401), the speed cap
+    /// is applied before the start (so the first byte is already
+    /// capped), and the row is marked accepted with the created
+    /// download id — or rejected with the reason when the add
+    /// itself fails, so the dialog can show the error and stay
+    /// open. A failed start leaves the download queued (the
+    /// drain's `start_failed` behaviour): the row exists and the
+    /// user can start it by hand. An already-decided row is a
+    /// caller error, so a double confirm can never add the same
+    /// link twice. The browser-integration flag and the
+    /// excluded-sites list are re-checked here too, like the
+    /// drain — a capture decided after the setting changed is
+    /// rejected, not added.
+    pub async fn confirm_pending_link(
+        self: &Arc<Self>,
+        id: &str,
+        filename: Option<String>,
+        folder: Option<String>,
+        category_id: Option<String>,
+        queue_id: Option<String>,
+        speed_limit_kbps: Option<i64>,
+        start_now: bool,
+    ) -> Result<(String, ProbeInfo)> {
+        let row = self
+            .store
+            .get_pending_link(id)?
+            .ok_or_else(|| EngineError::NotFound(id.to_string()))?;
+        if row.status != "pending" {
+            return Err(EngineError::InvalidState(format!(
+                "This browser link was already decided ({})",
+                row.status
+            )));
+        }
+        let settings = self.store.get_settings().unwrap_or_default();
+        if !settings.browser_integration {
+            let err = "Browser integration is turned off in Fetchline settings".to_string();
+            let _ = self
+                .store
+                .mark_pending_link(&row.id, "rejected", None, Some(&err));
+            return Err(EngineError::InvalidState(err));
+        }
+        if let Some(host) = url_host(&row.url) {
+            if crate::store::site_is_excluded(&host, &settings.excluded_sites) {
+                let err = format!("This site is excluded in Settings (excluded sites): {host}");
+                let _ = self
+                    .store
+                    .mark_pending_link(&row.id, "rejected", None, Some(&err));
+                return Err(EngineError::InvalidState(err));
+            }
+        }
+        let cookies = row
+            .cookies
+            .as_deref()
+            .map(|json| cookies_to_header(&cookies_from_json(json)).ok())
+            .flatten();
+        match self
+            .add_download_with_cookies(
+                &row.url,
+                filename,
+                folder,
+                category_id,
+                queue_id,
+                cookies,
+            )
+            .await
+        {
+            Ok((download_id, probe)) => {
+                let _ = self
+                    .store
+                    .mark_pending_link(&row.id, "accepted", Some(&download_id), None);
+                if let Some(kbps) = speed_limit_kbps.filter(|k| *k > 0) {
+                    let _ = self.set_download_speed_limit(&download_id, Some(kbps));
+                }
+                if start_now {
+                    let _ = self.start_download(&download_id).await;
+                }
+                Ok((download_id, probe))
+            }
+            Err(e) => {
+                let err = e.to_string();
+                let _ = self
+                    .store
+                    .mark_pending_link(&row.id, "rejected", None, Some(&err));
+                Err(e)
+            }
+        }
     }
 
     /// Expand a page into pending links (S13 Download All without a

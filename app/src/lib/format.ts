@@ -13,8 +13,8 @@ export function formatBytes(bytes: number | null | undefined): string {
   return `${value.toFixed(value >= 100 ? 0 : 1)} ${units[unit]}`
 }
 
-export function formatSpeed(bytesPerSecond: number): string {
-  if (bytesPerSecond <= 0) return '—'
+export function formatSpeed(bytesPerSecond: number, zeroAs = '—'): string {
+  if (bytesPerSecond <= 0) return zeroAs
   return `${formatBytes(bytesPerSecond)}/s`
 }
 

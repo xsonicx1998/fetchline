@@ -15,6 +15,7 @@ import type {
   HistoryRow,
   PageLink,
   PendingAction,
+  PendingLinkRow,
   ProbeInfo,
   ProgressEvent,
   ProxyConfigInput,
@@ -104,6 +105,65 @@ export async function addDownload(args: {
 
 export async function startDownload(id: string): Promise<void> {
   return invoke('start_download', { id })
+}
+
+/** Round 67 — the Add URL dialog's queue: pending
+ *  browser-extension rows, oldest first. */
+export async function listPendingLinks(): Promise<PendingLinkRow[]> {
+  return invoke<PendingLinkRow[]>('list_pending_links')
+}
+
+/** Round 67 — decide one pending row from the Add URL dialog:
+ *  'accepted' with the created download id, or 'rejected' with
+ *  the reason (Cancel / close dismisses a capture). */
+export async function resolvePendingLink(args: {
+  id: string
+  status: 'accepted' | 'rejected'
+  downloadId?: string | null
+  error?: string | null
+}): Promise<void> {
+  return invoke('resolve_pending_link', {
+    id: args.id,
+    status: args.status,
+    downloadId: args.downloadId ?? null,
+    error: args.error ?? null,
+  })
+}
+
+/** Round 67 — probe a URL for the Add URL dialog (file size and
+ *  name). `cookies` is a browser capture's stored cookies JSON,
+ *  or null — a cookie-gated link probes 401 without them. */
+export async function probeUrl(url: string, cookies?: string | null): Promise<ProbeInfo> {
+  return invoke<ProbeInfo>('probe_url', { url, cookies: cookies ?? null })
+}
+
+/** Round 67 — confirm one pending browser/video capture through
+ *  the real add path, with the Add URL dialog's choices. Returns
+ *  the created download id and the probe info. */
+export async function confirmPendingLink(args: {
+  id: string
+  filename?: string | null
+  folder?: string | null
+  category?: string | null
+  queue?: string | null
+  speedLimitKbps?: number | null
+  startNow: boolean
+}): Promise<[string, ProbeInfo]> {
+  return invoke<[string, ProbeInfo]>('confirm_pending_link', {
+    id: args.id,
+    filename: args.filename ?? null,
+    folder: args.folder ?? null,
+    category: args.category ?? null,
+    queue: args.queue ?? null,
+    speedLimitKbps: args.speedLimitKbps ?? null,
+    startNow: args.startNow,
+  })
+}
+
+/** Round 67 — set the Add URL dialog's Description note on a
+ *  download (null / empty clears it). */
+export async function setDownloadDescription(id: string, description?: string | null): Promise<void> {
+  return invoke('set_download_description', { id, description: description ?? null })
 }
 
 export async function pauseDownload(id: string): Promise<void> {
@@ -534,10 +594,66 @@ export async function quarantineDownload(id: string): Promise<string> {
   return invoke<string>('quarantine_download', { id })
 }
 
+/** Round 66 — "Download complete" dialog: open (or focus) the
+ *  separate dialog window for a finished download. The main
+ *  window calls this when a download flips to 'complete'; the
+ *  command is idempotent — an already-open dialog is focused
+ *  instead of a second copy. */
+export async function openCompleteDialog(id: string): Promise<void> {
+  return invoke('open_complete_dialog', { downloadId: id })
+}
+
+/** Round 68 — open the "Download failed" dialog for a failed
+ *  download (the main window calls this when a download flips
+ *  to 'error'; the progress window stays open behind it). */
+export async function openErrorDialog(id: string): Promise<void> {
+  return invoke('open_error_dialog', { downloadId: id })
+}
+
+/** Round 66 — play the completion sound when the "Download
+ *  complete" dialog shows: the user's configured
+ *  `download_complete` sound when one is set (the engine
+ *  already played it at completion, so this is a no-op), else
+ *  the built-in chime, else the Windows default sound. Returns
+ *  a short note saying which one played. Best-effort — callers
+ *  swallow failures, a silent dialog is better than an error. */
+export async function playCompletionSound(): Promise<string> {
+  return invoke<string>('play_completion_sound')
+}
+
+/** Round 68 — play the error alert when the "Download failed"
+ *  dialog shows: the user's configured `download_failed` sound
+ *  when one is set (the engine already played it), else the
+ *  built-in descending alert, else the Windows default sound.
+ *  Silent when sounds are turned off in Settings. */
+export async function playErrorSound(): Promise<string> {
+  return invoke<string>('play_error_sound')
+}
+
+/** Round 68 — taskbar progress: the overall download percent
+ *  on the main window's taskbar button, plus the file / speed /
+ *  time-left summary in the window title (the taskbar tooltip).
+ *  `progress` is 0–100 or null to clear; `status` is 'normal' |
+ *  'paused' | 'error'. Best-effort — the caller swallows
+ *  failures. */
+export async function setTaskbarProgress(
+  progress: number | null,
+  status: 'normal' | 'paused' | 'error' | null,
+  title: string | null,
+): Promise<void> {
+  return invoke('set_taskbar_progress', { progress, status, title })
+}
+
 /** Antivirus hook (S14): open a finished download in its default
  *  application. Refused when the scanner flagged the file. */
 export async function openFile(id: string): Promise<void> {
   return invoke('open_file', { id })
+}
+
+/** Round 65 — "Open with..." (right-click menu): show the
+ *  Windows "Open with" dialog for a download's file. */
+export async function openFileWith(id: string): Promise<void> {
+  return invoke('open_file_with', { id })
 }
 
 /** Subscribe to `queue-action-pending` events: a queue drained and its

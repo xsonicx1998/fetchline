@@ -1,6 +1,8 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'
+import { DownloadCompleteDialog } from './components/DownloadCompleteDialog'
+import { DownloadErrorDialog } from './components/DownloadErrorDialog'
 import { ProgressWindow } from './components/ProgressWindow'
 import { webviewHeartbeat } from './lib/api'
 import './index.css'
@@ -24,6 +26,38 @@ function progressDownloadId(): string | null {
 
 const progressId = progressDownloadId()
 
+/** Round 66 — the "Download complete" dialog window loads the
+ *  same bundle and renders the dialog view instead of the main
+ *  window. The download id comes from the initialization script
+ *  (`window.__COMPLETE_ID__`, set by the `open_complete_dialog`
+ *  Tauri command) or, as a fallback, from `#complete=<download
+ *  id>` in the URL — the same Round 57 mechanism as the
+ *  progress window. */
+function completeDownloadId(): string | null {
+  const fromInit = (window as unknown as { __COMPLETE_ID__?: unknown }).__COMPLETE_ID__
+  if (typeof fromInit === 'string' && /^[0-9a-fA-F-]+$/.test(fromInit)) return fromInit
+  const match = /^#complete=([0-9a-fA-F-]+)$/.exec(window.location.hash)
+  return match ? match[1] : null
+}
+
+const completeId = completeDownloadId()
+
+/** Round 68 — the "Download failed" dialog window loads the
+ *  same bundle and renders the dialog view instead of the main
+ *  window. The download id comes from the initialization script
+ *  (`window.__ERROR_ID__`, set by the `open_error_dialog` Tauri
+ *  command) or, as a fallback, from `#error=<download id>` in
+ *  the URL — the same Round 57 mechanism as the progress window
+ *  and the complete dialog. */
+function errorDownloadId(): string | null {
+  const fromInit = (window as unknown as { __ERROR_ID__?: unknown }).__ERROR_ID__
+  if (typeof fromInit === 'string' && /^[0-9a-fA-F-]+$/.test(fromInit)) return fromInit
+  const match = /^#error=([0-9a-fA-F-]+)$/.exec(window.location.hash)
+  return match ? match[1] : null
+}
+
+const errorId = errorDownloadId()
+
 /** Webview heartbeat (§7.4, Round 56): this window's JS pings
  *  the backend every 5 s with its label (`main`,
  *  `progress-<download id>`); Rust logs "heartbeat lost" when
@@ -38,9 +72,13 @@ const progressId = progressDownloadId()
  *  level, not a React effect: it runs once per window, and it
  *  keeps running even if React fails to mount (which is exactly
  *  the case the heartbeat must distinguish from a dead
- *  renderer — a mounted window pings, a dead one does not). */
+ *  renderer — a mounted window pings, a dead one does not).
+ *  Skipped for the "Download complete" dialog window (Round
+ *  66) and the "Download failed" dialog window (Round 68):
+ *  both are transient, register no heartbeat entry, and the
+ *  monitor must never auto-reload either as a progress window. */
 const windowLabel = progressId !== null ? `progress-${progressId}` : 'main'
-{
+if (completeId === null && errorId === null) {
   let pingInFlight = false
   window.setInterval(() => {
     if (pingInFlight) return
@@ -92,6 +130,14 @@ window.setTimeout(() => {
 
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
   <React.StrictMode>
-    {progressId !== null ? <ProgressWindow downloadId={progressId} /> : <App />}
+    {progressId !== null ? (
+      <ProgressWindow downloadId={progressId} />
+    ) : completeId !== null ? (
+      <DownloadCompleteDialog downloadId={completeId} />
+    ) : errorId !== null ? (
+      <DownloadErrorDialog downloadId={errorId} />
+    ) : (
+      <App />
+    )}
   </React.StrictMode>,
 )

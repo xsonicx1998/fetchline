@@ -243,7 +243,11 @@ fn host_download_all_with_links_enqueues_each() {
 // -- drain through the real add_download path (b, d) ----------------------
 
 #[tokio::test]
-async fn drain_picks_up_enqueued_link_via_add_download() {
+async fn drain_leaves_browser_capture_for_the_add_url_dialog() {
+    // Round 67: a browser capture is INTERACTIVE — the drain
+    // leaves it pending for the Add URL dialog (like IDM) instead
+    // of auto-adding it, and the dialog confirms it through the
+    // real add path (cookies, probe, category auto-assign, start).
     let server = MockServer::start(MockConfig::default());
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
@@ -257,41 +261,49 @@ async fn drain_picks_up_enqueued_link_via_add_download() {
         },
     );
     assert!(reply.ok, "reply: {:?}", reply);
+    let pending_id = store.list_pending_links(Some("pending")).unwrap()[0].id.clone();
     let summary = mgr.drain_pending_links().await.unwrap();
-    assert_eq!(summary.accepted.len(), 1);
+    assert!(
+        summary.accepted.is_empty(),
+        "the drain must not auto-add a browser capture: {:?}",
+        summary
+    );
     assert!(summary.rejected.is_empty());
-    let (pending_id, download_id) = &summary.accepted[0];
-    let row = store.get_pending_link(pending_id).unwrap().unwrap();
+    assert!(mgr.list_downloads().unwrap().is_empty());
+    let row = store.get_pending_link(&pending_id).unwrap().unwrap();
+    assert_eq!(row.status, "pending");
+    // The dialog's confirm adds it through the real path and
+    // starts it (the default is start-immediately). It must
+    // complete byte-exact from the fixture, not just sit queued.
+    let (download_id, _probe) = mgr
+        .confirm_pending_link(&pending_id, None, None, None, None, None, true)
+        .await
+        .unwrap();
+    let row = store.get_pending_link(&pending_id).unwrap().unwrap();
     assert_eq!(row.status, "accepted");
     assert_eq!(row.download_id.as_deref(), Some(download_id.as_str()));
-    // The download is real: it went through probe + category
-    // auto-assign — and the drain STARTS it (Milestone 2: the
-    // default is start-immediately, not sit-queued). It must
-    // complete byte-exact from the fixture, not just sit queued.
-    let dl = mgr.get_download(download_id).unwrap().unwrap();
+    let dl = mgr.get_download(&download_id).unwrap().unwrap();
     assert_eq!(dl.url, server.url);
     assert!(
-        wait_for_status(&mgr, download_id, "complete", 15).await,
-        "drained download should complete, last status: {}",
-        mgr.get_download(download_id).unwrap().unwrap().status
+        wait_for_status(&mgr, &download_id, "complete", 15).await,
+        "confirmed download should complete, last status: {}",
+        mgr.get_download(&download_id).unwrap().unwrap().status
     );
-    let dl = mgr.get_download(download_id).unwrap().unwrap();
+    let dl = mgr.get_download(&download_id).unwrap().unwrap();
     assert_eq!(dl.downloaded_bytes, 512 * 1024);
     assert_eq!(std::fs::read(&dl.save_path).unwrap(), payload(512 * 1024));
     assert!(store.list_pending_links(Some("pending")).unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn drain_leaves_download_queued_when_start_drained_is_off() {
-    // The old queued-only behaviour stays available as a setting:
-    // with browser_start_drained off, the drain creates the
-    // download and leaves it queued for the user to start.
+async fn drain_skips_browser_and_video_rows_but_drains_download_all() {
+    // Round 67: only 'download_all' rows are drained — a browser
+    // capture and a video capture both wait for the Add URL dialog.
     let server = MockServer::start(MockConfig::default());
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
     let store = mgr.store();
-    set_browser_start_drained(store, false);
-    let reply = handle_host_message(
+    let browser = handle_host_message(
         store,
         &HostMessage::DownloadLink {
             url: server.url.clone(),
@@ -299,7 +311,129 @@ async fn drain_leaves_download_queued_when_start_drained_is_off() {
             cookies: vec![],
         },
     );
-    assert!(reply.ok, "reply: {:?}", reply);
+    assert!(browser.ok);
+    store
+        .enqueue_pending_link(&server.url, None, "video")
+        .unwrap();
+    let all = store
+        .enqueue_pending_link(&server.url, None, "download_all")
+        .unwrap();
+    let summary = mgr.drain_pending_links().await.unwrap();
+    assert_eq!(summary.accepted.len(), 1, "summary: {:?}", summary);
+    assert_eq!(summary.accepted[0].0, all.id);
+    assert!(summary.rejected.is_empty());
+    let pending = store.list_pending_links(Some("pending")).unwrap();
+    assert_eq!(pending.len(), 2, "the browser and video rows must stay pending");
+    assert!(pending.iter().any(|r| r.source == "browser"));
+    assert!(pending.iter().any(|r| r.source == "video"));
+}
+
+#[tokio::test]
+async fn confirm_pending_link_twice_is_an_error() {
+    // A double confirm can never add the same link twice.
+    let server = MockServer::start(MockConfig::default());
+    let dir = tmpdir();
+    let mgr = test_mgr(&dir);
+    let store = mgr.store();
+    let row = store
+        .enqueue_pending_link(&server.url, None, "browser")
+        .unwrap();
+    let (download_id, _) = mgr
+        .confirm_pending_link(&row.id, None, None, None, None, None, false)
+        .await
+        .unwrap();
+    assert_eq!(mgr.get_download(&download_id).unwrap().unwrap().status, "queued");
+    let err = mgr
+        .confirm_pending_link(&row.id, None, None, None, None, None, false)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("already decided"), "error: {err}");
+    assert_eq!(mgr.list_downloads().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn confirm_pending_link_bad_url_is_rejected() {
+    // A dead link is rejected with the reason, and the dialog can
+    // show it and stay open for the user to fix the URL.
+    let server = MockServer::start(MockConfig {
+        fail_status: Some(404),
+        ..Default::default()
+    });
+    let dir = tmpdir();
+    let mgr = test_mgr(&dir);
+    let store = mgr.store();
+    let row = store
+        .enqueue_pending_link(&server.url, None, "browser")
+        .unwrap();
+    let err = mgr
+        .confirm_pending_link(&row.id, None, None, None, None, None, true)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("404"), "error: {err}");
+    let row = store.get_pending_link(&row.id).unwrap().unwrap();
+    assert_eq!(row.status, "rejected");
+    assert!(row.error.as_deref().unwrap().contains("404"));
+    assert!(mgr.list_downloads().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn description_round_trip() {
+    // Round 67 — the Add URL dialog's Description note is stored
+    // on the download and cleared again; a fresh row has none.
+    let server = MockServer::start(MockConfig::default());
+    let dir = tmpdir();
+    let mgr = test_mgr(&dir);
+    let (id, _) = mgr
+        .add_download(&server.url, None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(mgr.get_download(&id).unwrap().unwrap().description, None);
+    mgr.set_download_description(&id, Some("  my note  ")).unwrap();
+    assert_eq!(
+        mgr.get_download(&id).unwrap().unwrap().description.as_deref(),
+        Some("my note"),
+        "the note is trimmed on write"
+    );
+    mgr.set_download_description(&id, Some("")).unwrap();
+    assert_eq!(mgr.get_download(&id).unwrap().unwrap().description, None);
+    mgr.set_download_description(&id, None).unwrap();
+    assert_eq!(mgr.get_download(&id).unwrap().unwrap().description, None);
+}
+
+#[tokio::test]
+async fn probe_url_for_capture_uses_the_capture_cookies() {
+    // Round 67 — the Add URL dialog's size probe sends a
+    // capture's cookies, so a cookie-gated link shows its size
+    // instead of failing with 401.
+    let server = CookieGatedServer::start(true);
+    let dir = tmpdir();
+    let mgr = test_mgr(&dir);
+    let err = mgr.probe_url_for_capture(&server.url, None).await.unwrap_err();
+    assert!(err.to_string().contains("401"), "error: {err}");
+    let cookies = json!([{ "name": DUMMY_COOKIE_NAME, "value": DUMMY_COOKIE_VALUE }]).to_string();
+    let info = mgr
+        .probe_url_for_capture(&server.url, Some(&cookies))
+        .await
+        .unwrap();
+    assert_eq!(info.size, Some(64 * 1024));
+    assert!(server.cookie_seen() >= 1, "the probe must have sent the cookies");
+}
+
+#[tokio::test]
+async fn drain_leaves_download_queued_when_start_drained_is_off() {
+    // The old queued-only behaviour stays available as a setting:
+    // with browser_start_drained off, the drain creates the
+    // download and leaves it queued for the user to start.
+    // (Round 67: the row is 'download_all' — a browser capture
+    // waits for the Add URL dialog and is never drained.)
+    let server = MockServer::start(MockConfig::default());
+    let dir = tmpdir();
+    let mgr = test_mgr(&dir);
+    let store = mgr.store();
+    set_browser_start_drained(store, false);
+    store
+        .enqueue_pending_link(&server.url, None, "download_all")
+        .unwrap();
     let summary = mgr.drain_pending_links().await.unwrap();
     assert_eq!(summary.accepted.len(), 1);
     assert!(summary.rejected.is_empty());
@@ -461,16 +595,12 @@ async fn drain_duplicate_url_gets_different_save_path() {
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
     let store = mgr.store();
+    // Round 67: 'download_all' rows — a browser capture waits
+    // for the Add URL dialog and is never drained.
     for _ in 0..2 {
-        let reply = handle_host_message(
-            store,
-            &HostMessage::DownloadLink {
-                url: server.url.clone(),
-                referrer: None,
-                cookies: vec![],
-            },
-        );
-        assert!(reply.ok);
+        store
+            .enqueue_pending_link(&server.url, None, "download_all")
+            .unwrap();
     }
     let summary = mgr.drain_pending_links().await.unwrap();
     // Both rows are accepted — the duplicate guard does not reject
@@ -496,16 +626,12 @@ async fn drain_marks_dead_link_rejected_and_keeps_going() {
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
     let store = mgr.store();
+    // Round 67: 'download_all' rows — a browser capture waits
+    // for the Add URL dialog and is never drained.
     for url in [&server.url, &good.url] {
-        let reply = handle_host_message(
-            store,
-            &HostMessage::DownloadLink {
-                url: url.clone(),
-                referrer: None,
-                cookies: vec![],
-            },
-        );
-        assert!(reply.ok);
+        store
+            .enqueue_pending_link(url, None, "download_all")
+            .unwrap();
     }
     let summary = mgr.drain_pending_links().await.unwrap();
     assert_eq!(summary.accepted.len(), 1);
@@ -857,6 +983,9 @@ fn host_download_link_rejects_an_invalid_cookie() {
 
 #[tokio::test]
 async fn drain_cookie_gated_link_downloads_when_cookie_present() {
+    // Round 67: a browser capture waits for the Add URL dialog —
+    // the drain leaves it pending, and the dialog's confirm
+    // carries its cookies through the real add path.
     let server = CookieGatedServer::start(true);
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
@@ -870,29 +999,40 @@ async fn drain_cookie_gated_link_downloads_when_cookie_present() {
         },
     );
     assert!(reply.ok, "reply: {:?}", reply);
+    let pending_id = store.list_pending_links(Some("pending")).unwrap()[0].id.clone();
     let summary = mgr.drain_pending_links().await.unwrap();
-    assert_eq!(summary.accepted.len(), 1, "summary: {:?}", summary);
-    assert!(summary.rejected.is_empty());
-    let (pending_id, download_id) = &summary.accepted[0];
     assert!(
-        wait_for_status(&mgr, download_id, "complete", 15).await,
-        "gated download should complete, last status: {}",
-        mgr.get_download(download_id).unwrap().unwrap().status
+        summary.accepted.is_empty(),
+        "the drain must not auto-add a browser capture: {:?}",
+        summary
     );
-    let dl = mgr.get_download(download_id).unwrap().unwrap();
+    assert!(summary.rejected.is_empty());
+    let (download_id, _) = mgr
+        .confirm_pending_link(&pending_id, None, None, None, None, None, true)
+        .await
+        .unwrap();
+    assert!(
+        wait_for_status(&mgr, &download_id, "complete", 15).await,
+        "gated download should complete, last status: {}",
+        mgr.get_download(&download_id).unwrap().unwrap().status
+    );
+    let dl = mgr.get_download(&download_id).unwrap().unwrap();
     assert_eq!(dl.downloaded_bytes, 64 * 1024);
     assert_eq!(std::fs::read(&dl.save_path).unwrap(), payload(64 * 1024));
     // Deciding the row wipes its cookies: the history row keeps no
     // session behind.
-    let row = store.get_pending_link(pending_id).unwrap().unwrap();
+    let row = store.get_pending_link(&pending_id).unwrap().unwrap();
     assert_eq!(row.status, "accepted");
-    assert_eq!(row.cookies, None, "cookies must be wiped when the drain decides the row");
+    assert_eq!(row.cookies, None, "cookies must be wiped when the row is decided");
     // The gated server saw cookies (probe + segments).
     assert!(server.cookie_seen() >= 1, "server saw no Cookie header at all");
 }
 
 #[tokio::test]
 async fn drain_cookie_gated_link_rejected_without_cookie() {
+    // Round 67: the dialog's confirm (not the drain) decides a
+    // browser capture — without its cookies the gated link fails
+    // with 401 and the row is rejected with the reason.
     let server = CookieGatedServer::start(true);
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
@@ -906,15 +1046,20 @@ async fn drain_cookie_gated_link_rejected_without_cookie() {
         },
     );
     assert!(reply.ok, "reply: {:?}", reply);
+    let pending_id = store.list_pending_links(Some("pending")).unwrap()[0].id.clone();
     let summary = mgr.drain_pending_links().await.unwrap();
-    assert_eq!(summary.accepted.len(), 0, "summary: {:?}", summary);
-    assert_eq!(summary.rejected.len(), 1);
     assert!(
-        summary.rejected[0].1.contains("401"),
-        "rejection should name the 401: {:?}",
-        summary.rejected
+        summary.accepted.is_empty(),
+        "the drain must not auto-add a browser capture: {:?}",
+        summary
     );
-    let row = store.get_pending_link(&summary.rejected[0].0).unwrap().unwrap();
+    assert!(summary.rejected.is_empty());
+    let err = mgr
+        .confirm_pending_link(&pending_id, None, None, None, None, None, true)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("401"), "error: {err}");
+    let row = store.get_pending_link(&pending_id).unwrap().unwrap();
     assert_eq!(row.status, "rejected");
     assert_eq!(row.cookies, None);
     assert!(store.list_pending_links(Some("pending")).unwrap().is_empty());
@@ -923,29 +1068,20 @@ async fn drain_cookie_gated_link_rejected_without_cookie() {
 
 #[tokio::test]
 async fn drain_sends_cookies_only_to_the_download_that_carries_them() {
+    // Round 67: the drain still handles 'download_all' rows, and
+    // a row's cookies ride only its own download.
     let gated = CookieGatedServer::start(true);
     let plain = CookieGatedServer::start(false);
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
     let store = mgr.store();
-    let r1 = handle_host_message(
-        store,
-        &HostMessage::DownloadLink {
-            url: gated.url.clone(),
-            referrer: None,
-            cookies: dummy_cookies(),
-        },
-    );
-    assert!(r1.ok, "reply: {:?}", r1);
-    let r2 = handle_host_message(
-        store,
-        &HostMessage::DownloadLink {
-            url: plain.url.clone(),
-            referrer: None,
-            cookies: vec![],
-        },
-    );
-    assert!(r2.ok, "reply: {:?}", r2);
+    let cookies = json!([{ "name": DUMMY_COOKIE_NAME, "value": DUMMY_COOKIE_VALUE }]).to_string();
+    store
+        .enqueue_pending_link_with_cookies(&gated.url, None, "download_all", Some(&cookies))
+        .unwrap();
+    store
+        .enqueue_pending_link(&plain.url, None, "download_all")
+        .unwrap();
     let summary = mgr.drain_pending_links().await.unwrap();
     assert_eq!(summary.accepted.len(), 2, "summary: {:?}", summary);
     for (_, download_id) in &summary.accepted {
@@ -970,7 +1106,6 @@ async fn cookies_are_dropped_when_the_app_restarts() {
     let download_id = {
         let mgr = test_mgr(&dir);
         let store = mgr.store();
-        set_browser_start_drained(store, false);
         let reply = handle_host_message(
             store,
             &HostMessage::DownloadLink {
@@ -980,9 +1115,24 @@ async fn cookies_are_dropped_when_the_app_restarts() {
             },
         );
         assert!(reply.ok, "reply: {:?}", reply);
+        let pending_id = store.list_pending_links(Some("pending")).unwrap()[0].id.clone();
+        // Round 67: the drain leaves the browser capture pending;
+        // the dialog's confirm (Download Later) adds it queued
+        // without starting — its cookies are wiped when the row
+        // is decided, so they live only in this manager's memory.
         let summary = mgr.drain_pending_links().await.unwrap();
-        assert_eq!(summary.accepted.len(), 1, "summary: {:?}", summary);
-        let download_id = summary.accepted[0].1.clone();
+        assert!(
+        summary.accepted.is_empty(),
+        "the drain must not auto-add a browser capture: {:?}",
+        summary
+    );
+        let (download_id, _) = mgr
+            .confirm_pending_link(&pending_id, None, None, None, None, None, false)
+            .await
+            .unwrap();
+        let row = store.get_pending_link(&pending_id).unwrap().unwrap();
+        assert_eq!(row.status, "accepted");
+        assert_eq!(row.cookies, None, "cookies must be wiped when the row is decided");
         // The download is queued, not started — its cookies are
         // still only in this manager's memory.
         assert_eq!(

@@ -241,6 +241,15 @@ chrome.runtime.onInstalled.addListener(() => {
     title: "Download all links on this page with Sonic Manager",
     contexts: ["page"],
   });
+  // Round 68 — the popup v2 has no "Find videos" button any
+  // more, so the video scan moved here: right-click anywhere on
+  // a page and the floating Download button appears on its
+  // videos.
+  chrome.contextMenus.create({
+    id: "fetchline-find-videos",
+    title: "Find videos on this page",
+    contexts: ["page"],
+  });
   void refreshDesktopSettings();
 });
 
@@ -250,6 +259,10 @@ chrome.runtime.onStartup.addListener(() => {
 
 chrome.contextMenus.onClicked.addListener(async (info) => {
   try {
+    if (info.menuItemId === "fetchline-find-videos") {
+      await injectVideoDetector();
+      return;
+    }
     if (info.menuItemId === "fetchline-download-all") {
       // No content script, so the extension cannot list the page's
       // links itself. The host expands the page: it fetches the page
@@ -328,6 +341,33 @@ chrome.downloads.onCreated.addListener(async (item) => {
   }
 });
 
+// Video grabber (S08): inject the detector into the ACTIVE tab
+// only, and only because the user asked — the right-click menu's
+// "Find videos on this page" item, or the old popup button's
+// `scan_page_for_videos` message. activeTab grants temporary
+// access to that one tab; there is no content_scripts entry, no
+// host permission and no <all_urls>, so no page is ever scanned
+// unprompted. Excluded sites and a switched-off desktop flag
+// refuse the scan here, before anything is injected.
+async function injectVideoDetector() {
+  const state = await loadState();
+  if (state[STORE_KEYS.desktopIntegration] === false) {
+    throw new Error("Browser integration is turned off in Sonic Manager settings");
+  }
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tab = tabs[0];
+  if (!tab || !tab.id || !tab.url || !tab.url.startsWith("http")) {
+    throw new Error("This page has no web address to scan.");
+  }
+  if (isExcluded(hostOf(tab.url), state)) {
+    throw new Error("This site is opted out — videos here are not scanned.");
+  }
+  await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    files: ["video-detect.js", "content.js"],
+  });
+}
+
 // Let the popup ask for a fresh connection check on demand.
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message && message.type === "refresh_desktop_settings") {
@@ -365,36 +405,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     });
     return false;
   }
-  // Video grabber (S08): inject the detector into the ACTIVE tab
-  // only, and only because the user clicked "Find videos on this
-  // page" in the popup. activeTab grants temporary access to that
-  // one tab; there is no content_scripts entry, no host permission
-  // and no <all_urls>, so no page is ever scanned unprompted.
-  // Excluded sites and a switched-off desktop flag refuse the scan
-  // here, before anything is injected.
+  // Video grabber (S08): inject the detector — the same helper
+  // the right-click menu uses now that the popup has no button
+  // for it. Kept as a message so an older popup (or a test) can
+  // still ask for a scan.
   if (message && message.type === "scan_page_for_videos") {
-    (async () => {
-      const state = await loadState();
-      if (state[STORE_KEYS.desktopIntegration] === false) {
-        sendResponse({ ok: false, error: "Browser integration is turned off in Sonic Manager settings" });
-        return;
-      }
-      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-      const tab = tabs[0];
-      if (!tab || !tab.id || !tab.url || !tab.url.startsWith("http")) {
-        sendResponse({ ok: false, error: "This page has no web address to scan." });
-        return;
-      }
-      if (isExcluded(hostOf(tab.url), state)) {
-        sendResponse({ ok: false, error: "This site is opted out — videos here are not scanned." });
-        return;
-      }
-      await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        files: ["video-detect.js", "content.js"],
-      });
-      sendResponse({ ok: true });
-    })().catch((err) => sendResponse({ ok: false, error: String(err) }));
+    injectVideoDetector()
+      .then(() => sendResponse({ ok: true }))
+      .catch((err) => sendResponse({ ok: false, error: String(err) }));
     return true;
   }
   return false;

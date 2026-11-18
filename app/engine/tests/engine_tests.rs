@@ -1772,6 +1772,9 @@ async fn settings_defaults_and_round_trip() {
     assert_eq!(defaults.default_action, "start_now");
     assert_eq!(defaults.duplicate_action, "rename");
     assert!(defaults.confirm_delete);
+    // Round 68 — the master sounds switch defaults to on.
+    assert!(defaults.sounds_enabled);
+    assert!(defaults.show_download_complete_dialog);
 
     let mut changed = defaults.clone();
     changed.default_download_folder = dir.to_string_lossy().to_string();
@@ -1784,7 +1787,13 @@ async fn settings_defaults_and_round_trip() {
     changed.confirm_delete = false;
     changed.connection_timeout_secs = 60;
     changed.max_retries = 2;
+    // Round 68 — the master sounds switch round-trips.
+    changed.sounds_enabled = false;
     let saved = store.update_settings(&changed).unwrap();
+    assert!(!saved.sounds_enabled);
+    let mut back_on = saved.clone();
+    back_on.sounds_enabled = true;
+    assert!(store.update_settings(&back_on).unwrap().sounds_enabled);
     assert_eq!(saved.max_connections, 3);
     assert_eq!(saved.speed_limit_kbps, Some(256));
     assert_eq!(saved.theme, "dark");
@@ -1809,8 +1818,13 @@ async fn settings_reject_invalid_values() {
     bad.max_connections = 0;
     assert!(store.update_settings(&bad).is_err());
     bad = base.clone();
-    bad.max_connections = 17;
+    bad.max_connections = 33;
     assert!(store.update_settings(&bad).is_err());
+    // Round 68 — the cap is 32 now (IDM parity): 32 saves, 33
+    // is rejected.
+    bad = base.clone();
+    bad.max_connections = 32;
+    assert!(store.update_settings(&bad).is_ok());
     bad = base.clone();
     bad.speed_limit_kbps = Some(-5);
     assert!(store.update_settings(&bad).is_err());
@@ -1838,8 +1852,9 @@ async fn settings_reject_invalid_values() {
     bad = base.clone();
     bad.language = "   ".to_string();
     assert!(store.update_settings(&bad).is_err());
-    // Nothing was stored: the row is unchanged after all the rejections.
-    assert_eq!(store.get_settings().unwrap().max_connections, base.max_connections);
+    // The REJECTED writes stored nothing: the row holds the last
+    // valid value — 32, saved above (Round 68 cap).
+    assert_eq!(store.get_settings().unwrap().max_connections, 32);
 }
 
 #[test]

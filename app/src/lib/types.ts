@@ -54,6 +54,9 @@ export interface DownloadRow {
   /** When the scan finished (UTC ISO-8601), or null while
    *  scanning / never scanned. */
   scan_scanned_at: string | null
+  /** Free-text note from the Add URL dialog's Description field
+   *  (Round 67, IDM's Download File Info has one). */
+  description?: string | null
 }
 
 export interface SegmentProgress {
@@ -141,6 +144,24 @@ export interface ProbeInfo {
 export type RefreshAddressResult =
   | { outcome: 'switched'; kept_bytes: number; size_bytes: number | null }
   | { outcome: 'mismatch'; size_bytes: number | null; etag: string | null; filename: string | null }
+
+/** Round 67 — one link the browser extension caught, waiting
+ *  for the Add URL dialog. Mirrors the engine's `PendingLinkRow`:
+ *  `source` is 'browser' | 'video' | 'download_all', `status`
+ *  is 'pending' while it waits. `cookies` is the browser's
+ *  cookies for the URL as a JSON array (or null) — the dialog's
+ *  probe and confirm send them, so a cookie-gated link works. */
+export interface PendingLinkRow {
+  id: string
+  url: string
+  referrer: string | null
+  source: string
+  status: string
+  download_id: string | null
+  error: string | null
+  cookies: string | null
+  created_at: string
+}
 
 /** Round 52 — clipboard monitoring: the engine's offer for a
  *  download link copied to the clipboard. Mirrors the engine's
@@ -420,6 +441,15 @@ export interface Settings {
    *  the only progress view; double-clicking a row still opens
    *  its window. */
   show_progress_window: boolean
+  /** "Download complete" dialog (Round 66): when a download
+   *  finishes, its progress window closes and a separate dialog
+   *  shows the file, size, URL and save path (default true).
+   *  Off means no dialog — the progress window stays open with
+   *  its Open file / Open folder footer. */
+  show_download_complete_dialog: boolean
+  /** Notification sounds master switch (Round 68): when off,
+   *  neither the completion sound nor the error alert plays. */
+  sounds_enabled: boolean
   antivirus_command: string | null
   /** Antivirus hook (S14): the on/off switch for the scan
    *  (default on — an empty command still means no scan) and

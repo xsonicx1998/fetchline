@@ -123,6 +123,20 @@ pub struct Settings {
     /// leaves the table as the only progress view; double-clicking
     /// a row still opens its window.
     pub show_progress_window: bool,
+    /// "Download complete" dialog (Round 66): when a download
+    /// finishes, its progress window closes and a separate
+    /// dialog shows the file, size, URL and save path (default
+    /// on). Off means no dialog — the progress window stays open
+    /// with its Open file / Open folder footer instead. The
+    /// dialog's own "Don't show this dialog again" checkbox
+    /// turns this off; Settings turns it back on.
+    pub show_download_complete_dialog: bool,
+    /// Notification sounds (Round 68): the master on/off switch
+    /// for the completion sound (tada) and the error alert
+    /// (default on). Off silences both the built-in sounds and
+    /// any user-configured WAVs — the engine's `emit_sound`
+    /// checks it too, so a configured file stays silent as well.
+    pub sounds_enabled: bool,
     pub antivirus_command: Option<String>,
     /// Antivirus hook (S14): the on/off switch (default on — an
     /// empty command still means no scan) and the scan timeout in
@@ -182,6 +196,8 @@ impl Default for Settings {
             clipboard_monitoring: true,
             browser_start_drained: true,
             show_progress_window: true,
+            show_download_complete_dialog: true,
+            sounds_enabled: true,
             antivirus_command: None,
             antivirus_enabled: true,
             antivirus_timeout_secs: crate::antivirus::DEFAULT_SCAN_TIMEOUT_SECS,
@@ -302,6 +318,11 @@ pub struct DownloadRow {
     /// S03 still read.
     #[serde(default)]
     pub accept_ranges: Option<bool>,
+    /// Free-text note from the Add URL dialog's Description field
+    /// (Round 67, IDM's Download File Info has one). `#[serde(default)]`
+    /// so rows written before Round 67 still read.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -502,6 +523,12 @@ impl Store {
                 "ALTER TABLE downloads ADD COLUMN queue_position INTEGER NOT NULL DEFAULT 0",
                 [],
             )?;
+        }
+        if !cols.iter().any(|c| c == "description") {
+            // Added in Round 67 (2026-11-18): the Add URL dialog's
+            // Description field (IDM's Download File Info has one) —
+            // a free-text note on the download.
+            conn.execute("ALTER TABLE downloads ADD COLUMN description TEXT", [])?;
         }
         drop(stmt);
         // Added in the browser-extension milestone (S13): the
@@ -718,6 +745,16 @@ impl Store {
                 "show_progress_window",
                 "INTEGER NOT NULL DEFAULT 1",
             ),
+            // "Download complete" dialog (Round 66): the on/off
+            // switch, default on.
+            (
+                "settings",
+                "show_download_complete_dialog",
+                "INTEGER NOT NULL DEFAULT 1",
+            ),
+            // Notification sounds (Round 68): the master on/off
+            // switch, default on.
+            ("settings", "sounds_enabled", "INTEGER NOT NULL DEFAULT 1"),
             ("settings", "default_action", "TEXT NOT NULL DEFAULT 'start_now'"),
             ("settings", "duplicate_action", "TEXT NOT NULL DEFAULT 'rename'"),
             ("settings", "confirm_delete", "INTEGER NOT NULL DEFAULT 1"),
@@ -1352,7 +1389,7 @@ impl Store {
              update_url, last_update_check_at, \
              quota_enabled, quota_mb, quota_hours, \
              antivirus_enabled, antivirus_timeout_secs, show_progress_window, \
-             clipboard_monitoring \
+             clipboard_monitoring, show_download_complete_dialog, sounds_enabled \
              FROM settings WHERE id = 1",
             [],
             |r| {
@@ -1400,6 +1437,8 @@ impl Store {
                     ),
                     show_progress_window: r.get::<_, i64>(28)? != 0,
                     clipboard_monitoring: r.get::<_, i64>(29)? != 0,
+                    show_download_complete_dialog: r.get::<_, i64>(30)? != 0,
+                    sounds_enabled: r.get::<_, i64>(31)? != 0,
                 })
             },
         );
@@ -1411,9 +1450,9 @@ impl Store {
     /// not send are validated here too, so a bad engine caller cannot
     /// store a max-connections of 0 or a negative timeout.
     pub fn update_settings(&self, s: &Settings) -> Result<Settings> {
-        if !(1..=16).contains(&s.max_connections) {
+        if !(1..=32).contains(&s.max_connections) {
             return Err(EngineError::InvalidState(
-                "Use between 1 and 16 connections per download".to_string(),
+                "Use between 1 and 32 connections per download".to_string(),
             ));
         }
         if let Some(kbps) = s.speed_limit_kbps {
@@ -1532,6 +1571,7 @@ impl Store {
              quota_enabled = ?24, quota_mb = ?25, quota_hours = ?26, \
              antivirus_enabled = ?27, antivirus_timeout_secs = ?28, \
              show_progress_window = ?29, clipboard_monitoring = ?30, \
+             show_download_complete_dialog = ?31, sounds_enabled = ?32, \
              updated_at = datetime('now') WHERE id = 1",
             params![
                 s.default_download_folder.trim(),
@@ -1567,6 +1607,8 @@ impl Store {
                 s.antivirus_timeout_secs,
                 if s.show_progress_window { 1 } else { 0 },
                 if s.clipboard_monitoring { 1 } else { 0 },
+                if s.show_download_complete_dialog { 1 } else { 0 },
+                if s.sounds_enabled { 1 } else { 0 },
             ],
         )?;
         drop(conn);
@@ -2328,7 +2370,7 @@ impl Store {
             "SELECT id, url, final_url, filename, save_path, category_id, queue_id, \
              queue_position, size_bytes, downloaded_bytes, status, speed_bps, eta_seconds, \
              etag, last_modified, error_message, created_at, completed_at, \
-             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges, updated_at, grabber_project_id \
+             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges, updated_at, grabber_project_id, description \
              FROM downloads WHERE queue_id = ?1 AND status != 'deleted' \
              ORDER BY queue_position ASC, created_at ASC",
         )?;
@@ -2418,7 +2460,7 @@ impl Store {
             "SELECT id, url, final_url, filename, save_path, category_id, queue_id, \
              queue_position, size_bytes, downloaded_bytes, status, speed_bps, eta_seconds, \
              etag, last_modified, error_message, created_at, completed_at, \
-             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges, updated_at, grabber_project_id \
+             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges, updated_at, grabber_project_id, description \
              FROM downloads WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![id], row_to_download)?;
@@ -2434,7 +2476,7 @@ impl Store {
             "SELECT id, url, final_url, filename, save_path, category_id, queue_id, \
              queue_position, size_bytes, downloaded_bytes, status, speed_bps, eta_seconds, \
              etag, last_modified, error_message, created_at, completed_at, \
-             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges, updated_at, grabber_project_id \
+             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges, updated_at, grabber_project_id, description \
              FROM downloads WHERE status != 'deleted' ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], row_to_download)?;
@@ -2447,6 +2489,20 @@ impl Store {
             "UPDATE downloads SET status = ?1, error_message = ?2, updated_at = datetime('now') \
              WHERE id = ?3",
             params![status, error, id],
+        )?;
+        Ok(())
+    }
+
+    /// Round 67 — set the Add URL dialog's Description note on a
+    /// download (`None` / empty clears it). Called right after
+    /// `add_download`, so the description never has to ride the
+    /// add path's signature (and its many call sites).
+    pub fn set_download_description(&self, id: &str, description: Option<&str>) -> Result<()> {
+        let conn = self.lock_conn();
+        let description = description.map(str::trim).filter(|d| !d.is_empty());
+        conn.execute(
+            "UPDATE downloads SET description = ?1 WHERE id = ?2",
+            params![description, id],
         )?;
         Ok(())
     }
@@ -2489,7 +2545,7 @@ impl Store {
                 "SELECT id, url, final_url, filename, save_path, category_id, queue_id, \
                  queue_position, size_bytes, downloaded_bytes, status, speed_bps, eta_seconds, \
                  etag, last_modified, error_message, created_at, completed_at, \
-                 speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges, updated_at, grabber_project_id \
+                 speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges, updated_at, grabber_project_id, description \
                  FROM downloads WHERE id = ?1",
                 params![id],
                 row_to_download,
@@ -2924,5 +2980,6 @@ fn row_to_download(r: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadRow> {
         accept_ranges: r.get::<_, Option<i64>>(23)?.map(|v| v != 0),
         updated_at: r.get(24)?,
         grabber_project_id: r.get(25)?,
+        description: r.get(26)?,
     })
 }

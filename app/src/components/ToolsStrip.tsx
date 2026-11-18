@@ -1,13 +1,10 @@
-import { Clapperboard, Clipboard, Globe, ListOrdered, RefreshCw, Timer } from 'lucide-react'
+import { Clapperboard, Clipboard, Globe, ListOrdered, Timer } from 'lucide-react'
 
 interface ToolsStripProps {
   onQueue: () => void
   onScheduler: () => void
   onVideoGrabber: () => void
   onSiteGrabber: () => void
-  onRefreshAddress: () => void
-  /** Refresh address only works on a paused or failed download. */
-  canRefreshAddress: boolean
   clipboardOn: boolean
   onToggleClipboard: () => void
 }
@@ -15,18 +12,18 @@ interface ToolsStripProps {
 /** Round 62 — the slim TOOLS strip under the toolbar (approved
  *  mockup): the features that used to live only in menus are
  *  visible in the main window itself — Queue, Scheduler,
- *  Video Grabber, Site Grabber, Refresh Address and Clipboard
- *  monitoring (with its ON/OFF state). History is NOT here
- *  (Round 63): it already lives in the sidebar. No settings
- *  gear here: Settings is reached from the Options menu, so a
- *  gear would be redundant. */
+ *  Video Grabber, Site Grabber and Clipboard monitoring (with
+ *  its ON/OFF state). History is NOT here (Round 63): it
+ *  already lives in the sidebar. Refresh Address is NOT here
+ *  either (Round 65): it lives only in a download row's
+ *  right-click menu, like IDM's. No settings gear here:
+ *  Settings is reached from the Options menu, so a gear would
+ *  be redundant. */
 export function ToolsStrip({
   onQueue,
   onScheduler,
   onVideoGrabber,
   onSiteGrabber,
-  onRefreshAddress,
-  canRefreshAddress,
   clipboardOn,
   onToggleClipboard,
 }: ToolsStripProps) {
@@ -49,18 +46,6 @@ export function ToolsStrip({
       </StripButton>
       <StripButton onClick={onSiteGrabber} icon={<Globe className="h-3.5 w-3.5" aria-hidden="true" />}>
         Site Grabber
-      </StripButton>
-      <StripButton
-        onClick={onRefreshAddress}
-        disabled={!canRefreshAddress}
-        title={
-          canRefreshAddress
-            ? 'Replace the selected download’s expired link and resume from the downloaded bytes'
-            : 'Select a paused or failed download to refresh its address'
-        }
-        icon={<RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />}
-      >
-        Refresh Address
       </StripButton>
       <StripButton
         onClick={onToggleClipboard}

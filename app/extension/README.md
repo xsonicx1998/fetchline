@@ -22,7 +22,7 @@ Messages (see `replica/architecture.md` for the shape):
 
 | message | status |
 | --- | --- |
-| `download_link {url, referrer, cookies?}` | Implemented — context menu, download watcher, popup "Send this page". `cookies` (S13 finish) carries the target URL's cookies as name/value pairs, only when the browser has any for that URL; the host attaches them to that download's probe and segment requests for that host only. |
+| `download_link {url, referrer, cookies?}` | Implemented — context menu, download watcher. `cookies` (S13 finish) carries the target URL's cookies as name/value pairs, only when the browser has any for that URL; the host attaches them to that download's probe and segment requests for that host only. |
 | `download_all {page_url, links[]}` | Implemented, with one deviation: the extension sends `links: []` because it runs no content script and cannot list a page's links itself. The host expands the page with the engine's `fetch_page_links` (fetch + probe) and enqueues what it finds. When links *are* supplied, each is enqueued directly. |
 | `video_found {page_url, variants[], cookies?}` | Implemented (S08 / F05) — the extension's video panel sends the single quality the user picked; the host validates each variant (http(s) only, known media extension, dedup, excluded sites, DRM refused) and enqueues it into the same `pending_links` queue with source `"video"`. `cookies` carries the chosen variant URL's cookies, same rules as `download_link`. A message that queues nothing is an error, not `ok: true`. |
 | `ping` / `get_settings` | Implemented (not in architecture.md) — the popup's connection check, and the extension reading the desktop `browser_integration` flag and `excluded_sites` list. |
@@ -65,39 +65,32 @@ duplicate de-duplicated, dead link skipped, excluded page and
 integration-off both refused, malformed JSON answered with a
 framed error).
 
-### Popup: pending count and last hand-off
+### Popup (Round 68, v2)
 
-The popup shows two lines the background worker keeps in
-`chrome.storage.local`, updated on every hand-off and on every
-desktop-settings refresh:
-
-- **Pending count** — how many links are waiting in the
-  `pending_links` queue for the desktop app to drain. The host
-  reports it in every `get_settings` / queued reply
-  (`pending_count`); unknown until the host first answers.
-- **Last hand-off** — when the last send to Fetchline happened,
-  whether it worked, and what the host said (or that it could
-  not be reached). Only the outcome is stored — never a URL.
-
-Both are rendered by pure functions (`formatPendingCount`,
-`formatHandoff` in `popup.js`) and tested without a browser
-(`npm run test:extension-popup`, 6 tests; the background worker's
-recording is tested the same way, `npm run
-test:extension-background`, 4 tests).
+The popup is deliberately simple: the connection pill
+("Connected" / "Not connected", from a `ping` to the host), a
+Developer card (Mohand Kandil, with a Facebook link), one note
+line about auto-capture, and the version footer. There are no
+toggles or buttons any more — catching is governed by the
+desktop app's browser-integration setting, per-site opt-outs
+live in the desktop Settings, and the background worker still
+records every hand-off (`lastHandoff`, `pendingCount`) in
+`chrome.storage.local` for its own use. The pill is tested
+without a browser (`npm run test:extension-popup`, 3 tests).
 
 ### Video grabber (S08 / F05)
 
-The popup's **"Find videos on this page"** button asks the
-background worker to inject `video-detect.js` + `content.js` into
+The right-click menu's **"Find videos on this page"** item asks
+the background worker to inject `video-detect.js` + `content.js` into
 the ACTIVE tab only, via `chrome.scripting` + `activeTab` — a user
 gesture, nothing automatic. There is no `content_scripts` entry in
 the manifest, no host permission and no `<all_urls>`, so no page
 is ever scanned unprompted. Excluded sites and a switched-off
 desktop flag refuse the scan before anything is injected.
 
-On the page, `content.js` shows a Fetchline-branded floating
-"Download this video" button while the pointer is over a video
-player that has a downloadable stream, opening a small panel that
+On the page, `content.js` shows a Sonic-branded floating
+"Download" button at the top right of a video player that has a
+downloadable stream, opening a small dark panel that
 lists that video's qualities/formats (MP4 / WebM / FLV / MP3
 where actually available). Picking one sends `video_found` with
 `variants: [chosen]` — only the chosen variant, so the desktop
@@ -137,15 +130,17 @@ counts, so the two detectors cannot drift apart silently.
 ### Direction of truth: the desktop setting wins
 
 `settings.browser_integration` (Options > General in the desktop
-app) is the master switch. The host reports it, the popup shows it,
-and when it is off the extension must not catch — the popup's catch
-toggle is disabled with an explanation, and the background worker
-skips interception. The extension's own catch toggle (default ON,
-stored in `chrome.storage.local`) only matters while the desktop
-flag is on. Per-site opt-outs live in two places: the desktop
-`excluded_sites` list (edited in Settings) and the extension-local
-list (popup, "Don't catch downloads from this site"); either one
-opting a site out is enough to skip it.
+app) is the master switch. The host reports it, the popup shows it
+as the connection state, and when it is off the extension must not
+catch — the background worker skips interception. The extension's
+own catch toggle (default ON, stored in `chrome.storage.local`)
+only matters while the desktop flag is on; since popup v2 (Round
+68) it has no popup UI any more, so it stays at whatever it was
+last set to (ON for a fresh install). Per-site opt-outs live in
+two places: the desktop `excluded_sites` list (edited in
+Settings) and the extension-local list (no popup UI since v2 —
+an earlier opt-out stays in force); either one opting a site out
+is enough to skip it.
 
 ### Privacy
 
@@ -166,9 +161,9 @@ opting a site out is enough to skip it.
   expanded; right-click the individual links instead, which do
   carry their cookies.
 - The extension requests no host permissions. It injects the video
-  detector into a page only when the user clicks "Find videos on
-  this page" in the popup (activeTab + scripting, that one tab,
-  that one gesture); it never reads page content unprompted.
+  detector into a page only when the user picks "Find videos on
+  this page" in the right-click menu (activeTab + scripting, that
+  one tab, that one gesture); it never reads page content unprompted.
 - The host never logs a message body — only the message type goes
   to stderr.
 
@@ -176,13 +171,13 @@ opting a site out is enough to skip it.
 
 | permission | why |
 | --- | --- |
-| `activeTab` | The popup's "Send this page" button needs the current tab's URL. Granted only when the user opens the popup — no standing access to tabs. |
+| `activeTab` | The video scan (right-click menu) needs the current tab. Granted only on that gesture — no standing access to tabs. |
 | `contextMenus` | The "Download with Fetchline" right-click item on links and media elements. |
 | `downloads` | The download watcher: cancel a browser download that Fetchline is taking over (`downloads.cancel` / `erase`). |
 | `storage` | Persist the catch toggle and the per-site opt-out list, and cache the desktop settings the host last reported. |
 | `cookies` | Read the cookies for the exact URL being handed over (S13 finish), so a login-only link can download. Only name/value pairs are sent, only for that URL, never logged, never stored past the drain — see Privacy above. |
 | `nativeMessaging` | Talk to `fetchline-host` over stdin/stdout. |
-| `scripting` | Inject the video detector (`video-detect.js` + `content.js`) into the ACTIVE tab only, and only when the user clicks "Find videos on this page" in the popup. `activeTab` grants that one tab, on that one gesture — there is still no `content_scripts` entry and no host permission, so no page is ever scanned without the user asking. |
+| `scripting` | Inject the video detector (`video-detect.js` + `content.js`) into the ACTIVE tab only, and only when the user picks "Find videos on this page" in the right-click menu. `activeTab` grants that one tab, on that one gesture — there is still no `content_scripts` entry and no host permission, so no page is ever scanned without the user asking. |
 
 Not requested, on purpose: `tabs` (only
 the active tab, via `activeTab`), host permissions / `<all_urls>`
@@ -283,31 +278,34 @@ links the app never sees.
 ## Verify end-to-end
 
 1. Start the Fetchline desktop app once, so its database exists.
-2. Open the extension popup: it should say **"Connected to the
-   Fetchline desktop app"**. If it says the app is not reachable,
-   the host manifest path, the extension ID in
-   `allowed_origins`, or the binary path is wrong — check the
+2. Open the extension popup: it should say **"Connected"**. If it
+   says "Not connected", the host manifest path, the extension ID
+   in `allowed_origins`, or the binary path is wrong — check the
    browser's extension error page first.
 3. Right-click any link to a `.zip` / `.pdf` / `.mp4` file and
-   choose **Download with Fetchline**. The link should start
-   downloading in the desktop app within 30 seconds (or
-   immediately on the next app start), and the popup should show
-   the pending count dropping and the last hand-off as sent.
-   (With "Start browser-caught downloads at once" off in Options
-   > General, it appears queued instead.)
+   choose **Download with Fetchline**. The Add URL dialog opens
+   in the desktop app with the link pre-filled (Round 67) — pick
+   Start Download, and the file downloads. (With "Start
+   browser-caught downloads at once" off in Options > General, it
+   appears queued instead.)
 4. Right-click the page background and choose **Download all
    links on this page with Fetchline**: every downloadable link
    on the page is queued (dead links skipped), and they start
    downloading the same way.
 5. Start a download of a `.zip` in the browser with catching on:
    the browser download is cancelled and the file appears in
-   Fetchline instead. Turn catching off in the popup and the
-   browser downloads normally again.
-6. Opt a site out in the popup ("Don't catch downloads from this
-   site") and repeat step 5 on that site: the browser download
-   proceeds untouched.
+   Fetchline instead. Turn browser integration off in the desktop
+   app and the browser downloads normally again.
+6. Add a site to the desktop app's excluded-sites list (Settings)
+   and repeat step 5 on that site: the browser download proceeds
+   untouched.
 7. Turn browser integration off in the desktop app (Options >
-   General): the popup toggle disables itself, and catching stops.
+   General): catching stops. The popup still says "Connected"
+   (the host is reachable) — integration is a separate setting.
+8. Right-click a page with a video and choose **Find videos on
+   this page**: a "Download" button appears at the top right of
+   the video; click it, pick a quality, and the Add URL dialog
+   opens with that stream pre-filled.
 
 Without a browser handy, the host can be exercised directly — see
 `app/engine/tests/extension_tests.rs` (framing, host boundary,
