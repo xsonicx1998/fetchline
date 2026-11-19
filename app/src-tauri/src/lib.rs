@@ -804,7 +804,7 @@ fn spawn_show_fallback(window: &tauri::WebviewWindow) {
 /// (focus alone is best-effort there); the 1 s clear keeps the
 /// dialog from staying on top forever. Main and progress
 /// windows just show — they never take the topmost flag.
-fn show_window_ready(window: &tauri::Window) {
+fn show_window_ready(window: &tauri::WebviewWindow) {
     let _ = window.show();
     let label = window.label();
     if label.starts_with("add-url-")
@@ -832,7 +832,7 @@ fn show_window_ready(window: &tauri::Window) {
 /// over the user's browser even when the main window is hidden
 /// to the tray.
 #[tauri::command]
-async fn window_ready(window: tauri::Window) -> Result<(), String> {
+async fn window_ready(window: tauri::WebviewWindow) -> Result<(), String> {
     show_window_ready(&window);
     Ok(())
 }
