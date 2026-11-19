@@ -1,4 +1,5 @@
 import { useEffect } from 'react'
+import { X } from 'lucide-react'
 import { formatBytes, formatDateTime, formatSpeed, statusLabel } from '../lib/format'
 import type { CategoryRow, DownloadRow, QueueRow } from '../lib/types'
 import { Button } from './Button'
@@ -64,14 +65,21 @@ export function DownloadPropertiesDialog({
       aria-modal="true"
       aria-label={`Properties of ${d.filename}`}
       className="fixed inset-0 z-20 flex items-center justify-center bg-black/50 p-4"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose()
-      }}
     >
       <div className="w-full max-w-lg rounded-lg border border-border bg-surface-raised p-6 shadow-pop">
-        <h2 className="truncate text-lg font-semibold" title={d.filename}>
-          {d.filename}
-        </h2>
+        <div className="flex items-start justify-between gap-4">
+          <h2 className="min-w-0 truncate text-lg font-semibold" title={d.filename}>
+            {d.filename}
+          </h2>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="shrink-0 rounded-md p-1 text-text-muted transition-colors hover:bg-surface-2 hover:text-text"
+          >
+            <X className="h-4 w-4" aria-hidden="true" />
+          </button>
+        </div>
         <dl className="mt-4 space-y-2 text-sm">
           {rows.map(([label, value]) => (
             <div key={label} className="grid grid-cols-[110px_1fr] gap-2">

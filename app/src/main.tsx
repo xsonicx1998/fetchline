@@ -4,8 +4,23 @@ import App from './App'
 import { DownloadCompleteDialog } from './components/DownloadCompleteDialog'
 import { DownloadErrorDialog } from './components/DownloadErrorDialog'
 import { ProgressWindow } from './components/ProgressWindow'
+import { StandaloneAddUrlWindow } from './components/StandaloneAddUrlWindow'
 import { webviewHeartbeat, windowReady } from './lib/api'
 import './index.css'
+
+/** Round 74 (8) — the WebView's default right-click menu
+ *  (Refresh / Save as / Print) is suppressed in EVERY window:
+ *  this bundle loads in all of them, so one document-level
+ *  listener covers the main window, the progress windows and
+ *  the dialog windows. Our own menu is unaffected — it is a
+ *  React `onContextMenu` handler on the download rows
+ *  (DownloadTable's RowMenu), which runs before this listener
+ *  and draws its own DOM menu; it never needs the native one.
+ *  No other component relies on the native menu (text fields
+ *  keep keyboard copy/paste). */
+document.addEventListener('contextmenu', (e) => {
+  e.preventDefault()
+})
 
 /** Round 71 (C3) — show-when-ready: every window is built
  *  hidden (`visible: false`) so it never flashes a blank first
@@ -14,8 +29,8 @@ import './index.css'
  *  content. A failure is swallowed — the 3 s Rust fallback in
  *  `spawn_show_fallback` shows the window anyway, so a missed
  *  signal can never hide a window forever. One component serves
- *  all four window kinds (main / progress / complete / error):
- *  it renders nothing and sits next to the real root. */
+ *  all five window kinds (main / progress / complete / error /
+ *  add-url): it renders nothing and sits next to the real root. */
 function WindowReady() {
   useLayoutEffect(() => {
     void windowReady().catch(() => undefined)
@@ -74,6 +89,22 @@ function errorDownloadId(): string | null {
 
 const errorId = errorDownloadId()
 
+/** Round 74 (13) — the standalone Add URL window for a browser
+ *  capture: label `add-url-<pending-link-id>`, the link id from
+ *  the initialization script (`window.__ADD_URL_ID__`, set by
+ *  the `open_add_url_window` Tauri command) or, as a fallback,
+ *  from `#add-url=<link id>` in the URL — the same Round 57
+ *  mechanism as the progress / complete / error windows, with
+ *  the same UUID validation. */
+function addUrlLinkId(): string | null {
+  const fromInit = (window as unknown as { __ADD_URL_ID__?: unknown }).__ADD_URL_ID__
+  if (typeof fromInit === 'string' && /^[0-9a-fA-F-]+$/.test(fromInit)) return fromInit
+  const match = /^#add-url=([0-9a-fA-F-]+)$/.exec(window.location.hash)
+  return match ? match[1] : null
+}
+
+const addUrlId = addUrlLinkId()
+
 /** Webview heartbeat (§7.4, Round 56): this window's JS pings
  *  the backend every 5 s with its label (`main`,
  *  `progress-<download id>`); Rust logs "heartbeat lost" when
@@ -92,9 +123,11 @@ const errorId = errorDownloadId()
  *  Skipped for the "Download complete" dialog window (Round
  *  66) and the "Download failed" dialog window (Round 68):
  *  both are transient, register no heartbeat entry, and the
- *  monitor must never auto-reload either as a progress window. */
+ *  monitor must never auto-reload either as a progress window.
+ *  Skipped for the standalone Add URL window too (Round 74):
+ *  same reasons — transient, and never a progress window. */
 const windowLabel = progressId !== null ? `progress-${progressId}` : 'main'
-if (completeId === null && errorId === null) {
+if (completeId === null && errorId === null && addUrlId === null) {
   let pingInFlight = false
   window.setInterval(() => {
     if (pingInFlight) return
@@ -153,6 +186,8 @@ ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
       <DownloadCompleteDialog downloadId={completeId} />
     ) : errorId !== null ? (
       <DownloadErrorDialog downloadId={errorId} />
+    ) : addUrlId !== null ? (
+      <StandaloneAddUrlWindow linkId={addUrlId} />
     ) : (
       <App />
     )}

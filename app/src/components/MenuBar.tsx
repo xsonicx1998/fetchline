@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react'
-import { getCurrentWindow } from '@tauri-apps/api/window'
 import type { DownloadRow, QueueRow } from '../lib/types'
 import { Button } from './Button'
 
@@ -25,6 +24,10 @@ export interface MenuBarActions {
   siteGrabber: () => void
   settings: () => void
   checkUpdates: () => void
+  /** Round 74 (10) — File > Exit quits the whole app (the
+   *  `exit_app` command), instead of hiding the main window to
+   *  the tray like its X does. */
+  exit: () => void
 }
 
 interface MenuBarProps {
@@ -82,6 +85,17 @@ export function MenuBar({ actions, selected, queue, hasDownloading, hasComplete 
     return () => document.removeEventListener('keydown', onKeyDown)
   }, [openMenu])
 
+  // Round 74 (14) — Escape closes the About dialog too (it had
+  // only its Close button and a backdrop click before).
+  useEffect(() => {
+    if (!showAbout) return
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') setShowAbout(false)
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [showAbout])
+
   const canResume = selected !== null && (selected.status === 'paused' || selected.status === 'error')
   const canStop = selected !== null && selected.status === 'downloading'
   const canStartQueue = queue !== null && !queue.running && queue.file_count > 0
@@ -107,7 +121,7 @@ export function MenuBar({ actions, selected, queue, hasDownloading, hasComplete 
             label="Exit"
             onClick={() => {
               setOpenMenu(null)
-              void getCurrentWindow().close().catch(() => undefined)
+              actions.exit()
             }}
           />
         </>
@@ -223,9 +237,6 @@ export function MenuBar({ actions, selected, queue, hasDownloading, hasComplete 
           aria-modal="true"
           aria-labelledby="about-title"
           className="fixed inset-0 z-20 flex items-center justify-center bg-black/50 p-4"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setShowAbout(false)
-          }}
         >
           <div className="w-full max-w-sm rounded-lg border border-border bg-surface-raised p-6 shadow-pop">
             <h2 id="about-title" className="text-lg font-semibold">

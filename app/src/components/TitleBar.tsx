@@ -36,6 +36,7 @@ export function TitleBar({
   showMinimize = true,
   showMaximize = true,
   onClose,
+  draggable = true,
 }: {
   title: string
   icon?: boolean
@@ -53,6 +54,11 @@ export function TitleBar({
    *  own OS window), X must dismiss the overlay, not close the
    *  app's main window. Absent, X keeps its old behaviour. */
   onClose?: () => void
+  /** Round 74 (16) — drag + resize apply ONLY to the main window
+   *  and the active download progress window. Fixed-size dialogs
+   *  (complete, error, standalone Add URL) pass `false`: the drag
+   *  region is omitted, so the window cannot be dragged. */
+  draggable?: boolean
 }) {
   const [maximized, setMaximized] = useState(false)
 
@@ -101,8 +107,9 @@ export function TitleBar({
   return (
     <div className="flex h-10 shrink-0 items-stretch justify-between border-b border-border bg-surface">
       <div
-        data-tauri-drag-region
-        onDoubleClick={toggleMaximize}
+        {...(draggable
+          ? { 'data-tauri-drag-region': true as const, onDoubleClick: toggleMaximize }
+          : {})}
         className="flex min-w-0 flex-1 items-center gap-2 px-3"
       >
         {icon ? (

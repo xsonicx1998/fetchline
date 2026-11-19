@@ -1,6 +1,7 @@
 import { useState } from 'react'
-import { History, Play, Plus, RefreshCw, Trash2 } from 'lucide-react'
+import { History, Pencil, Play, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import type { CategoryRow, DownloadRow, GrabberProjectRow, QueueRow } from '../lib/types'
+import { ConfirmDialog } from './ConfirmDialog'
 import { PackIcon } from './PackIcon'
 
 /** Which list the main table shows. 'all' is every download (or
@@ -31,6 +32,11 @@ interface CategorySidebarProps {
   /** Re-probe a sync queue now (was Downloads > Sync queue now in
    *  the menu bar; the menu bar is gone in Round 45). */
   onSyncQueue: (queueId: string) => void
+  /** Round 74 (6) — delete a queue (the main queue cannot be
+   *  deleted; the sidebar never offers it there). */
+  onDeleteQueue?: (queue: QueueRow) => void
+  /** Round 74 (6) — rename a queue. */
+  onRenameQueue?: (queue: QueueRow, name: string) => void
   /** A download row was dropped on a category or queue. */
   onDropDownload: (downloadId: string, target: { kind: 'category' | 'queue'; id: string }) => void
 }
@@ -62,9 +68,23 @@ export function CategorySidebar({
   onRunGrabber,
   onNewGrabber,
   onSyncQueue,
+  onDeleteQueue,
+  onRenameQueue,
   onDropDownload,
 }: CategorySidebarProps) {
   const [dropTarget, setDropTarget] = useState<string | null>(null)
+  /** Round 74 (6) — the queue being renamed inline (its id) and
+   *  the edited name; Enter / blur commits, Escape cancels. */
+  const [renamingId, setRenamingId] = useState<string | null>(null)
+  const [renameValue, setRenameValue] = useState('')
+  /** Round 74 (6) — the queue awaiting delete confirmation. */
+  const [confirmDeleteQueue, setConfirmDeleteQueue] = useState<QueueRow | null>(null)
+
+  function commitRename(queue: QueueRow) {
+    const name = renameValue.trim()
+    setRenamingId(null)
+    if (name && name !== queue.name) onRenameQueue?.(queue, name)
+  }
 
   const countFor = (id: string | null) =>
     id === null ? downloads.length : downloads.filter((d) => d.category_id === id).length
@@ -260,29 +280,44 @@ export function CategorySidebar({
       <p className="px-2 pb-1 pt-3 text-xs font-semibold uppercase tracking-wider text-text-muted">Queues</p>
       {queues.map((q) => (
         <div key={q.id} className="group relative flex items-center gap-1" {...dropProps(`queue:${q.id}`, { kind: 'queue', id: q.id })}>
-          <button
-            type="button"
-            onClick={() => {
-              onSelectQueue(q.id)
-              onSelectCategory(null)
-              onSelectFilter('all')
-            }}
-            onDoubleClick={() => onOpenScheduler(q.id)}
-            aria-current={selectedQueue === q.id || undefined}
-            title={`${q.name} — double-click to open the scheduler`}
-            className={`${rowClass(selectedQueue === q.id, `queue:${q.id}`)} flex-1`}
-          >
-            <PackIcon name="queue" className="h-5 w-5 icon-glow-purple" />
-            <span className="flex-1 truncate">{q.name}</span>
-            <span className={countClass(selectedQueue === q.id, true)}>
-              {q.file_count} file{q.file_count === 1 ? '' : 's'}
-            </span>
-            {q.running ? (
-              <span className="shrink-0 rounded-full bg-info px-2 py-0.5 text-xs font-semibold text-bg transition-opacity group-hover:opacity-0">
-                Running
+          {renamingId === q.id ? (
+            <input
+              autoFocus
+              value={renameValue}
+              onChange={(e) => setRenameValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') commitRename(q)
+                else if (e.key === 'Escape') setRenamingId(null)
+              }}
+              onBlur={() => commitRename(q)}
+              aria-label={`Rename queue ${q.name}`}
+              className="h-9 min-w-0 flex-1 rounded-md border border-accent bg-surface px-2 text-base text-text focus:outline-none"
+            />
+          ) : (
+            <button
+              type="button"
+              onClick={() => {
+                onSelectQueue(q.id)
+                onSelectCategory(null)
+                onSelectFilter('all')
+              }}
+              onDoubleClick={() => onOpenScheduler(q.id)}
+              aria-current={selectedQueue === q.id || undefined}
+              title={`${q.name} — double-click to open the scheduler`}
+              className={`${rowClass(selectedQueue === q.id, `queue:${q.id}`)} flex-1`}
+            >
+              <PackIcon name="queue" className="h-5 w-5 icon-glow-purple" />
+              <span className="flex-1 truncate">{q.name}</span>
+              <span className={countClass(selectedQueue === q.id, true)}>
+                {q.file_count} file{q.file_count === 1 ? '' : 's'}
               </span>
-            ) : null}
-          </button>
+              {q.running ? (
+                <span className="shrink-0 rounded-full bg-info px-2 py-0.5 text-xs font-semibold text-bg transition-opacity group-hover:opacity-0">
+                  Running
+                </span>
+              ) : null}
+            </button>
+          )}
           <div className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
             <button
               type="button"
@@ -302,6 +337,29 @@ export function CategorySidebar({
             >
               <Play className="h-4 w-4" aria-hidden="true" />
             </button>
+            <button
+              type="button"
+              onClick={() => {
+                setRenameValue(q.name)
+                setRenamingId(q.id)
+              }}
+              aria-label={`Rename queue ${q.name}`}
+              title={`Rename ${q.name}`}
+              className="rounded-md p-1 text-text-muted hover:bg-surface-2 focus-visible:opacity-100"
+            >
+              <Pencil className="h-4 w-4" aria-hidden="true" />
+            </button>
+            {q.is_main ? null : (
+              <button
+                type="button"
+                onClick={() => setConfirmDeleteQueue(q)}
+                aria-label={`Delete queue ${q.name}`}
+                title={`Delete ${q.name}`}
+                className="rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-danger focus-visible:opacity-100"
+              >
+                <Trash2 className="h-4 w-4" aria-hidden="true" />
+              </button>
+            )}
           </div>
         </div>
       ))}
@@ -313,6 +371,22 @@ export function CategorySidebar({
         <Plus className="h-5 w-5 shrink-0" aria-hidden="true" />
         New queue
       </button>
+      {/* Round 74 (6) — delete asks first. */}
+      <ConfirmDialog
+        open={confirmDeleteQueue !== null}
+        title="Delete this queue?"
+        message={
+          confirmDeleteQueue ? `“${confirmDeleteQueue.name}” will be deleted.` : ''
+        }
+        confirmLabel="Delete queue"
+        cancelLabel="Keep it"
+        onConfirm={() => {
+          const q = confirmDeleteQueue
+          setConfirmDeleteQueue(null)
+          if (q) onDeleteQueue?.(q)
+        }}
+        onCancel={() => setConfirmDeleteQueue(null)}
+      />
     </nav>
   )
 }

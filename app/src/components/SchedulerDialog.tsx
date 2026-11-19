@@ -245,9 +245,6 @@ export function SchedulerDialog({
       aria-modal="true"
       aria-labelledby="scheduler-title"
       className="fixed inset-0 z-10 flex items-center justify-center bg-black/50 p-4"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose()
-      }}
     >
       <div className="flex h-full max-h-full w-full max-w-3xl flex-col overflow-hidden rounded-lg border border-border bg-surface-raised shadow-pop">
         <div className="flex shrink-0 items-start justify-between gap-4 border-b border-border px-6 py-4">

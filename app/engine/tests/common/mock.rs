@@ -93,6 +93,17 @@ pub struct MockServer {
     /// the segment stall watchdog must fail the attempt instead
     /// of hanging.
     stall_get: Arc<AtomicBool>,
+    /// Round 74 (A) — when non-zero, GET responses stall mid-body
+    /// once the server has served this many bytes IN TOTAL across
+    /// all GETs: the connection stays open but no further chunk
+    /// is written for two minutes, so a download that already
+    /// received bytes goes quiet at 0 B/s (the OVH shape). Set
+    /// back to 0 to let the server recover — the next attempt
+    /// resumes from the bytes already downloaded and completes.
+    stall_after_bytes: Arc<AtomicUsize>,
+    /// Round 74 (A) — total GET body bytes served so far (the
+    /// counter `stall_after_bytes` is measured against).
+    served_bytes: Arc<AtomicUsize>,
     /// When set, GET requests ignore Range and answer 200 with the
     /// whole file (a server that dropped resume support).
     ignore_range: Arc<AtomicBool>,
@@ -127,6 +138,8 @@ impl MockServer {
         let drop_get = Arc::new(AtomicBool::new(false));
         let drop_probe_attempts = Arc::new(AtomicUsize::new(0));
         let stall_get = Arc::new(AtomicBool::new(false));
+        let stall_after_bytes = Arc::new(AtomicUsize::new(0));
+        let served_bytes = Arc::new(AtomicUsize::new(0));
         let ignore_range = Arc::new(AtomicBool::new(false));
         let gone = Arc::new(AtomicBool::new(false));
         let get_requests = Arc::new(AtomicUsize::new(0));
@@ -145,6 +158,8 @@ impl MockServer {
         let dg0 = Arc::clone(&drop_get);
         let dpa0 = Arc::clone(&drop_probe_attempts);
         let sg0 = Arc::clone(&stall_get);
+        let sab0 = Arc::clone(&stall_after_bytes);
+        let sb0 = Arc::clone(&served_bytes);
         let ir = Arc::clone(&ignore_range);
         let g = Arc::clone(&gone);
         let gr = Arc::clone(&get_requests);
@@ -172,6 +187,8 @@ impl MockServer {
                         let hrr = Arc::clone(&hr);
                         let ig = Arc::clone(&ig0);
                         let rl = Arc::clone(&rl0);
+                        let sab = Arc::clone(&sab0);
+                        let sb = Arc::clone(&sb0);
                         let cc = Arc::clone(&config);
                         thread::spawn(move || {
                             handle(
@@ -191,6 +208,8 @@ impl MockServer {
                                 hrr,
                                 ig,
                                 rl,
+                                sab,
+                                sb,
                             )
                         });
                     }
@@ -206,6 +225,8 @@ impl MockServer {
             drop_get,
             drop_probe_attempts,
             stall_get,
+            stall_after_bytes,
+            served_bytes,
             ignore_range,
             gone,
             get_requests,
@@ -281,6 +302,15 @@ impl MockServer {
     /// segment must fail on the stall watchdog instead of hanging.
     pub fn set_stall_get(&self, stall: bool) {
         self.stall_get.store(stall, Ordering::SeqCst);
+    }
+
+    /// Round 74 (A) — stall GET responses mid-body once the server
+    /// has served `n` bytes in total (0 = off, the server never
+    /// stalls). A download that already received bytes goes quiet
+    /// at 0 B/s; set back to 0 and the next attempt resumes and
+    /// completes.
+    pub fn set_stall_after_bytes(&self, n: usize) {
+        self.stall_after_bytes.store(n, Ordering::SeqCst);
     }
 
     /// Make GET requests ignore Range and answer 200 with the whole file.
@@ -360,6 +390,8 @@ pub fn handle(
     head_requests: Arc<AtomicUsize>,
     inflight_gets: Arc<AtomicUsize>,
     rate_limited: Arc<AtomicUsize>,
+    stall_after_bytes: Arc<AtomicUsize>,
+    served_bytes: Arc<AtomicUsize>,
 ) {
     let mut buf = [0u8; 8192];
     let Ok(n) = stream.read(&mut buf) else { return };
@@ -558,9 +590,21 @@ pub fn handle(
         if drop_get.load(Ordering::SeqCst) {
             return;
         }
+        // Round 74 (A) — stalled mid-body: once the server has
+        // served `stall_after_bytes` total, the connection stays
+        // open but no further chunk is written for two minutes, so
+        // the client's stream waits at 0 B/s (the OVH shape).
+        // The threshold is cumulative across GETs, so a resumed
+        // attempt stalls again until the test clears it.
+        let threshold = stall_after_bytes.load(Ordering::SeqCst);
+        if threshold > 0 && served_bytes.load(Ordering::SeqCst) >= threshold {
+            thread::sleep(Duration::from_secs(120));
+            return;
+        }
         if stream.write_all(chunk).is_err() {
             return;
         }
+        served_bytes.fetch_add(chunk.len(), Ordering::SeqCst);
         if config.delay > Duration::ZERO {
             thread::sleep(config.delay);
         }

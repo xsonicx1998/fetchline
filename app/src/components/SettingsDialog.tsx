@@ -446,9 +446,6 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
       aria-modal="true"
       aria-labelledby="settings-title"
       className="fixed inset-0 z-10 flex items-center justify-center bg-black/50 p-4"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose()
-      }}
     >
       <div className="flex max-h-full w-full max-w-2xl flex-col rounded-lg border border-border bg-surface-raised shadow-pop">
         <div className="flex shrink-0 items-start justify-between gap-4 px-6 pt-6">

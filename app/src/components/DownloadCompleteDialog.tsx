@@ -64,6 +64,17 @@ export function DownloadCompleteDialog({ downloadId }: { downloadId: string }) {
       .catch(() => undefined)
   }, [])
 
+  // Round 74 (14) — Escape closes the dialog, like X and Close.
+  // (The error dialog already had this; the complete dialog did
+  // not.)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') closeDialog()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
   // The completion sound, once, when the dialog shows.
   useEffect(() => {
     if (soundPlayedRef.current) return
@@ -154,7 +165,7 @@ export function DownloadCompleteDialog({ downloadId }: { downloadId: string }) {
   if (!loaded || !download) {
     return (
       <div className="flex h-full flex-col bg-bg text-text">
-        <TitleBar title="Download complete" showMinimize={false} showMaximize={false} />
+        <TitleBar title="Download complete" showMinimize={false} showMaximize={false} draggable={false} />
         <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
           {pollError ? (
             <p className="text-sm text-danger">{pollError}</p>
@@ -175,7 +186,7 @@ export function DownloadCompleteDialog({ downloadId }: { downloadId: string }) {
 
   return (
     <div className="flex h-full flex-col bg-bg text-text">
-      <TitleBar title="Download complete" showMinimize={false} showMaximize={false} />
+      <TitleBar title="Download complete" showMinimize={false} showMaximize={false} draggable={false} />
       {/* Purple→pink divider under the title bar, like the
           progress bar (approved mockup). */}
       <div

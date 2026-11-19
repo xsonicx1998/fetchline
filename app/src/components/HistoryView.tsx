@@ -31,6 +31,17 @@ export function HistoryView({ onRedownloaded, onError }: HistoryViewProps) {
   const [busyId, setBusyId] = useState<string | null>(null)
   const [clearing, setClearing] = useState(false)
 
+  // Round 74 (14) — Escape closes the "Clear history?" confirm
+  // (it had only its Keep button and a backdrop click before).
+  useEffect(() => {
+    if (!confirmClear) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setConfirmClear(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [confirmClear])
+
   async function fetchHistory(q: string) {
     try {
       setRows(await listDownloadHistory(q))
@@ -201,9 +212,6 @@ export function HistoryView({ onRedownloaded, onError }: HistoryViewProps) {
           aria-modal="true"
           aria-labelledby="confirm-clear-history-title"
           className="fixed inset-0 z-20 flex items-center justify-center bg-black/50 p-4"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setConfirmClear(false)
-          }}
         >
           <div className="w-full max-w-md rounded-lg border border-border bg-surface-raised p-6 shadow-pop">
             <h2 id="confirm-clear-history-title" className="text-lg font-semibold">

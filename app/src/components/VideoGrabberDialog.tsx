@@ -98,9 +98,6 @@ export function VideoGrabberDialog({ open, queues, onClose, onPick, onAdded }: V
       aria-modal="true"
       aria-labelledby="video-grabber-title"
       className="fixed inset-0 z-10 flex items-center justify-center bg-black/50 p-4"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose()
-      }}
     >
       <div className="flex max-h-full w-full max-w-2xl flex-col rounded-lg border border-border bg-surface-raised p-6 shadow-pop">
         <div className="mb-4 flex items-start justify-between gap-4">

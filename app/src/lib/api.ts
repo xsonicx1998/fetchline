@@ -126,8 +126,7 @@ export async function listPendingLinks(): Promise<PendingLinkRow[]> {
 /** Round 67 — decide one pending row from the Add URL dialog:
  *  'accepted' with the created download id, or 'rejected' with
  *  the reason (Cancel / close dismisses a capture). */
-export async function resolvePendingLink(args: {
-  id: string
+export async function resolvePendingLink(args: {  id: string
   status: 'accepted' | 'rejected'
   downloadId?: string | null
   error?: string | null
@@ -168,6 +167,22 @@ export async function confirmPendingLink(args: {
     speedLimitKbps: args.speedLimitKbps ?? null,
     startNow: args.startNow,
   })
+}
+
+/** Round 74 (13) — read one pending browser-extension capture
+ *  for the standalone Add URL window (`get_pending_link` on the
+ *  backend; the window's `__ADD_URL_ID__` init script carries
+ *  the link id). */
+export async function getPendingLink(linkId: string): Promise<PendingLinkRow> {
+  return invoke<PendingLinkRow>('get_pending_link', { link_id: linkId })
+}
+
+/** Round 74 (13) — open (or focus, when it already exists) the
+ *  standalone Add URL window for a captured link, and pop it in
+ *  front over whatever window the user has open. The backend
+ *  command is `open_add_url_window(link_id)`. */
+export async function openAddUrlWindow(linkId: string): Promise<void> {
+  return invoke('open_add_url_window', { link_id: linkId })
 }
 
 /** Round 67 — set the Add URL dialog's Description note on a
@@ -323,6 +338,19 @@ export async function getQueueFiles(queueId: string): Promise<DownloadRow[]> {
 
 export async function createQueue(name: string): Promise<QueueRow> {
   return invoke<QueueRow>('create_queue', { name })
+}
+
+/** Round 74 (6) — delete a queue. The backend command is
+ *  `delete_queue(id)`; the main queue cannot be deleted. The UI
+ *  never calls this for the main queue. */
+export async function deleteQueue(id: string): Promise<void> {
+  return invoke('delete_queue', { id })
+}
+
+/** Round 74 (6) — rename a queue. The backend command is
+ *  `rename_queue(id, name)`. */
+export async function renameQueue(id: string, name: string): Promise<QueueRow> {
+  return invoke<QueueRow>('rename_queue', { id, name })
 }
 
 export async function updateQueue(id: string, update: QueueUpdate): Promise<QueueRow> {

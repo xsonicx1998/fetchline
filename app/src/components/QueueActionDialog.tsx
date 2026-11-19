@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Power } from 'lucide-react'
+import { Power, X } from 'lucide-react'
 import { dismissQueueAction, executeQueueAction } from '../lib/api'
 import { basename, completeActionLabel } from '../lib/format'
 import type { PendingAction } from '../lib/types'
@@ -43,6 +43,20 @@ export function QueueActionDialog({ action, onDone }: QueueActionDialogProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [secondsLeft, action])
 
+  // Round 74 (14) — Escape cancels the pending action, like the
+  // Cancel button. (The dialog had no key close before.)
+  useEffect(() => {
+    if (!action) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') void cancel()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+    // `cancel` is declared below the early return; it is a
+    // hoisted function declaration, so this effect may use it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [action])
+
   if (!action) return null
   const queueId = action.queue_id
 
@@ -79,9 +93,18 @@ export function QueueActionDialog({ action, onDone }: QueueActionDialogProps) {
       <div className="w-full max-w-md rounded-lg border border-border bg-surface-raised p-6 shadow-pop">
         <div className="mb-2 flex items-center gap-3">
           <Power className="h-6 w-6 text-danger" aria-hidden="true" />
-          <h2 id="queue-action-title" className="text-lg font-semibold">
+          <h2 id="queue-action-title" className="flex-1 text-lg font-semibold">
             {action.action === 'hibernate' ? 'Hibernate the computer?' : 'Shut down the computer?'}
           </h2>
+          <button
+            type="button"
+            onClick={() => void cancel()}
+            disabled={busy}
+            aria-label="Close"
+            className="rounded-md p-1 text-text-muted transition-colors hover:bg-surface-2 hover:text-text"
+          >
+            <X className="h-4 w-4" aria-hidden="true" />
+          </button>
         </div>
         <p id="queue-action-desc" className="text-base text-text-muted">
           Queue “{action.queue_name}” finished

@@ -1,4 +1,4 @@
-// Content-script tests (Round 73). Run with:
+// Content-script tests (Round 73 + Round 74 dropdown). Run with:
 //   node --test extension/tests/content.test.js
 // from app/. No browser is needed: content.js (after
 // video-detect.js, the same injection order as the manifest)
@@ -11,7 +11,11 @@
 // containment, loadedmetadata re-scans without any
 // service-worker round-trip, an opted-out / switched-off page
 // hides the button, and a storage-read failure defaults to
-// ALLOWED.
+// ALLOWED. Round 74 adds the approved dropdown: the button is
+// a gradient pill, the qualities list drops down anchored
+// below it (one row per quality, no sizes), it closes on an
+// outside click / Escape / a second button click, and picking
+// a quality sends only that variant and shows a toast.
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -84,7 +88,7 @@ function loadContent({ seed = {}, pageUrl = PAGE, storageGetRejects = false, ini
         return this._rect || { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
       },
     };
-    // Setting innerHTML to "" clears the element (the panel
+    // Setting innerHTML to "" clears the element (the dropdown
     // re-renders this way); a plain property would leave stale
     // list items behind on a second render.
     let inner = "";
@@ -257,7 +261,7 @@ function loadContent({ seed = {}, pageUrl = PAGE, storageGetRejects = false, ini
       const b = body.children.find((c) => c.tagName === "BUTTON");
       return !!b && b.style.display !== "none";
     },
-    findPanel() {
+    findDropdown() {
       return body.children.find((c) => c.tagName === "DIV");
     },
     click(el) {
@@ -274,18 +278,23 @@ test("a video whose currentSrc equals its <source src> yields exactly 1 variant 
   const video = env.makeVideo(CLIP, { videoWidth: 320, videoHeight: 176 });
   env.addVideo(video);
   // The video was added after injection, so drive a rescan the
-  // way the page would (loadedmetadata), then open the panel.
+  // way the page would (loadedmetadata), then open the dropdown.
   env.fireDocumentEvent("loadedmetadata", { target: video });
   await tick();
   assert.equal(env.buttonVisible(), true);
   env.click(env.findButton());
-  const panel = env.findPanel();
-  assert.ok(panel, "panel opens on button click");
-  const list = panel.children.find((c) => c.tagName === "UL");
-  assert.ok(list, "panel has a qualities list");
-  assert.equal(list.children.length, 1);
-  const label = list.children[0].children[0];
-  assert.equal(label.textContent, "MP4 · 320 × 176");
+  const dropdown = env.findDropdown();
+  assert.ok(dropdown, "dropdown opens on button click");
+  assert.equal(dropdown.style.display, "block");
+  const header = dropdown.children.find((c) => c.tagName === "H3");
+  assert.equal(header.textContent, "Download this video");
+  const rows = dropdown.children.filter((c) => c.tagName === "BUTTON");
+  assert.equal(rows.length, 1, "one quality row, no duplicate");
+  assert.equal(rows[0].children[0].textContent, "320 × 176");
+  assert.equal(rows[0].children[1].textContent, "MP4");
+  // No sizes anywhere in the dropdown.
+  const rowText = rows[0].children.map((c) => c.textContent).join(" ");
+  assert.ok(!/\d+(\.\d+)?\s*(KB|MB|GB|bytes)/i.test(rowText), `no size in row: ${rowText}`);
   assert.equal(env.sentOfType("video_allowed").length, 0);
 });
 
@@ -386,4 +395,102 @@ test("a storage-read failure defaults to ALLOWED", async () => {
   await tick(30);
   assert.equal(env.buttonVisible(), true);
   assert.equal(env.sentOfType("video_allowed").length, 0);
+});
+
+test("the button is a gradient pill and the dropdown anchors below it", async () => {
+  const env = loadContent({});
+  const video = env.makeVideo(CLIP, { videoWidth: 320, videoHeight: 176 });
+  env.addVideo(video);
+  env.fireDocumentEvent("loadedmetadata", { target: video });
+  await tick();
+  const button = env.findButton();
+  assert.ok(button);
+  assert.equal(button.style.borderRadius, "999px");
+  assert.equal(button.style.background, "linear-gradient(135deg, #8B20FF, #F02DCD 55%, #00C8FF)");
+  assert.equal(button.style.padding, "8px 14px");
+  env.click(button);
+  const dropdown = env.findDropdown();
+  assert.ok(dropdown, "dropdown opens on button click");
+  assert.equal(dropdown.style.display, "block");
+  // Same right edge as the button (video right 500, viewport 1280).
+  assert.equal(dropdown.style.right, button.style.right);
+  // Below the button: video top 100 + 12 (button offset) + 40 + 6.
+  assert.equal(dropdown.style.top, "158px");
+  assert.equal(dropdown.style.width, "232px");
+  assert.equal(dropdown.style.background, "#0B0F24");
+  assert.equal(dropdown.style.border, "1px solid #8B20FF");
+});
+
+test("the dropdown closes on an outside click, on Escape, and on a second button click", async () => {
+  const env = loadContent({});
+  const video = env.makeVideo(CLIP, { videoWidth: 320, videoHeight: 176 });
+  env.addVideo(video);
+  env.fireDocumentEvent("loadedmetadata", { target: video });
+  await tick();
+  env.click(env.findButton());
+  assert.equal(env.findDropdown().style.display, "block");
+  // A click on the page background (not the button, not the dropdown).
+  env.fireDocumentEvent("click", { target: env.document.body });
+  assert.equal(env.findDropdown().style.display, "none");
+  // Reopen, then Escape.
+  env.click(env.findButton());
+  assert.equal(env.findDropdown().style.display, "block");
+  env.fireDocumentEvent("keydown", { key: "Escape" });
+  assert.equal(env.findDropdown().style.display, "none");
+  // A second click on the button toggles it closed too.
+  env.click(env.findButton());
+  assert.equal(env.findDropdown().style.display, "block");
+  env.click(env.findButton());
+  assert.equal(env.findDropdown().style.display, "none");
+});
+
+test("picking a quality sends only that variant and shows a toast", async () => {
+  const env = loadContent({});
+  const video = env.makeVideo(CLIP, { videoWidth: 320, videoHeight: 176 });
+  env.addVideo(video);
+  env.fireDocumentEvent("loadedmetadata", { target: video });
+  await tick();
+  env.click(env.findButton());
+  const dropdown = env.findDropdown();
+  const rows = dropdown.children.filter((c) => c.tagName === "BUTTON");
+  assert.equal(rows.length, 1);
+  env.click(rows[0]);
+  const sent = env.sentOfType("video_found");
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].variants.length, 1);
+  assert.equal(sent[0].variants[0].url, CLIP);
+  // The dropdown closes on pick; the toast confirms the send.
+  assert.equal(dropdown.style.display, "none");
+  const toast = env.document.body.children.find(
+    (c) => c.tagName === "DIV" && c !== dropdown,
+  );
+  assert.ok(toast, "toast exists after picking a quality");
+  assert.equal(toast.style.display, "block");
+  assert.equal(toast.textContent, "Sent to Sonic Manager — it will appear in the download list.");
+});
+
+test("several qualities list once each, with no sizes", async () => {
+  const env = loadContent({});
+  const video = env.makeVideo("http://127.0.0.1/clip-720p.mp4", {
+    videoWidth: 0,
+    videoHeight: 0,
+    sourceUrl: "http://127.0.0.1/clip-1080p.mp4",
+  });
+  // A second <source> naming the same file as the currentSrc:
+  // dedupe must drop it.
+  video.appendChild(env.makeElement("source", { src: "http://127.0.0.1/clip-720p.mp4" }));
+  env.addVideo(video);
+  env.fireDocumentEvent("loadedmetadata", { target: video });
+  await tick();
+  env.click(env.findButton());
+  const dropdown = env.findDropdown();
+  const rows = dropdown.children.filter((c) => c.tagName === "BUTTON");
+  assert.equal(rows.length, 2, "720p + 1080p, the duplicate 720p dropped");
+  const labels = rows.map((r) => r.children[0].textContent);
+  assert.deepEqual(labels.sort(), ["1080p HD", "720p HD"]);
+  for (const row of rows) {
+    assert.equal(row.children[1].textContent, "MP4");
+    const text = row.children.map((c) => c.textContent).join(" ");
+    assert.ok(!/\d+(\.\d+)?\s*(KB|MB|GB|bytes)/i.test(text), `no size in row: ${text}`);
+  }
 });

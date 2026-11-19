@@ -80,8 +80,12 @@ const SEGMENT_STALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// Round 55 (defect 1): backstop for a run hung anywhere the
 /// per-chunk watchdog cannot see (FTP / Kerberos / NTLM reads, a
 /// task stuck outside its stream loop) — a run that makes no
-/// progress at all for this long fails with a clear message
-/// instead of leaving status `downloading` forever. 180 s covers
+/// progress at all for this long is wedged. Round 74 (A): it no
+/// longer fails a MID-FILE stall outright — when bytes already
+/// arrived, the supervisor enters whole-download stall retry
+/// (respawn the stalled segments, give up only at the
+/// patient-tail cap) instead. A run that never received a byte
+/// still fails here, exactly as Round 55 pins. 180 s covers
 /// the slowest legitimate case (a 1 KB/s cap on a 64 KiB chunk
 /// takes ~64 s between writes, plus connect time) with margin,
 /// and the check is suppressed while a segment waits out its
@@ -418,6 +422,14 @@ struct RetrySlot {
     /// `info()` and do not treat the tail's long waits or 20 s
     /// connects as a wedge.
     patient_tail: AtomicBool,
+    /// Round 74 (A) — the run is in whole-download stall retry:
+    /// every connection went quiet mid-file (bytes already
+    /// received), so the supervisor is respawning the stalled
+    /// segments instead of failing the run. The run watchdogs
+    /// read this alongside `patient_tail` and do not treat the
+    /// retrying run as a wedge; the patient-tail zero-progress
+    /// cap is the backstop that eventually gives up instead.
+    whole_stall_retry: AtomicBool,
 }
 
 impl RetrySlot {
@@ -426,6 +438,7 @@ impl RetrySlot {
             wait: StdMutex::new(None),
             retry_now: AtomicBool::new(false),
             patient_tail: AtomicBool::new(false),
+            whole_stall_retry: AtomicBool::new(false),
         }
     }
 
@@ -442,6 +455,23 @@ impl RetrySlot {
     /// Round 72 (C) — true while a tail task is in patient retry.
     fn is_patient_tail(&self) -> bool {
         self.patient_tail.load(Ordering::SeqCst)
+    }
+
+    /// Round 74 (A) — mark / unmark whole-download stall retry.
+    /// Set by the supervisor when a mid-file stall is detected,
+    /// cleared when bytes flow again or the run ends.
+    fn set_whole_stall_retry(&self) {
+        self.whole_stall_retry.store(true, Ordering::SeqCst);
+    }
+
+    fn clear_whole_stall_retry(&self) {
+        self.whole_stall_retry.store(false, Ordering::SeqCst);
+    }
+
+    /// Round 74 (A) — true while the run is retrying a
+    /// whole-download stall instead of failing on it.
+    fn is_whole_stall_retry(&self) -> bool {
+        self.whole_stall_retry.load(Ordering::SeqCst)
     }
 
     /// Record that a segment failed and will try again at the end of
@@ -3144,6 +3174,26 @@ impl DownloadManager {
         Ok(row)
     }
 
+    /// Delete a custom queue (Round 74, item 6). A running queue
+    /// must be stopped first — deleting under a live drain would
+    /// strand its runner. The store moves the queue's downloads
+    /// back to the main queue.
+    pub async fn delete_queue(&self, id: &str) -> Result<()> {
+        if self.queue_runs.lock().await.contains_key(id) {
+            return Err(EngineError::InvalidState(
+                "Stop the queue before deleting it".to_string(),
+            ));
+        }
+        self.store.delete_queue(id)?;
+        self.scheduled_done.lock().await.remove(id);
+        Ok(())
+    }
+
+    /// Rename a custom queue (Round 74, item 6).
+    pub fn rename_queue(&self, id: &str, name: &str) -> Result<QueueRow> {
+        self.store.rename_queue(id, name)
+    }
+
     pub fn add_to_queue(&self, download_id: &str, queue_id: &str) -> Result<()> {
         self.store.add_to_queue(download_id, queue_id)
     }
@@ -4850,6 +4900,9 @@ impl DownloadManager {
         // The run is over for every outcome: paused, complete, error.
         // No segment is waiting any more, whatever the outcome was.
         retry.clear_wait();
+        // Round 74 (A) — a finished run leaves no stall-retry mode
+        // behind for the next run of this download.
+        retry.clear_whole_stall_retry();
         self.running.lock().await.remove(&id);
         // Round 57 (§9.2f): the thread watchdog's entry goes with
         // the run — without this the thread would keep watching a
@@ -4913,6 +4966,18 @@ impl DownloadManager {
         // Check often enough to fire near the deadline without
         // spinning: a sixth of the timeout, clamped to 1–10 s.
         let check_every = ((timeout_secs / 6).max(1)).min(10);
+        // Round 74 (A) — one-check grace for a run that already
+        // received bytes: the supervisor enters whole-download
+        // stall retry at this same deadline (its 250 ms tick
+        // usually lands first), so when this watchdog's check
+        // happens to land in the ~250 ms before the supervisor's
+        // tick, aborting here would kill a stall the supervisor
+        // was about to rescue. A stalled run WITH bytes gets one
+        // more check to let the supervisor set the flag; a run
+        // that never received a byte (Round 55) gets no grace and
+        // aborts at once. The grace resets whenever progress is
+        // seen, so a later stall gets its own.
+        let mut grace_given = false;
         loop {
             tokio::time::sleep(Duration::from_secs(check_every)).await;
             let entry = {
@@ -4923,28 +4988,44 @@ impl DownloadManager {
                         // Round 72 (C) — a patient tail is not a
                         // wedge: it is deliberately waiting out a
                         // long backoff (or a 20 s tail connect).
-                        r.retry.info().is_some() || r.retry.is_patient_tail(),
+                        // Round 74 (A) — neither is a run in
+                        // whole-download stall retry: it is
+                        // deliberately respawning stalled
+                        // segments, and the patient-tail cap is
+                        // its backstop, not this watchdog.
+                        r.retry.info().is_some()
+                            || r.retry.is_patient_tail()
+                            || r.retry.is_whole_stall_retry(),
                     ),
                     None => return, // run ended — nothing to watch
                 }
             };
             let (last_ms, retry_waiting) = entry;
             if retry_waiting {
+                grace_given = false;
                 continue;
             }
             if now_millis().saturating_sub(last_ms) < timeout.as_millis() as u64 {
+                grace_given = false;
                 continue;
             }
             // Stalled. Read the row first (store) to decide whether
             // an error status applies: a run whose row is already
             // complete/paused/errored only has a leaked map entry,
             // and touching its status would be wrong.
-            let row_status = self
-                .store
-                .get_download(&id)
-                .ok()
-                .flatten()
-                .map(|r| r.status);
+            let row = self.store.get_download(&id).ok().flatten();
+            let row_status = row.as_ref().map(|r| r.status.clone());
+            let downloaded = row.as_ref().map(|r| r.downloaded_bytes).unwrap_or(0);
+            // Round 74 (A) — grace (see above): a stalled run
+            // with bytes gets one more check for the supervisor
+            // to enter stall retry.
+            if downloaded > 0 && !grace_given {
+                grace_given = true;
+                self.store.log(&format!(
+                    "run watchdog: {id} stalled with {downloaded} bytes — giving the supervisor one more check to enter stall retry instead of aborting"
+                ));
+                continue;
+            }
             let entry = self.running.lock().await.remove(&id);
             // Round 57 (§9.2f): the thread watchdog's entry goes
             // with the run, so the thread exits instead of firing
@@ -5014,6 +5095,13 @@ impl DownloadManager {
         // spinning: a sixth of the timeout, clamped to 1–10 s —
         // the same cadence as the tokio watchdog.
         let check_every = ((timeout_secs / 6).max(1)).min(10);
+        // Round 74 (A) — one-check grace for a run that already
+        // received bytes (same race as the tokio watchdog above:
+        // this thread's check can land in the ~250 ms before the
+        // supervisor's tick enters stall retry). A stalled run
+        // with bytes gets one more check; a run that never
+        // received a byte aborts at once. Resets on progress.
+        let mut grace_given = false;
         loop {
             std::thread::sleep(Duration::from_secs(check_every));
             // Stale? A newer run of the same download replaced
@@ -5029,12 +5117,19 @@ impl DownloadManager {
             // Round 72 (C) — a patient tail is not a wedge (see
             // the tokio watchdog above): it waits out long
             // backoffs and 20 s tail connects on purpose.
-            if entry.retry.info().is_some() || entry.retry.is_patient_tail() {
+            // Round 74 (A) — neither is a run in whole-download
+            // stall retry (same reason, same backstop).
+            if entry.retry.info().is_some()
+                || entry.retry.is_patient_tail()
+                || entry.retry.is_whole_stall_retry()
+            {
+                grace_given = false;
                 continue; // retry backoff / patient tail — not a wedge
             }
             if now_millis().saturating_sub(entry.last_progress_ms.load(Ordering::Relaxed))
                 < timeout_secs * 1000
             {
+                grace_given = false;
                 continue;
             }
             // Stalled — but re-check the entry first: a new run
@@ -5047,6 +5142,23 @@ impl DownloadManager {
                     Some(current) if Arc::ptr_eq(current, &entry) => {}
                     _ => return,
                 }
+            }
+            // Round 74 (A) — grace (see above): a stalled run
+            // with bytes gets one more check for the supervisor
+            // to enter stall retry.
+            let downloaded = mgr
+                .store
+                .get_download(&id)
+                .ok()
+                .flatten()
+                .map(|r| r.downloaded_bytes)
+                .unwrap_or(0);
+            if downloaded > 0 && !grace_given {
+                grace_given = true;
+                mgr.store.log(&format!(
+                    "thread watchdog: {id} stalled with {downloaded} bytes — giving the supervisor one more check to enter stall retry instead of aborting"
+                ));
+                continue;
             }
             mgr.store.log(&format!(
                 "thread watchdog aborted {id} after {timeout_secs}s without progress (tokio watchdog did not fire)"
@@ -5321,12 +5433,64 @@ impl DownloadManager {
                                 self.emit_snapshot(id, "paused").await;
                                 return Ok(());
                             }
-                            // A segment exhausted its retries: fail the download.
-                            tasks.abort_all();
-                            while tasks.join_next().await.is_some() {}
-                            self.checkpoint(id, &states, 0).await;
-                            retry.clear_wait();
-                            return Err(e);
+                            // Round 74 (A) — a segment exhausted its
+                            // retries. When the download already
+                            // received bytes and the failure is
+                            // stall/transport-shaped, this is a
+                            // whole-download stall, not a dead link:
+                            // enter stall-retry mode (or stay in it)
+                            // and respawn the stalled segments
+                            // instead of failing the run. The
+                            // patient-tail cap is the backstop — a
+                            // server that never comes back still
+                            // fails, with the retrying message,
+                            // instead of hanging forever. Any other
+                            // failure (404 / 416 / disk error, or a
+                            // stall before the first byte — Round 55
+                            // pins that one) fails the download
+                            // exactly as before.
+                            let total = total_done(&states);
+                            if total > 0 && is_whole_stall_retryable(&e) {
+                                if !retry.is_whole_stall_retry() {
+                                    retry.set_whole_stall_retry();
+                                    self.store.log(&format!(
+                                        "segment failed mid-download with {total} bytes received — entering whole-download stall retry instead of failing: {}",
+                                        error_chain_text(&e),
+                                    ));
+                                } else {
+                                    self.store.log(&format!(
+                                        "segment failed again during whole-download stall retry — respawning: {}",
+                                        error_chain_text(&e),
+                                    ));
+                                }
+                                tasks.abort_all();
+                                while tasks.join_next().await.is_some() {}
+                                self.checkpoint(id, &states, 0).await;
+                                retry.clear_wait();
+                                self.respawn_stalled_segments(
+                                    id,
+                                    &mut states,
+                                    &mut tasks,
+                                    effective_cap,
+                                    pause,
+                                    retry,
+                                    &row,
+                                    &file,
+                                    &site_auth,
+                                    &proxy,
+                                    &cookies,
+                                    per_download_limiter,
+                                    &quota_gate,
+                                )
+                                .await;
+                            } else {
+                                // A segment exhausted its retries: fail the download.
+                                tasks.abort_all();
+                                while tasks.join_next().await.is_some() {}
+                                self.checkpoint(id, &states, 0).await;
+                                retry.clear_wait();
+                                return Err(e);
+                            }
                         }
                         Some(Ok(Ok(SegOutcome::Done))) | Some(Err(_)) => {
                             // One segment finished (or was aborted): try a
@@ -5542,6 +5706,16 @@ impl DownloadManager {
                     if total > prev_total {
                         last_byte_at = now;
                         last_progress_ms.store(now_millis(), Ordering::Relaxed);
+                        // Round 74 (A) — bytes are flowing again:
+                        // the stall is over, leave stall-retry mode
+                        // (the next stall starts a fresh budget
+                        // from this byte).
+                        if retry.is_whole_stall_retry() {
+                            retry.clear_whole_stall_retry();
+                            self.store.log(&format!(
+                                "download {id} recovered after whole-download stall retry — {total} bytes total"
+                            ));
+                        }
                     }
                     let dt = now.duration_since(prev_instant).as_secs_f64();
                     if dt > 0.0 {
@@ -5611,41 +5785,77 @@ impl DownloadManager {
                         .await;
                     }
                     // Run watchdog (Round 55, defects 1 + 4): a run
-                    // that makes no progress at all for
-                    // RUN_STALL_TIMEOUT is wedged — a hung segment
-                    // task, or a stalled FTP / Kerberos / NTLM read
-                    // the per-chunk watchdog cannot see. Fail it
-                    // with a clear message instead of leaving
-                    // status `downloading` forever (which also made
-                    // Resume refuse it as "already running" and
-                    // Pause a no-op). Suppressed while a segment
-                    // waits out its retry backoff: a waiting segment
-                    // is not a wedged run. Round 72 (C): also
+                    // that makes no progress at all for the watchdog
+                    // timeout (180 s by default, the same budget
+                    // the independent watchdogs use) is wedged — a
+                    // hung segment task, or a stalled FTP /
+                    // Kerberos / NTLM read the per-chunk watchdog
+                    // cannot see. Suppressed while a segment waits
+                    // out its retry backoff: a waiting segment is
+                    // not a wedged run. Round 72 (C): also
                     // suppressed while a tail task is in patient
-                    // retry — it is waiting on purpose.
+                    // retry — it is waiting on purpose. Round 74
+                    // (A): a MID-FILE stall no longer fails here —
+                    // when bytes already arrived, the run enters
+                    // whole-download stall retry (the stalled
+                    // segments are aborted and respawned, and the
+                    // patient-tail cap below is the backstop that
+                    // eventually gives up) instead of failing
+                    // after 180 s. A run that never received a
+                    // byte still fails, exactly as Round 55 pins.
+                    let watchdog_timeout_secs = self.run_watchdog_timeout_secs();
                     if !tasks.is_empty()
                         && retry.info().is_none()
                         && !retry.is_patient_tail()
-                        && last_byte_at.elapsed() >= RUN_STALL_TIMEOUT
+                        && !retry.is_whole_stall_retry()
+                        && last_byte_at.elapsed()
+                            >= Duration::from_secs(watchdog_timeout_secs)
                     {
-                        tasks.abort_all();
-                        while tasks.join_next().await.is_some() {}
-                        self.checkpoint(id, &states, 0).await;
-                        retry.clear_wait();
-                        // Round 57 (§9.4): log the firing
-                        // explicitly — the r56 live test had a
-                        // stalled run with no watchdog line at all,
-                        // and the log could not say whether the
-                        // in-loop watchdog, the tokio watchdog, or
-                        // neither had run.
-                        self.store.log(&format!(
-                            "in-loop watchdog fired for {id} after {}s without progress",
-                            RUN_STALL_TIMEOUT.as_secs()
-                        ));
-                        return Err(EngineError::InvalidState(format!(
-                            "No data arrived for {} seconds — the connection appears to have stalled",
-                            RUN_STALL_TIMEOUT.as_secs()
-                        )));
+                        let total = total_done(&states);
+                        if total > 0 {
+                            retry.set_whole_stall_retry();
+                            let cap_secs = self.tail_zero_progress_cap_secs();
+                            self.store.log(&format!(
+                                "in-loop watchdog fired for {id} after {watchdog_timeout_secs}s without progress with {total} bytes received — entering whole-download stall retry instead of failing (giving up after {cap_secs}s without progress)"
+                            ));
+                            tasks.abort_all();
+                            while tasks.join_next().await.is_some() {}
+                            self.checkpoint(id, &states, 0).await;
+                            retry.clear_wait();
+                            self.respawn_stalled_segments(
+                                id,
+                                &mut states,
+                                &mut tasks,
+                                effective_cap,
+                                pause,
+                                retry,
+                                &row,
+                                &file,
+                                &site_auth,
+                                &proxy,
+                                &cookies,
+                                per_download_limiter,
+                                &quota_gate,
+                            )
+                            .await;
+                        } else {
+                            tasks.abort_all();
+                            while tasks.join_next().await.is_some() {}
+                            self.checkpoint(id, &states, 0).await;
+                            retry.clear_wait();
+                            // Round 57 (§9.4): log the firing
+                            // explicitly — the r56 live test had a
+                            // stalled run with no watchdog line at all,
+                            // and the log could not say whether the
+                            // in-loop watchdog, the tokio watchdog, or
+                            // neither had run.
+                            self.store.log(&format!(
+                                "in-loop watchdog fired for {id} after {watchdog_timeout_secs}s without progress"
+                            ));
+                            return Err(EngineError::InvalidState(format!(
+                                "No data arrived for {watchdog_timeout_secs} seconds — the connection appears to have stalled"
+                            )));
+                        }
                     }
                     // Round 73 — the patient tail's zero-progress
                     // cap: the watchdogs above are suppressed
@@ -5654,7 +5864,13 @@ impl DownloadManager {
                     // retry forever. The clock runs from the last
                     // byte (`last_byte_at`, stamped above), so a
                     // tail that IS receiving bytes never trips it.
-                    if retry.is_patient_tail()
+                    // Round 74 (A) — the same cap backs the
+                    // whole-download stall retry: a persistently
+                    // stalled download keeps retrying past the
+                    // 180 s stall point, and only gives up here —
+                    // with a clear "while retrying" error, never
+                    // silently.
+                    if (retry.is_patient_tail() || retry.is_whole_stall_retry())
                         && last_byte_at.elapsed()
                             >= Duration::from_secs(self.tail_zero_progress_cap_secs())
                     {
@@ -5668,9 +5884,15 @@ impl DownloadManager {
                         } else {
                             format!("{cap_secs} second(s)")
                         };
-                        self.store.log(&format!(
-                            "patient tail gave up for {id} after {cap_text} without progress"
-                        ));
+                        if retry.is_whole_stall_retry() {
+                            self.store.log(&format!(
+                                "whole-download stall retry gave up for {id} after {cap_text} without progress"
+                            ));
+                        } else {
+                            self.store.log(&format!(
+                                "patient tail gave up for {id} after {cap_text} without progress"
+                            ));
+                        }
                         return Err(EngineError::InvalidState(format!(
                             "No data arrived for {cap_text} while retrying — the server appears to be down"
                         )));
@@ -5854,6 +6076,78 @@ impl DownloadManager {
         let count = merged_ids.len();
         states.retain(|s| !merged_ids.contains(&s.lock().unwrap().row.id));
         Some(count)
+    }
+
+    /// Round 74 (A) — respawn every unfinished segment that has no
+    /// live task, after a whole-download stall recovery aborted the
+    /// wedged tasks. The segments are marked deferred-with-expired-
+    /// backoff first, so the tested `try_split` respawn path picks
+    /// them up (one per call, under the effective connection cap,
+    /// with the tail client when only one is left); the loop stops
+    /// when no deferred segment is left or the cap is reached. A
+    /// recovery respawns — it never forces a split, so the segment
+    /// map a later pause/resume sees is the one the stall left.
+    /// The deferral mark records that the segment already failed
+    /// once, so a later deferral backs off longer.
+    #[allow(clippy::too_many_arguments)]
+    async fn respawn_stalled_segments(
+        &self,
+        id: &str,
+        states: &mut Vec<Arc<StdMutex<SegState>>>,
+        tasks: &mut JoinSet<std::result::Result<SegOutcome, EngineError>>,
+        cap: usize,
+        pause: &Arc<AtomicBool>,
+        retry: &Arc<RetrySlot>,
+        row: &DownloadRow,
+        file: &Arc<StdMutex<std::fs::File>>,
+        site_auth: &Option<(String, String)>,
+        proxy: &Option<ProxyConfig>,
+        cookies: &Option<String>,
+        per_download_limiter: &Arc<RateLimiter>,
+        quota_gate: &Option<Arc<QuotaGate>>,
+    ) {
+        {
+            let now = Instant::now();
+            for s in states.iter() {
+                let mut st = s.lock().unwrap();
+                if !st.running && st.done < segment_len_of(&st) {
+                    st.deferrals += 1;
+                    st.deferred_until = Some(now);
+                }
+            }
+        }
+        loop {
+            if tasks.len() >= cap {
+                return;
+            }
+            let any_ready = states.iter().any(|s| {
+                let st = s.lock().unwrap();
+                !st.running && st.done < segment_len_of(&st) && st.deferrals > 0
+            });
+            if !any_ready {
+                return;
+            }
+            let before = tasks.len();
+            self.try_split(
+                id,
+                states,
+                tasks,
+                cap,
+                pause,
+                retry,
+                row,
+                file,
+                site_auth,
+                proxy,
+                cookies,
+                per_download_limiter,
+                quota_gate,
+            )
+            .await;
+            if tasks.len() == before {
+                return;
+            }
+        }
     }
 
     /// Halve the largest unfinished segment when a connection is idle.
@@ -6436,6 +6730,25 @@ fn is_tail_patient(e: &EngineError) -> bool {
         }
     }
     false
+}
+
+/// Round 74 (A) — is this failure worth retrying as a
+/// whole-download stall? A body stall (headers arrived, then
+/// silence) counts here — unlike the tail, where Round 55/72
+/// pin that a body stall fails — because this gate only ever
+/// runs after the download already received bytes mid-file
+/// (the OVH shape: every connection goes quiet at once), and
+/// only inside the run's stall-retry budget (the patient-tail
+/// zero-progress cap). Transport errors and 429/503 ride the
+/// tail-patient rule; anything else (404 / 416 / disk errors)
+/// still fails at once.
+fn is_whole_stall_retryable(e: &EngineError) -> bool {
+    if let EngineError::InvalidState(m) = e {
+        if m.starts_with(STALL_MSG_PREFIX) {
+            return true;
+        }
+    }
+    is_tail_patient(e)
 }
 
 /// Round 72 (C) — patient tail backoffs, in seconds: 5 s, 15 s,

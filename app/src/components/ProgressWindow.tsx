@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { File, FileDown, FolderOpen, Pause, Play, Power, RotateCw } from 'lucide-react'
+import { File, FileDown, FileX, FolderOpen, Pause, Play, Power, RotateCw } from 'lucide-react'
 import { formatBytes, formatEta, formatSpeed, progressPercent, statusLabel } from '../lib/format'
 import {
   cancelDownload,
@@ -22,6 +22,7 @@ import {
 } from '../lib/api'
 import type { DownloadCompletionOptions, DownloadRow, ProgressEvent, SegmentProgress, Settings } from '../lib/types'
 import { Button } from './Button'
+import { ConfirmDialog } from './ConfirmDialog'
 import { ProgressBar } from './ProgressBar'
 import { StatusBadge } from './StatusBadge'
 import { TitleBar } from './TitleBar'
@@ -108,6 +109,10 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
   const pollInFlight = useRef(false)
   const pollStoppedRef = useRef(false)
   const lastPollOkAt = useRef(Date.now())
+  /** Round 74 (11) — Cancel asks "Are you sure?" first (the
+   *  ConfirmDialog below); this only runs once confirmed. */
+  const [confirmCancel, setConfirmCancel] = useState(false)
+  const [resumeBusy, setResumeBusy] = useState(false)
   const [live, setLive] = useState<ProgressEvent | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const [retryBusy, setRetryBusy] = useState(false)
@@ -352,7 +357,19 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
   /** The 30 s shutdown countdown: one second at a time, then
    *  the Windows shutdown command. Cancelling (below) clears
    *  the countdown and unchecks the option, so it cannot fire
-   *  again for this download. */
+   *  again for this download. Round 74 (14): Escape cancels it
+   *  too, like the Cancel button. */
+  useEffect(() => {
+    if (shutdownCountdown === null) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') void cancelShutdownCountdown()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+    // `cancelShutdownCountdown` is declared below; it is a
+    // hoisted function declaration, so this effect may use it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shutdownCountdown])
   useEffect(() => {
     if (shutdownCountdown === null) return
     if (shutdownCountdown <= 0) {
@@ -408,21 +425,40 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
     }
   }
 
+  /** Round 74 (B-UI) — Resume with visible busy feedback: the
+   *  Round 73 retest read the progress-window Resume as "did
+   *  nothing" while the re-probe ran with no UI change. The
+   *  button now shows "Resuming…" until the invoke settles, and
+   *  a failure lands in the window's action error instead of
+   *  silence. The call itself is the same `resumeDownload` the
+   *  toolbar uses, with the same download id — no frontend
+   *  defect was found in the wiring (id, state gating, closure);
+   *  a resume that still never starts is engine-side (see the
+   *  Round 74 report). */
   async function handleResume() {
     setActionError(null)
+    setResumeBusy(true)
     try {
       await resumeDownload(downloadId)
     } catch (e) {
       setActionError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setResumeBusy(false)
     }
   }
 
   /** Round 63 — on completion the footer offers Open file /
    *  Open folder (the engine commands already exist; the main
    *  window uses them too). A failure surfaces as the window's
-   *  action error instead of pretending the file opened. */
+   *  action error instead of pretending the file opened.
+   *  Round 74 (4) — when the file is gone from disk there is
+   *  nothing to open: warn instead of invoking the command. */
   async function handleOpenFile() {
     setActionError(null)
+    if (download?.file_missing) {
+      setActionError('This file is no longer on disk — Redownload it from the main window to get it again.')
+      return
+    }
     try {
       await openFile(downloadId)
     } catch (e) {
@@ -432,6 +468,10 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
 
   async function handleOpenFolder() {
     setActionError(null)
+    if (download?.file_missing) {
+      setActionError('This file is no longer on disk — Redownload it from the main window to get it again.')
+      return
+    }
     try {
       await openFolder(downloadId)
     } catch (e) {
@@ -440,6 +480,7 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
   }
 
   async function handleCancel() {
+    setConfirmCancel(false)
     setActionError(null)
     try {
       await cancelDownload(downloadId)
@@ -489,19 +530,26 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
   }
 
   if (!download) {
+    // Round 74 (3) — the "Download removed" window was a big,
+    // mostly-empty window (a heading and one line floating in a
+    // 660x480 frame). It is now a compact centred card like the
+    // other dialogs: icon + heading + one line + Close.
     return (
       <div className="flex h-full flex-col text-text">
         <TitleBar title="Sonic Manager" />
-        <div className="flex flex-col p-6">
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
+          <div className="flex h-12 w-12 items-center justify-center rounded-full border-[1.5px] border-border bg-surface-2 text-text-muted">
+            <FileX className="h-6 w-6" aria-hidden="true" />
+          </div>
           <h1 className="text-lg font-semibold">
             {pollError ? 'Could not load this download' : 'Download removed'}
           </h1>
-          <p className="mt-2 text-sm text-text-muted">
+          <p className="max-w-md text-sm text-text-muted">
             {pollError
               ? `The window could not reach the app: ${pollError} The download itself is not affected.`
               : 'This download is no longer in the list — it was removed from the main window.'}
           </p>
-          <div className="mt-6 flex justify-end gap-2">
+          <div className="mt-3 flex justify-center gap-2">
             {backendDead ? (
               <>
                 <Button variant="secondary" onClick={retryPolling}>
@@ -610,7 +658,7 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
               <h1 className="min-w-0 truncate text-base font-semibold" title={download.filename}>
                 {download.filename}
               </h1>
-              <StatusBadge status={download.status} />
+              <StatusBadge status={download.status} fileMissing={download.file_missing} />
             </div>
             <p className="mt-0.5 truncate font-mono text-xs text-text-muted" title={download.url}>
               {download.url}
@@ -739,7 +787,7 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
                   <Button variant="secondary" onClick={handleRetryNow} disabled={retryBusy}>
                     <RotateCw className="h-4 w-4" aria-hidden="true" /> Retry now
                   </Button>
-                  <Button variant="ghost" onClick={handleCancel}>
+                  <Button variant="ghost" onClick={() => setConfirmCancel(true)}>
                     Cancel download
                   </Button>
                 </div>
@@ -842,26 +890,62 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
           </Button>
         ) : null}
         {download.status === 'paused' || download.status === 'error' ? (
-          <Button variant="primary" onClick={handleResume}>
+          <Button variant="primary" onClick={handleResume} loading={resumeBusy}>
             <Play className="h-4 w-4" aria-hidden="true" /> Resume
           </Button>
         ) : null}
         {download.status === 'downloading' || download.status === 'paused' || download.status === 'error' ? (
-          <Button variant="danger" onClick={handleCancel}>
+          <Button variant="danger" onClick={() => setConfirmCancel(true)}>
             Cancel
           </Button>
         ) : null}
         {download.status === 'complete' ? (
           <>
-            <Button variant="primary" onClick={() => void handleOpenFile()}>
+            <Button
+              variant="primary"
+              disabled={download.file_missing}
+              title={
+                download.file_missing
+                  ? 'The file is no longer on disk — Redownload it from the main window to get it again'
+                  : undefined
+              }
+              onClick={() => void handleOpenFile()}
+            >
               <File className="h-4 w-4" aria-hidden="true" /> Open file
             </Button>
-            <Button variant="secondary" onClick={() => void handleOpenFolder()}>
+            <Button
+              variant="secondary"
+              disabled={download.file_missing}
+              title={
+                download.file_missing
+                  ? 'The file is no longer on disk — Redownload it from the main window to get it again'
+                  : undefined
+              }
+              onClick={() => void handleOpenFolder()}
+            >
               <FolderOpen className="h-4 w-4" aria-hidden="true" /> Open folder
             </Button>
           </>
         ) : null}
       </div>
+
+      {download.status === 'complete' && download.file_missing ? (
+        <p role="status" className="shrink-0 px-4 pb-2 text-sm text-danger">
+          This file is no longer on disk — Redownload it from the main window to get it again.
+        </p>
+      ) : null}
+
+      {/* Round 74 (11) — Cancel asks first. Fixed-size, no drag,
+          closes on Cancel / X / Escape only. */}
+      <ConfirmDialog
+        open={confirmCancel}
+        title="Cancel this download?"
+        message={`“${download.filename}” will be cancelled and removed from the list. The part already downloaded is deleted.`}
+        confirmLabel="Cancel download"
+        cancelLabel="Keep downloading"
+        onConfirm={() => void handleCancel()}
+        onCancel={() => setConfirmCancel(false)}
+      />
 
       {shutdownCountdown !== null ? (
         <div

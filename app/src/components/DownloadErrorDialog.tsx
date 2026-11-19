@@ -151,7 +151,7 @@ export function DownloadErrorDialog({
   if (!isMessage && (!loaded || !download)) {
     return (
       <div className="flex h-full flex-col bg-bg text-text">
-        <TitleBar title="Download failed" showMinimize={false} showMaximize={false} />
+        <TitleBar title="Download failed" showMinimize={false} showMaximize={false} draggable={false} />
         <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
           {pollError ? (
             <p className="text-sm text-danger">{pollError}</p>
@@ -172,7 +172,7 @@ export function DownloadErrorDialog({
 
   return (
     <div className="flex h-full flex-col bg-bg text-text">
-      <TitleBar title={barTitle} showMinimize={false} showMaximize={false} onClose={onClose} />
+      <TitleBar title={barTitle} showMinimize={false} showMaximize={false} onClose={onClose} draggable={false} />
       {/* Purple→pink divider under the title bar, like the
           progress bar (approved mockup). */}
       <div

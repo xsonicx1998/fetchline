@@ -78,9 +78,6 @@ export function AddCategoryDialog({ open, onClose, onAdded }: AddCategoryDialogP
       aria-modal="true"
       aria-labelledby="add-category-title"
       className="fixed inset-0 z-10 flex items-center justify-center bg-black/50 p-4"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose()
-      }}
     >
       <div className="w-full max-w-md rounded-lg border border-border bg-surface-raised p-6 shadow-pop">
         <div className="mb-4 flex items-start justify-between gap-4">

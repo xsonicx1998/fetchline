@@ -2215,7 +2215,9 @@ impl Store {
     pub fn create_queue(&self, name: &str) -> Result<QueueRow> {
         let name = name.trim();
         if name.is_empty() {
-            return Err(EngineError::InvalidState("Give the queue a name".to_string()));
+            return Err(EngineError::InvalidState(
+                "Give the queue a name".to_string(),
+            ));
         }
         let id = Self::new_id();
         let conn = self.lock_conn();
@@ -2388,6 +2390,110 @@ impl Store {
             return Err(EngineError::NotFound(id.to_string()));
         }
         drop(conn);
+        self.get_queue(id)?
+            .ok_or_else(|| EngineError::NotFound(id.to_string()))
+    }
+
+    /// Delete a custom queue (Round 74, item 6). The main queue
+    /// cannot be deleted. Downloads still in the queue are NOT
+    /// deleted: they move back to the main queue, keeping their
+    /// order, appended after the main queue's current files — the
+    /// same shape as `delete_category` refusing would leave the
+    /// user stuck moving files by hand. Grabber projects pointing
+    /// at the queue fall back to the main queue too. The reassignment
+    /// happens before the DELETE, so the `ON DELETE SET NULL` foreign
+    /// key on `downloads.queue_id` never fires (it would otherwise
+    /// leave unqueued rows behind).
+    pub fn delete_queue(&self, id: &str) -> Result<()> {
+        let (is_main, _name): (i64, String) = {
+            let conn = self.lock_conn();
+            conn.query_row(
+                "SELECT is_main, name FROM queues WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(EngineError::from)?
+            .ok_or_else(|| EngineError::NotFound(id.to_string()))?
+        };
+        if is_main != 0 {
+            return Err(EngineError::InvalidState(
+                "The main queue cannot be deleted".to_string(),
+            ));
+        }
+        let conn = self.lock_conn();
+        // Append the queue's downloads after the main queue's
+        // current files, in their existing order.
+        let mut next: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(queue_position), -1) + 1 FROM downloads WHERE queue_id = 'queue-main'",
+            [],
+            |r| r.get(0),
+        )?;
+        let mut stmt =
+            conn.prepare("SELECT id FROM downloads WHERE queue_id = ?1 ORDER BY queue_position")?;
+        let ids: Vec<String> = stmt
+            .query_map(params![id], |r| r.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(stmt);
+        for dl in ids {
+            conn.execute(
+                "UPDATE downloads SET queue_id = 'queue-main', queue_position = ?1, updated_at = datetime('now') WHERE id = ?2",
+                params![next, dl],
+            )?;
+            next += 1;
+        }
+        conn.execute(
+            "UPDATE grabber_projects SET queue_id = 'queue-main' WHERE queue_id = ?1",
+            params![id],
+        )?;
+        conn.execute("DELETE FROM queues WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Rename a custom queue (Round 74, item 6). Names must be
+    /// unique and non-empty, mirroring `create_queue`; the main
+    /// queue keeps its name. Returns the updated row.
+    pub fn rename_queue(&self, id: &str, name: &str) -> Result<QueueRow> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(EngineError::InvalidState(
+                "Give the queue a name".to_string(),
+            ));
+        }
+        let is_main: i64 = {
+            let conn = self.lock_conn();
+            conn.query_row(
+                "SELECT is_main FROM queues WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(EngineError::from)?
+            .ok_or_else(|| EngineError::NotFound(id.to_string()))?
+        };
+        if is_main != 0 {
+            return Err(EngineError::InvalidState(
+                "The main queue cannot be renamed".to_string(),
+            ));
+        }
+        {
+            let conn = self.lock_conn();
+            match conn.execute(
+                "UPDATE queues SET name = ?1, updated_at = datetime('now') WHERE id = ?2",
+                params![name, id],
+            ) {
+                Ok(0) => return Err(EngineError::NotFound(id.to_string())),
+                Ok(_) => {}
+                Err(rusqlite::Error::SqliteFailure(e, _))
+                    if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    return Err(EngineError::InvalidState(format!(
+                        "A queue called “{name}” already exists"
+                    )));
+                }
+                Err(e) => return Err(EngineError::from(e)),
+            }
+        }
         self.get_queue(id)?
             .ok_or_else(|| EngineError::NotFound(id.to_string()))
     }

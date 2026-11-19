@@ -255,7 +255,7 @@ export function DownloadTable({
                 </td>
                 <td className="whitespace-nowrap px-3 py-2" title={description || undefined}>
                   <span className="flex items-center gap-1.5">
-                    <StatusBadge status={d.status} />
+                    <StatusBadge status={d.status} fileMissing={d.file_missing} />
                     {percent !== null && (d.status === 'downloading' || d.status === 'paused') ? (
                       <span className="font-mono text-xs text-text-muted">{percent}%</span>
                     ) : null}
@@ -404,9 +404,16 @@ function RowMenu({
 }) {
   const d = download
   const isComplete = d.status === 'complete'
-  /** A file exists on disk once the download finished or any
-   *  bytes were saved (paused / failed with progress). */
-  const hasFile = isComplete || d.downloaded_bytes > 0
+  /** Round 74 (4) — a Finished row whose file was deleted from
+   *  Windows has no file to open: Open / Open with... / Open
+   *  folder are all disabled, and the row reads "File missing"
+   *  (the StatusBadge). Redownload stays enabled — it is the
+   *  way to get the file back. */
+  const fileMissing = isComplete && d.file_missing
+  /** A file exists on disk once the download finished (and the
+   *  file is still there) or any bytes were saved (paused /
+   *  failed with progress). */
+  const hasFile = (isComplete && !fileMissing) || (!isComplete && d.downloaded_bytes > 0)
   // Round 69 (b) — `queued` ("Waiting") rows are resumable too
   // (same reason as the toolbar: the engine accepts any
   // non-complete, non-downloading row, and a queued row is a
@@ -433,20 +440,38 @@ function RowMenu({
     >
       <MenuItem
         label="Open"
-        disabled={!isComplete}
-        title={isComplete ? undefined : 'Only a finished download can be opened'}
+        disabled={!isComplete || fileMissing}
+        title={
+          fileMissing
+            ? 'The file is no longer on disk — Redownload it to get it again'
+            : isComplete
+              ? undefined
+              : 'Only a finished download can be opened'
+        }
         onClick={closeMenu(onOpenFile)}
       />
       <MenuItem
         label="Open with..."
         disabled={!hasFile}
-        title={hasFile ? undefined : 'No file on disk yet to open'}
+        title={
+          fileMissing
+            ? 'The file is no longer on disk — Redownload it to get it again'
+            : hasFile
+              ? undefined
+              : 'No file on disk yet to open'
+        }
         onClick={closeMenu(onOpenWith)}
       />
       <MenuItem
         label="Open folder"
         disabled={!hasFile}
-        title={hasFile ? undefined : 'No file on disk yet to show'}
+        title={
+          fileMissing
+            ? 'The file is no longer on disk — Redownload it to get it again'
+            : hasFile
+              ? undefined
+              : 'No file on disk yet to show'
+        }
         onClick={closeMenu(onOpenFolder)}
       />
       <MenuItem label="Open progress window" onClick={closeMenu(onOpenProgress)} />

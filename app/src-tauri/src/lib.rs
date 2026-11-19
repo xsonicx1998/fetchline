@@ -399,6 +399,11 @@ fn reload_webview_now(
     label: &str,
     heartbeats: &Arc<StdMutex<HashMap<String, WebviewHeartbeat>>>,
 ) -> Result<(), String> {
+    // Round 74 (1) — the close-and-rebuild is atomic with every
+    // other window creation (see `WINDOW_BUILD_MUTEX`): an open
+    // racing this rebuild must focus the old window or the new
+    // one, never build a second.
+    let _guard = lock_window_build();
     if label == "main" {
         let window = app
             .get_webview_window("main")
@@ -414,6 +419,20 @@ fn reload_webview_now(
         ));
     };
     window.close().map_err(|e| e.to_string())?;
+    // Round 74 (1) — `close()` only DISPATCHES the close; the
+    // window leaves Tauri's manager (and frees its label) when
+    // the runtime processes it. Building at once can hit
+    // `WindowLabelAlreadyExists` — or attach over the closing
+    // window. Wait (bounded) for the label to free first.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while app.get_webview_window(label).is_some() {
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "progress window {label} did not close in time for reload"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
     let log = startup_log_path_from_app(app);
     log_startup(
         log.as_deref(),
@@ -735,6 +754,32 @@ fn main_webview_environment(
 /// runs, and `main.tsx` reads it (falling back to the hash). The
 /// fragment path stays working as the fallback, so an old window
 /// or a missed script still renders the progress view.
+/// Round 74 (1) — serialize ALL window creation (progress /
+/// complete / error / add-url builders, and the reload rebuild
+/// below): `open_progress_window` used to check
+/// `get_webview_window` and then `build()` with nothing between
+/// them, so two concurrent invokes (the auto-open effect + a
+/// double-click, or two polls) both passed the check and both
+/// built. Tauri's own duplicate-label check runs in
+/// `prepare_window`, BEFORE the window is attached to the
+/// manager — two builds that pass it together both create an OS
+/// window, and the second `attach_window` silently overwrites
+/// the first in the manager map. The first window stays on
+/// screen as an orphan: same title, same download, unreachable
+/// by focus/close/title updates — the two stacked "1%" windows
+/// cancelling each other. Holding this mutex across the
+/// check-and-build (and across close-and-rebuild) makes the
+/// sequence atomic per process. Builds are rare (user actions),
+/// so one global lock is enough; it is never held across an
+/// `.await`.
+static WINDOW_BUILD_MUTEX: StdMutex<()> = StdMutex::new(());
+
+/// Lock the window-build mutex, recovering from poisoning (a
+/// panicking build must not wedge every later window creation).
+fn lock_window_build() -> std::sync::MutexGuard<'static, ()> {
+    WINDOW_BUILD_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Round 71 (C3) — show-when-ready FALLBACK: a window built
 /// hidden must never stay hidden if the frontend's ready signal
 /// never arrives (JS error, slow bundle). Show it after 3 s
@@ -744,8 +789,36 @@ fn spawn_show_fallback(window: &tauri::WebviewWindow) {
     let window = window.clone();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(3));
-        let _ = window.show();
+        show_window_ready(&window);
     });
+}
+
+/// Round 74 (13) — show a window, and when it is one of the
+/// independent dialogs (capture Add URL, complete, error), pop
+/// it IN FRONT over whatever window the user has open — even
+/// when the main window is hidden/minimized to tray: show +
+/// focus + always-on-top for ~1 s, then clear the topmost flag
+/// so it behaves like a normal window afterwards. The
+/// always-on-top is the part that works even when Windows
+/// refuses the foreground steal from a background process
+/// (focus alone is best-effort there); the 1 s clear keeps the
+/// dialog from staying on top forever. Main and progress
+/// windows just show — they never take the topmost flag.
+fn show_window_ready(window: &tauri::Window) {
+    let _ = window.show();
+    let label = window.label();
+    if label.starts_with("add-url-")
+        || label.starts_with("complete-")
+        || label.starts_with("error-")
+    {
+        let _ = window.set_focus();
+        let _ = window.set_always_on_top(true);
+        let w = window.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(1));
+            let _ = w.set_always_on_top(false);
+        });
+    }
 }
 
 /// Round 71 (C3) — show-when-ready: windows are built hidden
@@ -753,10 +826,15 @@ fn spawn_show_fallback(window: &tauri::WebviewWindow) {
 /// the frontend calls this from a `useLayoutEffect` after its
 /// root component mounts, and the window appears WITH content.
 /// Tauri injects the calling window, so one command serves the
-/// main, progress, error and completion windows alike.
+/// main, progress, error and completion windows alike. Round 74
+/// (13): the dialogs pop in front here too (see
+/// `show_window_ready`), so a capture Add URL window appears
+/// over the user's browser even when the main window is hidden
+/// to the tray.
 #[tauri::command]
 async fn window_ready(window: tauri::Window) -> Result<(), String> {
-    window.show().map_err(|e| e.to_string())
+    show_window_ready(&window);
+    Ok(())
 }
 
 fn build_progress_window(
@@ -772,6 +850,20 @@ fn build_progress_window(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Download not found: {download_id}"))?;
     let label = progress_window_label(download_id);
+    // Round 74 (1) — last-line defence: if a window with this
+    // label appeared after the caller's check (a caller that
+    // forgot the build mutex), focus it instead of building a
+    // second one. Callers hold the mutex, so this is normally a
+    // no-op.
+    if let Some(existing) = app.get_webview_window(&label) {
+        log_startup(
+            log,
+            &format!("progress window {label} already open — focused (build re-check)"),
+        );
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(existing);
+    }
     let url = WebviewUrl::App("index.html".into());
     let init_script = format!("window.__PROGRESS_ID__ = {download_id:?};");
     log_startup(
@@ -901,6 +993,11 @@ fn build_progress_window(
 
 /// Open (or focus, when it already exists) the separate progress
 /// window for a download. Errors when the download does not exist.
+/// Round 74 (1): the check-and-build holds the window-build mutex
+/// — two concurrent opens (auto-open + double-click) used to race
+/// past the already-open check and build two windows for one
+/// download (the second overwrote the first in Tauri's manager,
+/// orphaning it on screen).
 #[tauri::command]
 async fn open_progress_window(
     app: AppHandle,
@@ -913,6 +1010,7 @@ async fn open_progress_window(
     // log, so the next live test can say whether the window was
     // even created. Devtools are enabled on this window only, so
     // its console errors can be captured in the test build.
+    let _guard = lock_window_build();
     let log = startup_log_path_from_app(&app);
     let log = log.as_deref();
     let label = progress_window_label(&download_id);
@@ -961,6 +1059,16 @@ fn build_complete_dialog_window(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Download not found: {download_id}"))?;
     let label = complete_window_label(download_id);
+    // Round 74 (1) — build re-check (see `build_progress_window`):
+    // focus the existing dialog instead of a second one.
+    if let Some(existing) = app.get_webview_window(&label) {
+        log_startup(
+            log,
+            &format!("complete dialog {label} already open — focused (build re-check)"),
+        );
+        show_window_ready(&existing);
+        return Ok(existing);
+    }
     let url = WebviewUrl::App("index.html".into());
     let init_script = format!("window.__COMPLETE_ID__ = {download_id:?};");
     log_startup(
@@ -1043,15 +1151,18 @@ async fn open_complete_dialog(
     state: State<'_, AppState>,
     download_id: String,
 ) -> Result<(), String> {
+    // Round 74 (1): the check-and-build holds the window-build
+    // mutex (see `open_progress_window`).
+    let _guard = lock_window_build();
     let log = startup_log_path_from_app(&app);
     let log = log.as_deref();
     let label = complete_window_label(&download_id);
     if let Some(window) = app.get_webview_window(&label) {
         // Already open — bring it forward instead of a second
         // copy (the main window and a progress window can both
-        // notice the same completion).
-        let _ = window.show();
-        window.set_focus().map_err(|e| e.to_string())?;
+        // notice the same completion). Round 74 (13): the dialog
+        // pops in front over whatever the user has open.
+        show_window_ready(&window);
         log_startup(
             log,
             &format!("complete dialog {label} already open — focused"),
@@ -1092,6 +1203,16 @@ fn build_error_dialog_window(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Download not found: {download_id}"))?;
     let label = error_window_label(download_id);
+    // Round 74 (1) — build re-check (see `build_progress_window`):
+    // focus the existing dialog instead of a second one.
+    if let Some(existing) = app.get_webview_window(&label) {
+        log_startup(
+            log,
+            &format!("error dialog {label} already open — focused (build re-check)"),
+        );
+        show_window_ready(&existing);
+        return Ok(existing);
+    }
     let url = WebviewUrl::App("index.html".into());
     let init_script = format!("window.__ERROR_ID__ = {download_id:?};");
     log_startup(
@@ -1175,23 +1296,204 @@ async fn open_error_dialog(
     state: State<'_, AppState>,
     download_id: String,
 ) -> Result<(), String> {
+    // Round 74 (1): the check-and-build holds the window-build
+    // mutex (see `open_progress_window`).
+    let _guard = lock_window_build();
     let log = startup_log_path_from_app(&app);
     let log = log.as_deref();
     let label = error_window_label(&download_id);
     if let Some(window) = app.get_webview_window(&label) {
         // Already open — bring it forward instead of a second
         // copy (the main window can notice the same failure
-        // twice across polls).
-        let _ = window.show();
-        window.set_focus().map_err(|e| e.to_string())?;
-        log_startup(
-            log,
-            &format!("error dialog {label} already open — focused"),
-        );
+        // twice across polls). Round 74 (13): the dialog pops in
+        // front over whatever the user has open.
+        show_window_ready(&window);
+        log_startup(log, &format!("error dialog {label} already open — focused"));
         return Ok(());
     }
     build_error_dialog_window(&app, &state.manager, &download_id)?;
     Ok(())
+}
+
+/// Label of a pending link's standalone Add URL window
+/// (Round 74, item 13): `add-url-<pending link id>`, mirroring
+/// `complete-<download id>`.
+fn add_url_window_label(link_id: &str) -> String {
+    format!("add-url-{link_id}")
+}
+
+/// Build one standalone Add URL window (Round 74, item 13): a
+/// separate OS window like the "Download complete" / "Download
+/// failed" dialogs — the same bundle, frameless with the shared
+/// `TitleBar.tsx` — but for a pending browser-extension or
+/// clipboard capture, NOT tied to the main window: it can appear
+/// on its own while the main window is hidden to the tray, and it
+/// pops in front (see `show_window_ready`). Fixed size
+/// (~560x520, the Add URL dialog's size), not resizable (the
+/// user's Round 74 item 16 correction: drag + resize apply only
+/// to the main window and the active progress window), and with
+/// no heartbeat registration and no auto-reload (transient, like
+/// the complete/error dialogs). The pending link id arrives
+/// through an initialization script (`window.__ADD_URL_ID__`),
+/// the same Round 57 mechanism as the progress window, with the
+/// `#add-url=<id>` hash as the frontend's fallback. The window
+/// title is the file name from the link (the user's correction:
+/// the dialog shows the file name at the top instead of
+/// "Add URL", and the URL field is locked) — "Add URL" when the
+/// link has no file name to show.
+fn build_add_url_window(
+    app: &AppHandle,
+    manager: &Arc<DownloadManager>,
+    link_id: &str,
+) -> Result<WebviewWindow, String> {
+    let log = startup_log_path_from_app(app);
+    let log = log.as_deref();
+    let row = manager
+        .store()
+        .get_pending_link(link_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Pending link not found: {link_id}"))?;
+    let label = add_url_window_label(link_id);
+    // Round 74 (1) — build re-check (see `build_progress_window`):
+    // focus the existing window instead of a second one.
+    if let Some(existing) = app.get_webview_window(&label) {
+        log_startup(
+            log,
+            &format!("add URL window {label} already open — focused (build re-check)"),
+        );
+        show_window_ready(&existing);
+        return Ok(existing);
+    }
+    let url = WebviewUrl::App("index.html".into());
+    let init_script = format!("window.__ADD_URL_ID__ = {link_id:?};");
+    // File name from the link for the title bar: the last URL
+    // segment, without any query string.
+    let title = row
+        .url
+        .split('?')
+        .next()
+        .unwrap_or("")
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Add URL")
+        .to_string();
+    log_startup(
+        log,
+        &format!("creating add URL window {label}: index.html (id via init script)"),
+    );
+    // Round 58 (§9.1): share the main window's WebView2
+    // environment instead of creating a fresh one per window —
+    // a fresh environment creation waits unbounded on the main
+    // thread (`wait_with_pump`), the Round 58 wedge. Windows
+    // only; other platforms build exactly as before.
+    #[cfg(target_os = "windows")]
+    let shared_environment = main_webview_environment(app, log);
+    #[cfg(target_os = "windows")]
+    if shared_environment.is_some() {
+        log_startup(
+            log,
+            &format!("add URL window {label}: sharing main WebView2 environment"),
+        );
+    }
+    let build_started = std::time::Instant::now();
+    let mut builder = WebviewWindowBuilder::new(app, &label, url)
+        .initialization_script(init_script)
+        .title(title)
+        .decorations(false)
+        .inner_size(560.0, 520.0)
+        .min_inner_size(560.0, 520.0)
+        .resizable(false)
+        .center()
+        .devtools(true)
+        // Round 71 (C1/C3) — #0B0F24 first paint + hidden until
+        // the frontend signals ready (see the progress window).
+        .background_color(tauri::window::Color(11, 15, 36, 255))
+        .visible(false);
+    #[cfg(target_os = "windows")]
+    if let Some(env) = shared_environment {
+        builder = builder.with_environment(env);
+    }
+    let build_thread_id = std::thread::current().id();
+    log_startup(
+        log,
+        &format!("add URL window {label}: build() entered on thread {build_thread_id:?}"),
+    );
+    match builder.build() {
+        Ok(window) => {
+            let elapsed_ms = build_started.elapsed().as_millis();
+            log_startup(
+                log,
+                &format!(
+                    "add URL window {label} created: index.html in {elapsed_ms}ms on thread {build_thread_id:?}"
+                ),
+            );
+            // Round 71 (C3) — built hidden; shown when the
+            // frontend is ready (3 s fallback).
+            spawn_show_fallback(&window);
+            Ok(window)
+        }
+        Err(e) => {
+            let elapsed_ms = build_started.elapsed().as_millis();
+            log_startup(
+                log,
+                &format!(
+                    "add URL window {label} FAILED to create after {elapsed_ms}ms on thread {build_thread_id:?}: {e}"
+                ),
+            );
+            Err(e.to_string())
+        }
+    }
+}
+
+/// Open (or focus, when it already exists) the standalone Add URL
+/// window for a pending browser-extension or clipboard capture
+/// (Round 74, item 13). The window is independent of the main
+/// window and pops in front over whatever the user has open, so
+/// a captured link never waits behind the browser. Errors when
+/// the pending link does not exist.
+#[tauri::command]
+async fn open_add_url_window(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    link_id: String,
+) -> Result<(), String> {
+    // Round 74 (1): the check-and-build holds the window-build
+    // mutex (see `open_progress_window`).
+    let _guard = lock_window_build();
+    let log = startup_log_path_from_app(&app);
+    let log = log.as_deref();
+    let label = add_url_window_label(&link_id);
+    if let Some(window) = app.get_webview_window(&label) {
+        // Already open — bring it forward instead of a second
+        // copy. Round 74 (13): the window pops in front over
+        // whatever the user has open.
+        show_window_ready(&window);
+        log_startup(
+            log,
+            &format!("add URL window {label} already open — focused"),
+        );
+        return Ok(());
+    }
+    build_add_url_window(&app, &state.manager, &link_id)?;
+    Ok(())
+}
+
+/// Round 74 (13) — one pending browser-extension / clipboard
+/// capture row, for the standalone Add URL window to render
+/// (file name, URL, referrer). A thin wrapper over the store's
+/// existing getter, reached through the manager like the other
+/// pending-link commands.
+#[tauri::command]
+fn get_pending_link(
+    state: State<'_, AppState>,
+    link_id: String,
+) -> Result<Option<PendingLinkRow>, String> {
+    state
+        .manager
+        .store()
+        .get_pending_link(&link_id)
+        .map_err(|e| e.to_string())
 }
 
 /// Round 62 — per-download completion options (progress window
@@ -1619,6 +1921,33 @@ async fn move_to_category(
 #[tauri::command]
 async fn create_queue(state: State<'_, AppState>, name: String) -> Result<QueueRow, String> {
     state.manager.create_queue(&name).map_err(|e| e.to_string())
+}
+
+/// Delete a custom queue (Round 74, item 6): the frontend sidebar's
+/// delete button had no command to call — only `create_queue` /
+/// `update_queue` existed, and `update_queue` takes no name. The
+/// queue's downloads move back to the main queue (engine-side).
+#[tauri::command]
+async fn delete_queue(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state
+        .manager
+        .delete_queue(&id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Rename a custom queue (Round 74, item 6): same gap as
+/// `delete_queue` — the sidebar's rename had no command to call.
+#[tauri::command]
+async fn rename_queue(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+) -> Result<QueueRow, String> {
+    state
+        .manager
+        .rename_queue(&id, &name)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2825,6 +3154,19 @@ pub fn run() {
         // Round 67 — the Add URL dialog's "..." browse button
         // needs the native folder picker.
         .plugin(tauri_plugin_dialog::init())
+        // Round 74 (9) — single instance: a second launch hands
+        // its arguments to the running instance and exits at once
+        // (named mutex + WM_COPYDATA on Windows, inside the
+        // plugin); the running instance shows + focuses its main
+        // window instead of opening a second copy. A second
+        // launch never quits the first instance — the tray's
+        // Exit is still the way out.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .setup(|app| {
             let log = startup_log_path_from_app(app.handle());
             let log = log.as_deref();
@@ -2948,27 +3290,43 @@ pub fn run() {
             // `clipboard_monitoring` setting; the shell only reads
             // the clipboard and forwards offers. The check is sync
             // and cheap (store lock + tiny work) — nothing is held
-            // across an await. A clipboard that cannot be opened
-            // disables monitoring for the session, never panics.
+            // across an await.
+            // Round 74 (12) — TWO repairs to the reader. (1) A
+            // FRESH clipboard handle per read: arboard's Windows
+            // handle carries no per-handle state, so a fresh one
+            // costs nothing — and a read stuck in the RDP
+            // clipboard channel can no longer poison the next
+            // tick. The old design held ONE shared Clipboard
+            // behind a Mutex: one stuck `get_text()` held the
+            // lock forever, every later tick skipped on
+            // `try_lock`, and monitoring silently died for the
+            // rest of the session. A stuck read now only loses
+            // its own tick. (2) It logs: the old reader swallowed
+            // every failure with `.ok()`, so a dead reader was
+            // indistinguishable from "the user copied nothing" —
+            // the log now shows the start, the first read
+            // failure + the recovery, and every offer emitted.
+            // A `Clipboard::new()` that fails once no longer
+            // disables monitoring for the session either — the
+            // next tick simply tries again.
             let clipboard_handle = app.handle().clone();
             let clipboard_manager = Arc::clone(&manager);
             let clipboard_log = startup_log_path_from_app(app.handle());
             tauri::async_runtime::spawn(async move {
-                let clipboard = match arboard::Clipboard::new() {
-                    Ok(c) => Arc::new(StdMutex::new(c)),
-                    Err(e) => {
-                        log_startup(
-                            clipboard_log.as_deref(),
-                            &format!("clipboard unavailable: {e} — monitoring disabled"),
-                        );
-                        return;
-                    }
-                };
+                log_startup(
+                    clipboard_log.as_deref(),
+                    "clipboard monitoring started (polling once a second)",
+                );
                 let mut interval = tokio::time::interval(Duration::from_secs(1));
                 // A slow clipboard must not burst a backlog of
                 // reads when it recovers — one delayed tick, then
                 // the next second.
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                // Round 74 (12) — read failures log once (the
+                // first failure, then the recovery), not every
+                // second: a clipboard holding non-text fails
+                // every read, and that must not drown the log.
+                let mut read_failed_logged = false;
                 loop {
                     interval.tick().await;
                     // Round 57 (§9.2a): the clipboard read runs
@@ -2982,23 +3340,58 @@ pub fn run() {
                     // runtime (commands, timers, watchdogs). A
                     // blocking thread can stall without taking a
                     // worker with it; the 1 s tick just skips
-                    // that round. `try_lock`: a previous read
-                    // still stuck in the channel means this tick
-                    // is skipped instead of queuing behind it.
-                    let clipboard_clone = Arc::clone(&clipboard);
-                    let text = tokio::task::spawn_blocking(move || {
-                        let Ok(mut clip) = clipboard_clone.try_lock() else {
-                            return None;
+                    // that round.
+                    let read = tokio::task::spawn_blocking(|| {
+                        let mut clip = match arboard::Clipboard::new() {
+                            Ok(c) => c,
+                            Err(e) => return Err(format!("clipboard open failed: {e}")),
                         };
-                        clip.get_text().ok()
+                        clip.get_text().map_err(|e| e.to_string())
                     })
-                    .await
-                    .unwrap_or(None);
+                    .await;
+                    let text = match read {
+                        Ok(Ok(t)) => {
+                            if read_failed_logged {
+                                log_startup(
+                                    clipboard_log.as_deref(),
+                                    "clipboard read recovered",
+                                );
+                                read_failed_logged = false;
+                            }
+                            Some(t)
+                        }
+                        Ok(Err(e)) => {
+                            if !read_failed_logged {
+                                log_startup(
+                                    clipboard_log.as_deref(),
+                                    &format!(
+                                        "clipboard read failed ({e}) — monitoring keeps retrying"
+                                    ),
+                                );
+                                read_failed_logged = true;
+                            }
+                            None
+                        }
+                        Err(_) => None, // spawn_blocking join failed; next tick retries
+                    };
                     let Some(text) = text else {
                         continue;
                     };
-                    if let Ok(Some(offer)) = clipboard_manager.check_clipboard_offer(&text) {
-                        let _ = clipboard_handle.emit("clipboard-link-found", offer);
+                    match clipboard_manager.check_clipboard_offer(&text) {
+                        Ok(Some(offer)) => {
+                            log_startup(
+                                clipboard_log.as_deref(),
+                                &format!("clipboard offer: {}", offer.url),
+                            );
+                            let _ = clipboard_handle.emit("clipboard-link-found", offer);
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            log_startup(
+                                clipboard_log.as_deref(),
+                                &format!("clipboard offer check failed: {e}"),
+                            );
+                        }
                     }
                 }
             });
@@ -3247,6 +3640,8 @@ pub fn run() {
             open_progress_window,
             open_complete_dialog,
             open_error_dialog,
+            open_add_url_window,
+            get_pending_link,
             window_ready,
             set_download_completion_options,
             get_download_completion_options,
@@ -3273,6 +3668,8 @@ pub fn run() {
             delete_category,
             move_to_category,
             create_queue,
+            delete_queue,
+            rename_queue,
             update_queue,
             list_queues,
             get_queue,

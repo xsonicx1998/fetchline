@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import { X } from 'lucide-react'
 import type { UpdateCheckResult } from '../lib/types'
 import { Button } from './Button'
 
@@ -21,6 +22,17 @@ interface UpdateDialogProps {
 export function UpdateDialog({ result, checkError, checking, onClose }: UpdateDialogProps) {
   const [copied, setCopied] = useState(false)
 
+  // Round 74 (14) — Escape closes the dialog, like the Close /
+  // "Remind me later" buttons. (It had neither a backdrop close
+  // — removed in Round 74 (7) — nor a key close before.)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
   if (!result && !checkError && !checking) return null
 
   async function copyDownloadUrl(url: string) {
@@ -39,20 +51,27 @@ export function UpdateDialog({ result, checkError, checking, onClose }: UpdateDi
       aria-modal="true"
       aria-labelledby="update-title"
       className="fixed inset-0 z-20 flex items-center justify-center bg-black/50 p-4"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose()
-      }}
     >
       <div className="w-full max-w-md rounded-lg border border-border bg-surface-raised p-6 shadow-pop">
-        <h2 id="update-title" className="text-lg font-semibold">
-          {checking
-            ? 'Checking for updates…'
-            : checkError
-              ? 'Could not check for updates'
-              : result?.update_available
-                ? `Sonic Manager ${result.latest_version} is available`
-                : 'Sonic Manager is up to date'}
-        </h2>
+        <div className="flex items-start justify-between gap-4">
+          <h2 id="update-title" className="text-lg font-semibold">
+            {checking
+              ? 'Checking for updates…'
+              : checkError
+                ? 'Could not check for updates'
+                : result?.update_available
+                  ? `Sonic Manager ${result.latest_version} is available`
+                  : 'Sonic Manager is up to date'}
+          </h2>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="rounded-md p-1 text-text-muted transition-colors hover:bg-surface-2 hover:text-text"
+          >
+            <X className="h-4 w-4" aria-hidden="true" />
+          </button>
+        </div>
 
         {checking ? (
           <p className="mt-2 text-sm text-text-muted">

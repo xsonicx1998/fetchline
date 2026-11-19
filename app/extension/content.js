@@ -1,4 +1,4 @@
-// Sonic Manager video panel (S08 / F05) — content script.
+// Sonic Manager video download dropdown (S08 / F05) — content script.
 //
 // Round 73 — AUTO-INJECTED on every http(s) page now
 // (manifest.json `content_scripts`, `document_idle`, all_frames
@@ -32,9 +32,10 @@
 //    and the playback state for live / DRM;
 //  * shows a Sonic-branded floating "Download" button at the top
 //    right of a video player that has a downloadable stream;
-//  * opens a small panel listing that video's qualities (1080p /
-//    720p / 480p / 360p where actually available, with a Full HD /
-//    HD tag). Sizes are NOT shown — nothing in the extension
+//  * opens a qualities dropdown ANCHORED directly below the
+//    button (like IDM's, in Sonic identity) listing that video's
+//    qualities (1080p HD / 720p HD / 480p / 360p where actually
+//    available). Sizes are NOT shown — nothing in the extension
 //    ever knows a variant's size, and no HEAD/fetch is ever
 //    made to find one. Picking one sends video_found {page_url,
 //    variants: [chosen]} to the background worker, which hands it
@@ -47,24 +48,34 @@
 //    button. A live stream's .m3u8 is offered as-is, labelled as a
 //    playlist file, never as a merged video.
 //
-// The panel is Sonic design (dark #0B0F24, purple #8B20FF → pink
-// #F02DCD gradient, cyan #00C8FF) — no artwork or wording from any
-// other download manager. It never reads cookies, never sends
-// them, and never touches page content beyond the media elements
-// it lists.
+// The button and dropdown are Sonic design (dark #0B0F24, purple
+// #8B20FF → pink #F02DCD → cyan #00C8FF gradient) — no artwork or
+// wording from any other download manager. It never reads cookies,
+// never sends them, and never touches page content beyond the
+// media elements it lists.
 
 (function () {
   if (window.__fetchlineVideoInstalled) return;
   window.__fetchlineVideoInstalled = true;
 
   const ACCENT = "#8B20FF";
-  const ACCENT_GRADIENT = "linear-gradient(90deg, #8B20FF, #F02DCD)";
-  const PANEL_BG = "#0B0F24";
-  const PANEL_TEXT = "#E8ECF8";
-  const PANEL_MUTED = "#9AA6C7";
-  const PANEL_BORDER = "rgba(139, 32, 255, 0.5)";
+  // Approved video-button look (2026-11-19): the floating button
+  // is a gradient pill — purple → pink → cyan — with white text
+  // and icon; the dropdown header carries the same gradient as a
+  // tint, and rows hover with a purple → cyan tint.
+  const BUTTON_GRADIENT = "linear-gradient(135deg, #8B20FF, #F02DCD 55%, #00C8FF)";
+  const BUTTON_SHADOW = "0 4px 18px rgba(0, 0, 0, 0.5)";
+  const BUTTON_SHADOW_HOVER = "0 0 0 1px #00C8FF, 0 0 18px rgba(0, 200, 255, 0.45)";
+  const DROPDOWN_WIDTH = 232;
+  const DROPDOWN_BG = "#0B0F24";
+  const DROPDOWN_TEXT = "#E8ECF8";
+  const DROPDOWN_BORDER = "#8B20FF";
+  const DROPDOWN_HEADER_BG =
+    "linear-gradient(90deg, rgba(139, 32, 255, 0.45), rgba(240, 45, 205, 0.4), rgba(0, 200, 255, 0.4))";
+  const ROW_HOVER_BG =
+    "linear-gradient(90deg, rgba(139, 32, 255, 0.35), rgba(0, 200, 255, 0.22))";
   const DOWNLOAD_ICON =
-    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
     'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
     '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>' +
     '<polyline points="7 10 12 15 17 10"/>' +
@@ -136,7 +147,7 @@
         allowed = ok;
         if (!ok) {
           hideButton();
-          if (panel) panel.style.display = "none";
+          closeDropdown();
         }
         return ok;
       } catch {
@@ -150,7 +161,8 @@
   }
 
   let button = null;
-  let panel = null;
+  let dropdown = null;
+  let toast = null;
   let currentVideo = null;
   let hideTimer = null;
   let initialized = false;
@@ -242,21 +254,35 @@
       display: "inline-flex",
       alignItems: "center",
       gap: "7px",
-      padding: "6px 10px 6px 6px",
-      border: "1px solid rgba(139, 32, 255, 0.7)",
-      borderRadius: "8px",
+      padding: "8px 14px",
+      border: "1px solid rgba(255, 255, 255, 0.28)",
+      borderRadius: "999px",
       fontFamily: "Inter, system-ui, sans-serif",
-      fontSize: "12.5px",
-      fontWeight: "700",
+      fontSize: "13.5px",
+      fontWeight: "600",
       lineHeight: "20px",
       color: "#ffffff",
-      background: "rgba(11, 15, 36, 0.88)",
-      boxShadow: "0 0 16px rgba(139, 32, 255, 0.55)",
+      background: BUTTON_GRADIENT,
+      boxShadow: BUTTON_SHADOW,
       cursor: "pointer",
     });
-    b.addEventListener("mouseenter", () => clearTimeout(hideTimer));
-    b.addEventListener("mouseleave", scheduleHide);
-    b.addEventListener("click", () => showPanel(currentVideo));
+    b.addEventListener("mouseenter", () => {
+      clearTimeout(hideTimer);
+      b.style.boxShadow = BUTTON_SHADOW_HOVER;
+    });
+    b.addEventListener("mouseleave", () => {
+      b.style.boxShadow = BUTTON_SHADOW;
+      scheduleHide();
+    });
+    // Toggle the dropdown anchored below the button (a second
+    // click closes it again).
+    b.addEventListener("click", () => {
+      if (dropdown && dropdown.style.display !== "none" && dropdown._video === currentVideo) {
+        closeDropdown();
+      } else {
+        openDropdown(currentVideo);
+      }
+    });
     return b;
   }
 
@@ -294,189 +320,257 @@
   function scheduleHide() {
     clearTimeout(hideTimer);
     hideTimer = setTimeout(() => {
-      if (panel && panel.style.display !== "none") return;
+      if (dropdown && dropdown.style.display !== "none") return;
       hideButton();
     }, 300);
   }
 
-  function closePanel() {
-    if (panel) panel.style.display = "none";
-    hideButton();
+  // Hide the dropdown only (the button stays until the pointer
+  // leaves the video, per scheduleHide).
+  function closeDropdown() {
+    if (dropdown) dropdown.style.display = "none";
   }
 
-  // Quality tag for the panel, from the approved mockup:
-  // 1080p is Full HD, 720p is HD. Dimensions give the same
-  // answer ("1920 × 1080" is 1080p); anything else gets no tag.
-  function qualityTag(quality) {
-    if (quality === "1080p" || quality === "1920 × 1080") return "Full HD";
-    if (quality === "720p" || quality === "1280 × 720") return "HD";
-    return null;
+  // Is `node` the element `root` itself or inside it? Walks
+  // parentNode, so it works for the button's icon span and the
+  // dropdown rows' label spans (and in the Node test harness,
+  // which has no Element.contains).
+  function isInside(node, root) {
+    let n = node;
+    while (n) {
+      if (n === root) return true;
+      n = n.parentNode;
+    }
+    return false;
   }
 
-  function showPanel(video) {
+  // Outside click / Escape closes the dropdown. Registered once
+  // in init(); the button's own click is excluded (it toggles),
+  // and clicks inside the dropdown (rows, labels) are excluded.
+  function onDocumentClick(e) {
+    if (!dropdown || dropdown.style.display === "none") return;
+    const target = e && e.target;
+    if (target === button || isInside(target, button) || isInside(target, dropdown)) return;
+    closeDropdown();
+  }
+
+  function onDocumentKeyDown(e) {
+    if (e && e.key === "Escape") closeDropdown();
+  }
+
+  // Row label for the dropdown, from the approved preview:
+  // 1080p and 720p read "1080p HD" / "720p HD" (dimensions give
+  // the same answer — "1920 × 1080" is 1080p); anything else is
+  // shown as detected ("320 × 176", "480p", "Unknown quality").
+  function qualityLabel(quality) {
+    if (quality === "1080p" || quality === "1920 × 1080") return "1080p HD";
+    if (quality === "720p" || quality === "1280 × 720") return "720p HD";
+    return quality;
+  }
+
+  // Anchor the dropdown directly below the floating button: its
+  // right edge lines up with the button's (both are top-right of
+  // the same video rect), 6 px below the button's bottom. The
+  // button rect is measured live when available; when it is not
+  // (a zero rect), fall back to the video rect plus the button's
+  // expected height (12 px offset + ~40 px tall + 6 px gap).
+  function positionDropdown(video) {
+    const r = video.getBoundingClientRect();
+    const right = Math.max(8, window.innerWidth - r.right + 12);
+    const left = window.innerWidth - right - DROPDOWN_WIDTH;
+    if (left < 8) {
+      dropdown.style.left = "8px";
+      dropdown.style.right = "auto";
+    } else {
+      dropdown.style.left = "auto";
+      dropdown.style.right = `${right}px`;
+    }
+    let top = null;
+    if (button) {
+      try {
+        const br = button.getBoundingClientRect();
+        if (br && br.bottom > 0) top = br.bottom + 6;
+      } catch {
+        top = null;
+      }
+    }
+    if (top === null) top = r.top + 12 + 40 + 6;
+    dropdown.style.top = `${Math.max(8, top)}px`;
+  }
+
+  // Small confirmation toast at the bottom of the page (same
+  // look as the approved preview): shown after a quality is
+  // picked, for both success and failure, then hides itself.
+  function showToast(text) {
+    if (!toast) {
+      toast = document.createElement("div");
+      toast.setAttribute("role", "status");
+      Object.assign(toast.style, {
+        position: "fixed",
+        left: "50%",
+        bottom: "26px",
+        transform: "translateX(-50%)",
+        zIndex: "2147483647",
+        display: "none",
+        padding: "11px 18px",
+        border: "1px solid #00C8FF",
+        borderRadius: "999px",
+        fontFamily: "Inter, system-ui, sans-serif",
+        fontSize: "13.5px",
+        color: "#ffffff",
+        background: DROPDOWN_BG,
+        boxShadow: "0 10px 30px rgba(0, 0, 0, 0.6)",
+        whiteSpace: "nowrap",
+      });
+      document.body.appendChild(toast);
+    }
+    toast.textContent = text;
+    toast.style.display = "block";
+    clearTimeout(toast._timer);
+    toast._timer = setTimeout(() => {
+      toast.style.display = "none";
+    }, 2600);
+  }
+
+  function openDropdown(video) {
     const variants = byElement.get(video) || [];
-    if (!panel) {
-      panel = document.createElement("div");
-      panel.setAttribute("role", "dialog");
-      panel.setAttribute("aria-label", "Download this video with Sonic Manager");
-      Object.assign(panel.style, {
+    if (!dropdown) {
+      dropdown = document.createElement("div");
+      dropdown.setAttribute("role", "dialog");
+      dropdown.setAttribute("aria-label", "Download this video with Sonic Manager");
+      Object.assign(dropdown.style, {
         position: "fixed",
         zIndex: "2147483647",
-        width: "300px",
+        width: `${DROPDOWN_WIDTH}px`,
         maxWidth: "calc(100vw - 16px)",
-        padding: "16px",
-        border: `1px solid ${PANEL_BORDER}`,
+        border: `1px solid ${DROPDOWN_BORDER}`,
         borderRadius: "12px",
         fontFamily: "Inter, system-ui, sans-serif",
-        fontSize: "14px",
+        fontSize: "13.5px",
         lineHeight: "20px",
-        color: PANEL_TEXT,
-        background: PANEL_BG,
-        boxShadow: "0 16px 44px rgba(0,0,0,0.65), 0 0 24px rgba(139,32,255,0.25)",
+        color: DROPDOWN_TEXT,
+        background: DROPDOWN_BG,
+        boxShadow: "0 16px 40px rgba(0, 0, 0, 0.65)",
+        overflow: "hidden",
       });
-      document.body.appendChild(panel);
+      document.body.appendChild(dropdown);
     }
-    const r = video.getBoundingClientRect();
-    panel.style.left = `${Math.max(8, Math.min(window.innerWidth - 316, r.left + 12))}px`;
-    panel.style.top = `${Math.max(8, Math.min(window.innerHeight - 220, r.top + 56))}px`;
+    dropdown._video = video;
+    positionDropdown(video);
 
-    panel.innerHTML = "";
-    const title = document.createElement("h2");
+    dropdown.innerHTML = "";
+    const title = document.createElement("h3");
     title.textContent = "Download this video";
-    Object.assign(title.style, { margin: "0 0 4px", fontSize: "16px", lineHeight: "24px", color: "#ffffff" });
-    panel.appendChild(title);
-    const sub = document.createElement("p");
-    sub.textContent = "Sonic Manager saves the video to your downloads. Only openly downloadable streams are offered.";
-    Object.assign(sub.style, { margin: "0 0 12px", fontSize: "13px", color: PANEL_MUTED });
-    panel.appendChild(sub);
+    Object.assign(title.style, {
+      margin: "0",
+      padding: "11px 14px",
+      fontSize: "13px",
+      fontWeight: "600",
+      color: "#ffffff",
+      background: DROPDOWN_HEADER_BG,
+      borderBottom: "1px solid rgba(255, 255, 255, 0.08)",
+    });
+    dropdown.appendChild(title);
 
-    const list = document.createElement("ul");
-    Object.assign(list.style, { margin: "0 0 12px", padding: "0", listStyle: "none" });
+    // One row per variant, deduped by URL at scan time (Round
+    // 73): the whole row is the button — quality on the left,
+    // format on the right, no sizes. Nothing in the extension
+    // ever knows a variant's size, and no HEAD/fetch is ever
+    // made to find one, so there is no size here at all.
     variants.forEach((v) => {
-      const li = document.createElement("li");
-      Object.assign(li.style, {
+      const row = document.createElement("button");
+      row.type = "button";
+      Object.assign(row.style, {
         display: "flex",
+        width: "100%",
+        justifyContent: "space-between",
         alignItems: "center",
-        gap: "8px",
-        padding: "8px 0",
-        borderBottom: "1px solid rgba(255,255,255,0.08)",
+        padding: "11px 14px",
+        border: "0",
+        background: "none",
+        fontFamily: "inherit",
+        fontSize: "13.5px",
+        color: "#ffffff",
+        textAlign: "left",
+        cursor: "pointer",
       });
       const label = document.createElement("span");
-      label.style.flex = "1";
-      label.textContent = `${v.format} · ${v.quality}${v.live ? " · live stream" : ""}`;
-      // The mockup's quality tags: 1080p is Full HD, 720p is HD.
-      // Round 73 — sizes are NOT shown: nothing in the
-      // extension ever knows a variant's size, and no HEAD/fetch
-      // is made to find one, so there is no size here at all.
-      const tag = qualityTag(v.quality);
-      if (tag) {
-        const tagEl = document.createElement("span");
-        tagEl.textContent = tag;
-        tagEl.style.cssText = "font-size: 11px; font-weight: 700; color: #00C8FF;";
-        label.appendChild(document.createTextNode(" "));
-        label.appendChild(tagEl);
-      }
-      li.appendChild(label);
-      if (v.note) {
-        const note = document.createElement("span");
-        note.style.cssText = "display: block; font-size: 12px; color: #9AA6C7;";
-        note.textContent = v.note;
-        label.appendChild(note);
-      }
+      label.textContent = qualityLabel(v.quality) + (v.live ? " · live" : "");
+      row.appendChild(label);
+      const format = document.createElement("span");
       if (v.drm) {
-        const note = document.createElement("span");
-        note.style.cssText = "font-size: 13px; color: #F02DCD;";
-        note.textContent = "Protected — can't be downloaded";
-        li.appendChild(note);
+        format.textContent = "Protected";
+        format.style.cssText = "font-size: 12px; color: #F02DCD;";
+        row.disabled = true;
+        row.style.cursor = "default";
       } else {
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.textContent = v.format === "MPD" ? "Download manifest" : v.live ? "Download playlist" : "Download";
-        Object.assign(btn.style, {
-          padding: "6px 10px",
-          border: "0",
-          borderRadius: "8px",
-          fontFamily: "inherit",
-          fontSize: "13px",
-          fontWeight: "600",
-          color: "#ffffff",
-          background: ACCENT_GRADIENT,
-          cursor: "pointer",
+        format.textContent = v.format;
+        format.style.cssText = "font-size: 12px; color: #8f9bbd;";
+        row.addEventListener("mouseenter", () => {
+          if (!row.disabled) row.style.background = ROW_HOVER_BG;
         });
-        btn.addEventListener("click", () => sendVariant(v, btn));
-        li.appendChild(btn);
+        row.addEventListener("mouseleave", () => {
+          row.style.background = "none";
+        });
+        row.addEventListener("click", () => sendVariant(v, row, label));
       }
-      list.appendChild(li);
+      row.appendChild(format);
+      row._label = label;
+      dropdown.appendChild(row);
     });
-    panel.appendChild(list);
 
     const anyDownloadable = variants.some((v) => !v.drm);
     if (!anyDownloadable) {
       const note = document.createElement("p");
-      note.style.cssText = "margin: 0 0 12px; font-size: 13px; color: #F02DCD;";
+      note.style.cssText = "margin: 0; padding: 11px 14px; font-size: 13px; color: #F02DCD;";
       note.textContent =
         "This video can't be downloaded by Sonic Manager — it is protected, or it has no downloadable stream.";
-      panel.appendChild(note);
+      dropdown.appendChild(note);
     } else if (variants.some((v) => v.live)) {
       const note = document.createElement("p");
-      note.style.cssText = "margin: 0 0 12px; font-size: 13px; color: #9AA6C7;";
+      note.style.cssText = "margin: 0; padding: 11px 14px; font-size: 12px; color: #9AA6C7;";
       note.textContent =
         "A live stream is saved as its playlist file — it is not merged into one video file.";
-      panel.appendChild(note);
+      dropdown.appendChild(note);
     } else if (variants.some((v) => v.format === "MPD")) {
       const note = document.createElement("p");
-      note.style.cssText = "margin: 0 0 12px; font-size: 13px; color: #9AA6C7;";
+      note.style.cssText = "margin: 0; padding: 11px 14px; font-size: 12px; color: #9AA6C7;";
       note.textContent =
         "A DASH manifest is saved as-is — its segments are not merged into one video file.";
-      panel.appendChild(note);
+      dropdown.appendChild(note);
     }
 
-    const status = document.createElement("p");
-    status.setAttribute("role", "status");
-    status.style.cssText = "margin: 0 0 12px; font-size: 13px; color: #9AA6C7;";
-    panel.appendChild(status);
-
-    const close = document.createElement("button");
-    close.type = "button";
-    close.textContent = "Close";
-    Object.assign(close.style, {
-      padding: "8px 12px",
-      border: "1px solid rgba(255,255,255,0.12)",
-      borderRadius: "8px",
-      fontFamily: "inherit",
-      fontSize: "14px",
-      fontWeight: "600",
-      color: "#E8ECF8",
-      background: "rgba(255,255,255,0.06)",
-      cursor: "pointer",
-    });
-    close.addEventListener("click", closePanel);
-    panel.appendChild(close);
-    panel.style.display = "block";
-    panel._status = status;
+    dropdown.style.display = "block";
   }
 
-  function sendVariant(variant, btn) {
-    btn.disabled = true;
-    btn.textContent = "Sending…";
+  function sendVariant(variant, row, label) {
+    // The dropdown closes on pick (like the approved preview);
+    // the toast confirms the outcome, and the row is restored
+    // for a retry if the send failed. The send itself is
+    // unchanged: video_found {page_url, variants: [chosen]} to
+    // the background worker, which hands it to the desktop app.
+    closeDropdown();
+    const originalLabel = label.textContent;
+    row.disabled = true;
+    label.textContent = "Sending…";
     chrome.runtime.sendMessage(
       { type: "video_found", page_url: location.href, variants: [variant] },
       (reply) => {
-        if (panel && panel._status) {
-          if (reply && reply.ok !== false) {
-            panel._status.textContent = "Sent to Sonic Manager — it will appear in the download list.";
-          } else {
-            panel._status.textContent = `Sonic Manager couldn't take this video: ${reply && reply.error ? reply.error : "the desktop app did not answer"}`;
-          }
+        if (reply && reply.ok !== false) {
+          showToast("Sent to Sonic Manager — it will appear in the download list.");
+        } else {
+          showToast(
+            `Sonic Manager couldn't take this video: ${reply && reply.error ? reply.error : "the desktop app did not answer"}`,
+          );
         }
-        btn.disabled = false;
-        btn.textContent = variant.format === "MPD" ? "Download manifest" : variant.live ? "Download playlist" : "Download";
+        row.disabled = false;
+        label.textContent = originalLabel;
       },
     );
   }
 
   // Round 73 — re-scan helpers. A rescan updates the map in
-  // place (scanAndAttach is idempotent, button/panel are
+  // place (scanAndAttach is idempotent, button/dropdown are
   // singletons) and shows the button ONLY when none is
   // currently visible — e.g. a video that appeared after
   // injection. It never switches or re-pops an already-visible
@@ -507,10 +601,10 @@
   // itself; instead the pointer's position is checked against
   // every mapped video's rect (document.elementsFromPoint is
   // consulted for what is under the pointer, e.g. the button /
-  // panel). The button sits at the video's top-right INSIDE
+  // dropdown). The button sits at the video's top-right INSIDE
   // its rect, so moving toward it keeps the button shown.
   // When the pointer is inside no video rect and not over the
-  // button/panel, the button hides on the usual delay.
+  // button/dropdown, the button hides on the usual delay.
   let lastMouseMoveAt = 0;
   let mouseMoveTimer = null;
   let pendingMouseMove = null;
@@ -533,9 +627,9 @@
     }
     if (
       (button && atPoint.includes(button)) ||
-      (panel && atPoint.includes(panel)) ||
+      (dropdown && atPoint.includes(dropdown)) ||
       (e.target === button) ||
-      (e.target === panel)
+      (e.target === dropdown)
     ) {
       clearTimeout(hideTimer);
       return;
@@ -610,6 +704,9 @@
     // native messaging is re-attempted only when they click a
     // Download button, in sendVariant).
     document.addEventListener("mousemove", onMouseMove);
+    // The dropdown closes on an outside click or on Escape.
+    document.addEventListener("click", onDocumentClick);
+    document.addEventListener("keydown", onDocumentKeyDown);
     // Round 73 — re-scan triggers for videos that appear after
     // injection: a capturing loadedmetadata listener (a video
     // whose metadata just loaded now has a real source/size to
@@ -635,10 +732,14 @@
         break;
       }
     }
-    // Keep the button glued to the video while the page scrolls.
+    // Keep the button (and an open dropdown) glued to the video
+    // while the page scrolls.
     window.addEventListener("scroll", () => {
       if (button && button.style.display !== "none" && currentVideo) {
         positionButton(currentVideo);
+        if (dropdown && dropdown.style.display !== "none") {
+          positionDropdown(currentVideo);
+        }
       }
     }, true);
     return summary;

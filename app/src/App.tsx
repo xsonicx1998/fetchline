@@ -2,14 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { X } from 'lucide-react'
 import {
-  addDownload,
   addToQueue,
   cancelDownload,
   checkForUpdates,
   deleteCategory,
   deleteDownload,
+  deleteQueue,
   dismissClipboardOffer,
   executeQueueAction,
+  exitApp,
   getCategories,
   getDownloadCompletionOptions,
   getFreeDiskSpace,
@@ -25,6 +26,7 @@ import {
   onClipboardLink,
   onQueueAction,
   onUpdateAvailable,
+  openAddUrlWindow,
   openFile,
   openFileWith,
   openFolder,
@@ -35,11 +37,10 @@ import {
   redownloadDownload,
   reloadWebviewWindow,
   removeFromQueue,
-  resolvePendingLink,
+  renameQueue,
   resumeDownload,
   runGrabber,
   setTaskbarProgress,
-  startDownload,
   startQueue,
   stopQueue,
   syncQueueNow,
@@ -117,12 +118,13 @@ export default function App() {
    *  the same capture twice; an id leaves the set when its
    *  capture is decided. */
   const [captureQueue, setCaptureQueue] = useState<PendingLinkRow[]>([])
-  const [activeCapture, setActiveCapture] = useState<PendingLinkRow | null>(null)
   const seenCaptureIds = useRef<Set<string>>(new Set())
-  /** Round 67 — the open capture's dialog already submitted
-   *  it, so closing the dialog must not resolve it as
-   *  rejected. Set in `onAdded`, read in `onClose`. */
-  const captureAddedRef = useRef(false)
+  /** Round 74 (12) — a clipboard offer the user accepted: the
+   *  Add URL dialog opens in capture mode for it (file name as
+   *  the title, URL locked) instead of adding the download
+   *  straight away. */
+  const [clipboardCapture, setClipboardCapture] = useState<ClipboardOffer | null>(null)
+  const clipboardAddedRef = useRef(false)
   const refreshCapturesInFlight = useRef(false)
   const [showDownloadAll, setShowDownloadAll] = useState(false)
   const [showBatch, setShowBatch] = useState(false)
@@ -209,6 +211,20 @@ export default function App() {
   const [confirmRemove, setConfirmRemove] = useState<DownloadRow | null>(null)
   /** Round 73 — the Redownload warning dialog's row, if open. */
   const [confirmRedownload, setConfirmRedownload] = useState<DownloadRow | null>(null)
+
+  // Round 74 (14) — Escape closes the remove / redownload
+  // confirms (they have Keep buttons but no X and no key close).
+  useEffect(() => {
+    if (confirmRemove === null && confirmRedownload === null) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setConfirmRemove(null)
+        setConfirmRedownload(null)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [confirmRemove, confirmRedownload])
   /** Round 51 — refresh download address: the row whose expired
    *  link is being replaced; null when the dialog is closed. */
   const [refreshTarget, setRefreshTarget] = useState<DownloadRow | null>(null)
@@ -465,20 +481,23 @@ export default function App() {
     }
   }, [refresh, refreshAll, refreshCategories, refreshQueues, refreshGrabberProjects, refreshSettings, refreshPendingCaptures])
 
-  /** Round 67 — open the Add URL dialog for the next queued
-   *  capture, one at a time and only when no dialog is open
-   *  (the video panel and the clipboard offer also open it —
-   *  this effect waits while `showAdd` is true, so dialogs
-   *  never stack). */
+  /** Round 74 (13) — a queued capture opens its own standalone
+   *  Add URL window (`open_add_url_window`), popped in front
+   *  over whatever window the user has open — never the
+   *  in-window overlay, which stays for manual Add URL only.
+   *  One capture at a time: the effect takes the next one off
+   *  the queue, and that window resolves it (accepted on submit,
+   *  rejected on close). A window that fails to open forgets
+   *  the id, so the next poll offers the capture again. */
   useEffect(() => {
-    if (showAdd || captureQueue.length === 0) return
+    if (captureQueue.length === 0) return
     const [next, ...rest] = captureQueue
     setCaptureQueue(rest)
-    setActiveCapture(next)
-    captureAddedRef.current = false
-    setPickedVideoUrl(next.url)
-    setShowAdd(true)
-  }, [showAdd, captureQueue])
+    void openAddUrlWindow(next.id).catch((e: unknown) => {
+      setBannerError(e instanceof Error ? e.message : String(e))
+      seenCaptureIds.current.delete(next.id)
+    })
+  }, [captureQueue])
 
   /** Dark only (Round 45): the theme is a constant now, but the
    *  attribute stays set so the Tailwind dark-mode selector keeps
@@ -490,26 +509,26 @@ export default function App() {
   /** Round 62 — status-bar free space: the drive of the default
    *  download folder, polled every 30 s (and once when the
    *  settings load). Off Windows the command rejects and the
-   *  figure stays hidden. */
-  useEffect(() => {
+   *  figure stays hidden. Round 74 (2) — the same refresh runs
+   *  right after a delete / remove completes and after a
+   *  download finishes, so the figure never sits stale until
+   *  the next 30 s poll. */
+  const refreshFreeSpace = useCallback(async () => {
     const folder = settings?.default_download_folder || 'C:\\'
     const drive = /^([A-Za-z]:)/.exec(folder)?.[1] ?? 'C:'
-    let stopped = false
-    async function pollFreeSpace() {
-      try {
-        const bytes = await getFreeDiskSpace(folder)
-        if (!stopped) setFreeSpace({ drive, bytes })
-      } catch {
-        if (!stopped) setFreeSpace(null)
-      }
-    }
-    void pollFreeSpace()
-    const timer = window.setInterval(() => void pollFreeSpace(), 30_000)
-    return () => {
-      stopped = true
-      window.clearInterval(timer)
+    try {
+      const bytes = await getFreeDiskSpace(folder)
+      setFreeSpace({ drive, bytes })
+    } catch {
+      setFreeSpace(null)
     }
   }, [settings?.default_download_folder])
+
+  useEffect(() => {
+    void refreshFreeSpace()
+    const timer = window.setInterval(() => void refreshFreeSpace(), 30_000)
+    return () => window.clearInterval(timer)
+  }, [refreshFreeSpace])
 
   /** Manual update check (Settings > Check for updates). Runs even
    *  when the weekly setting is off; a failure shows the error
@@ -550,7 +569,11 @@ export default function App() {
     if (settings?.confirm_delete) {
       setConfirmRemove(download)
     } else {
-      void run(() => deleteDownload(download.id, false).then(() => setSelectedId(null)))
+      // Round 74 (2) — refresh the free-space figure once the
+      // remove lands, not only on the 30 s poll.
+      void run(() => deleteDownload(download.id, false).then(() => setSelectedId(null))).then(() =>
+        void refreshFreeSpace(),
+      )
     }
   }
 
@@ -712,6 +735,8 @@ export default function App() {
       }
       setSelectedId(null)
       await refreshAll()
+      // Round 74 (2) — the free-space figure follows the removals.
+      await refreshFreeSpace()
     } catch (e) {
       actionError(e)
     }
@@ -803,6 +828,9 @@ export default function App() {
           now - Date.parse(d.completed_at) < 30_000)
       if (!fresh) continue
       completeDialogHandled.current.add(d.id)
+      // Round 74 (2) — a finished download frees its temp space
+      // and lands its file: refresh the free-space figure now.
+      void refreshFreeSpace()
       if (!settings.show_download_complete_dialog) continue
       void (async () => {
         try {
@@ -817,7 +845,7 @@ export default function App() {
     for (const id of [...prevCompleteStatus.current.keys()]) {
       if (!downloads.some((d) => d.id === id)) prevCompleteStatus.current.delete(id)
     }
-  }, [downloads, settings])
+  }, [downloads, settings, refreshFreeSpace])
 
   /** Round 68 — "Download failed" dialog: when a download
    *  flips into 'error', open its dialog over the progress
@@ -901,6 +929,19 @@ export default function App() {
     }
   }, [downloads])
 
+  /** Round 74 (4) — check the `file_missing` flag before any
+   *  open: a Finished row whose file was deleted from Windows
+   *  warns instead of invoking open-file / open-with /
+   *  open-folder on a deleted location. */
+  function openGuarded(id: string, open: (id: string) => Promise<void>) {
+    const row = downloads.find((d) => d.id === id)
+    if (row?.status === 'complete' && row.file_missing) {
+      setBannerError(`“${row.filename}” is no longer on disk — Redownload it to get it again.`)
+      return
+    }
+    void run(() => open(id))
+  }
+
   const toolbarActions = {
     add: () => setShowAdd(true),
     resume: () => selected && void run(() => resumeDownload(selected.id), { immediate: true }),
@@ -926,6 +967,10 @@ export default function App() {
     siteGrabber: () => setShowSiteGrabber(true),
     settings: () => setShowSettings(true),
     checkUpdates: () => void runManualUpdateCheck(),
+    // Round 74 (10) — File > Exit quits the whole app via the
+    // `exit_app` command (the tray Exit already did); it used to
+    // just close the main window, which hides to the tray.
+    exit: () => void exitApp().catch((e: unknown) => actionError(e)),
   }
 
   return (
@@ -1023,6 +1068,16 @@ export default function App() {
           onDeleteCategory={(category) =>
             void run(() => deleteCategory(category.id).then(() => void refreshCategories()))
           }
+          onDeleteQueue={(queue) =>
+            void run(() =>
+              deleteQueue(queue.id).then(() => {
+                if (selectedQueue === queue.id) selectFilter('all')
+              }),
+            )
+          }
+          onRenameQueue={(queue, name) =>
+            void run(() => renameQueue(queue.id, name).then(() => undefined))
+          }
           onOpenScheduler={(queueId) => openScheduler(queueId)}
           onRunGrabber={(projectId) => void run(() => runGrabber(projectId))}
           onNewGrabber={() => setShowSiteGrabber(true)}
@@ -1056,9 +1111,9 @@ export default function App() {
               onSelect={setSelectedId}
               onOpenProgress={(id) => void openProgressWindowFor(id, false)}
               onAdd={() => setShowAdd(true)}
-              onOpenFile={(id) => void run(() => openFile(id))}
-              onOpenWith={(id) => void run(() => openFileWith(id))}
-              onOpenFolder={(id) => void run(() => openFolder(id))}
+              onOpenFile={(id) => openGuarded(id, openFile)}
+              onOpenWith={(id) => openGuarded(id, openFileWith)}
+              onOpenFolder={(id) => openGuarded(id, openFolder)}
               onRedownload={(download) => {
                 if (redownloadNeedsWarning(download)) {
                   setConfirmRedownload(download)
@@ -1116,51 +1171,29 @@ export default function App() {
         categories={categories}
         defaultAction={settings?.default_action ?? 'start_now'}
         defaultFolder={settings?.default_download_folder ?? ''}
-        initialUrl={pickedVideoUrl}
+        initialUrl={clipboardCapture?.url ?? pickedVideoUrl}
+        captureMode={clipboardCapture !== null}
+        captureTitle={clipboardCapture?.filename ?? null}
         onClose={() => {
-          // Round 67 — a dismissed capture is resolved as
-          // rejected, unless the dialog already submitted it
-          // (captureAddedRef) or the engine already rejected
-          // it (re-list first, so the engine's real error is
-          // not clobbered with "Dismissed..."). The row stays
-          // pending when the resolve fails, so the next poll
-          // offers it again.
-          const capture = activeCapture
+          // Round 74 (12) — a clipboard capture closed without a
+          // submit is dismissed, so the engine does not offer the
+          // same URL again. (Extension captures live in their own
+          // standalone window now and resolve themselves.)
+          const capture = clipboardCapture
           if (capture) {
-            setActiveCapture(null)
-            if (!captureAddedRef.current) {
-              void (async () => {
-                try {
-                  const rows = await listPendingLinks()
-                  if (rows.some((r) => r.id === capture.id)) {
-                    await resolvePendingLink({
-                      id: capture.id,
-                      status: 'rejected',
-                      error: 'Dismissed in the Add URL dialog',
-                    })
-                  }
-                } catch {
-                  // Best effort — the row stays pending.
-                } finally {
-                  seenCaptureIds.current.delete(capture.id)
-                }
-              })()
-            } else {
-              seenCaptureIds.current.delete(capture.id)
+            setClipboardCapture(null)
+            if (!clipboardAddedRef.current) {
+              void dismissClipboardOffer(capture.url).catch(() => undefined)
             }
           }
           setShowAdd(false)
           setPickedVideoUrl('')
         }}
         onAdded={(id) => {
-          // Round 67 — a confirmed capture: the dialog's confirm
-          // already marked the row accepted (the store only
-          // decides a row while it is still pending, so there is
-          // nothing left to resolve here). Just remember the
-          // submit happened, so `onClose` does not resolve the
-          // row as rejected afterwards.
-          if (activeCapture) {
-            captureAddedRef.current = true
+          // Round 74 (12) — a submitted clipboard capture must
+          // not be dismissed by `onClose` afterwards.
+          if (clipboardCapture) {
+            clipboardAddedRef.current = true
           }
           // Round 55 (defect 3a): the new row must be visible — a
           // download auto-assigned to another category used to be
@@ -1176,8 +1209,6 @@ export default function App() {
           setAddError({ title: filename || 'Download failed', message })
         }
         onAddCategory={() => setShowAddCategory(true)}
-        pendingLinkId={activeCapture?.id ?? null}
-        initialCookies={activeCapture?.cookies ?? null}
       />
       {addError ? (
         <div
@@ -1215,20 +1246,17 @@ export default function App() {
         <ClipboardOfferDialog
           offer={clipboardOffer}
           onDownload={() => {
-            const url = clipboardOffer.url
-            // Round 69 (b) — the offer asked "Download this link?",
-            // so accepting it must START the download. The old code
-            // only added the row (`add_download` creates it as
-            // `queued` and never starts it), and a `queued` row had
-            // no start path anywhere (Resume was gated to
-            // paused/error) — the Round 68 retest's stuck "Waiting"
-            // row. If the start itself fails the row stays queued
-            // and is now resumable from the toolbar / menu.
-            void addDownload({ url })
-              .then(([id]) => startDownload(id))
-              .then(() => void refreshAll())
-              .catch((e: unknown) => actionError(e))
+            // Round 74 (12) — accepting the offer opens the SAME
+            // Add URL window in capture mode (file name as the
+            // title, URL locked) so the user confirms folder /
+            // name / category first. The old path added the row
+            // and started it at once, with no chance to confirm
+            // anything — and a start failure left a stuck
+            // "Waiting" row (Round 68).
+            clipboardAddedRef.current = false
+            setClipboardCapture(clipboardOffer)
             setClipboardOffer(null)
+            setShowAdd(true)
           }}
           onDismiss={() => {
             const url = clipboardOffer.url
@@ -1311,14 +1339,21 @@ export default function App() {
           aria-modal="true"
           aria-labelledby="confirm-remove-title"
           className="fixed inset-0 z-20 flex items-center justify-center bg-black/50 p-4"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setConfirmRemove(null)
-          }}
         >
           <div className="w-full max-w-md rounded-lg border border-border bg-surface-raised p-6 shadow-pop">
-            <h2 id="confirm-remove-title" className="text-lg font-semibold">
-              Remove this download?
-            </h2>
+            <div className="flex items-start justify-between gap-4">
+              <h2 id="confirm-remove-title" className="text-lg font-semibold">
+                Remove this download?
+              </h2>
+              <button
+                type="button"
+                onClick={() => setConfirmRemove(null)}
+                aria-label="Close"
+                className="rounded-md p-1 text-text-muted transition-colors hover:bg-surface-2 hover:text-text"
+              >
+                <X className="h-4 w-4" aria-hidden="true" />
+              </button>
+            </div>
             <p className="mt-2 text-sm text-text-muted">
               “{confirmRemove.filename}” will be removed from the list. The file on disk is kept.
             </p>
@@ -1331,7 +1366,9 @@ export default function App() {
                 onClick={() => {
                   const row = confirmRemove
                   setConfirmRemove(null)
-                  void run(() => deleteDownload(row.id, false).then(() => setSelectedId(null)))
+                  void run(() => deleteDownload(row.id, false).then(() => setSelectedId(null))).then(
+                    () => void refreshFreeSpace(),
+                  )
                 }}
               >
                 Remove
@@ -1346,14 +1383,21 @@ export default function App() {
           aria-modal="true"
           aria-labelledby="confirm-redownload-title"
           className="fixed inset-0 z-20 flex items-center justify-center bg-black/50 p-4"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setConfirmRedownload(null)
-          }}
         >
           <div className="w-full max-w-md rounded-lg border border-border bg-surface-raised p-6 shadow-pop">
-            <h2 id="confirm-redownload-title" className="text-lg font-semibold">
-              Redownload from scratch?
-            </h2>
+            <div className="flex items-start justify-between gap-4">
+              <h2 id="confirm-redownload-title" className="text-lg font-semibold">
+                Redownload from scratch?
+              </h2>
+              <button
+                type="button"
+                onClick={() => setConfirmRedownload(null)}
+                aria-label="Close"
+                className="rounded-md p-1 text-text-muted transition-colors hover:bg-surface-2 hover:text-text"
+              >
+                <X className="h-4 w-4" aria-hidden="true" />
+              </button>
+            </div>
             <p className="mt-2 text-sm text-text-muted">
               “{confirmRedownload.filename}” starts over; Resume keeps your progress.
             </p>

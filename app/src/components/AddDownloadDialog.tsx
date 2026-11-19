@@ -47,6 +47,19 @@ interface AddDownloadDialogProps {
   /** Round 67: the capture's browser cookies (JSON array), so
    *  the size probe works on cookie-gated links. */
   initialCookies?: string | null
+  /** Round 74 (12): capture mode — the dialog shows a captured
+   *  link (extension or clipboard), not a typed URL: the file
+   *  name is the title instead of "Add URL", and the URL field
+   *  is locked. */
+  captureMode?: boolean
+  /** Round 74 (12): the captured file's name when it is already
+   *  known (the clipboard offer carries one); the probe fills it
+   *  in otherwise. */
+  captureTitle?: string | null
+  /** Round 74 (13): render as the standalone Add URL window's
+   *  content (fills its window, no overlay/backdrop) instead of
+   *  the in-window overlay. */
+  standalone?: boolean
   /** Round 69 (d): a submit that fails (404, server not found,
    *  timeout…) reports here too, so the caller can open the
    *  standalone error dialog with the real error — the inline
@@ -60,6 +73,16 @@ interface AddDownloadDialogProps {
  *  Split on the last separator so the filename part is the one
  *  the user edits; a bare name (no separator) is a rename — the
  *  folder stays. */
+function filenameFromUrl(rawUrl: string): string {
+  try {
+    const parsed = new URL(rawUrl.trim())
+    const segment = parsed.pathname.split('/').filter(Boolean).pop() ?? ''
+    return decodeURIComponent(segment).trim()
+  } catch {
+    return ''
+  }
+}
+
 function splitSaveAs(value: string): { folder: string; filename: string } {
   const idx = Math.max(value.lastIndexOf('\\'), value.lastIndexOf('/'))
   if (idx < 0) return { folder: '', filename: value }
@@ -100,6 +123,9 @@ export function AddDownloadDialog({
   onSubmitError,
   pendingLinkId = null,
   initialCookies = null,
+  captureMode = false,
+  captureTitle = null,
+  standalone = false,
 }: AddDownloadDialogProps) {
   const [url, setUrl] = useState('')
   const [filename, setFilename] = useState('')
@@ -294,6 +320,13 @@ export function AddDownloadDialog({
     if (!value) setRememberPath(false)
   }
 
+  /** Round 74 (12): in capture mode the file name is the title
+   *  instead of "Add URL" — the probed name first, then the
+   *  known capture name, then the URL's last segment. */
+  const displayTitle = captureMode
+    ? filename.trim() || captureTitle?.trim() || filenameFromUrl(url) || 'Add URL'
+    : 'Add URL'
+
   if (!open) return null
 
   const urlValid = url.trim() === '' || /^https?:\/\/.+/i.test(url.trim())
@@ -458,19 +491,27 @@ export function AddDownloadDialog({
     boxShadow: '0 4px 16px rgba(240,45,205,0.40)',
   } as const
 
+  {/* Round 74 (7): a backdrop click never closes this dialog —
+      Cancel / X / Escape only (the old Round 55 handler that
+      closed on backdrop click is gone). */}
   return (
     <div
       role="dialog"
       aria-modal="true"
       aria-labelledby="add-download-title"
-      className="fixed inset-0 z-10 flex items-center justify-center bg-black/50 p-4"
-      onClick={(e) => {
-        // Round 55 (defect 3a): a backdrop click must not close the
-        // dialog while a submit is in flight.
-        if (e.target === e.currentTarget && !busy) onClose()
-      }}
+      className={
+        standalone
+          ? 'flex h-full flex-col'
+          : 'fixed inset-0 z-10 flex items-center justify-center bg-black/50 p-4'
+      }
     >
-      <div className="w-full max-w-[620px] overflow-hidden rounded-xl border border-[#8B20FF]/45 bg-bg text-text shadow-[0_0_0_1px_rgba(0,200,255,0.12),0_24px_70px_rgba(0,0,0,0.65),0_0_44px_rgba(139,32,255,0.22)]">
+      <div
+        className={
+          standalone
+            ? 'flex min-h-0 w-full flex-1 flex-col overflow-hidden bg-bg text-text'
+            : 'w-full max-w-[620px] overflow-hidden rounded-xl border border-[#8B20FF]/45 bg-bg text-text shadow-[0_0_0_1px_rgba(0,200,255,0.12),0_24px_70px_rgba(0,0,0,0.65),0_0_44px_rgba(139,32,255,0.22)]'
+        }
+      >
         {/* Title bar — the real logo, "Add URL", X. */}
         <div className="flex items-center gap-2.5 px-3.5 py-3">
           <img
@@ -478,8 +519,8 @@ export function AddDownloadDialog({
             alt="Sonic Manager logo"
             className="h-7 w-7 rounded-full shadow-[0_0_12px_rgba(139,32,255,0.6)]"
           />
-          <h2 id="add-download-title" className="flex-1 text-[15px] font-semibold">
-            Add URL
+          <h2 id="add-download-title" className="flex-1 truncate text-[15px] font-semibold" title={displayTitle}>
+            {displayTitle}
           </h2>
           <button
             type="button"
@@ -493,8 +534,16 @@ export function AddDownloadDialog({
         </div>
         <div className="h-[2px] bg-gradient-to-r from-accent to-[#F02DCD]" />
 
-        {/* Body — IDM field order, tightened spacing. */}
-        <div className="flex flex-col gap-[11px] px-[22px] pb-1 pt-4">
+        {/* Body — IDM field order, tightened spacing. In the
+            standalone window it scrolls inside the fixed-size
+            window instead of overflowing it. */}
+        <div
+          className={
+            standalone
+              ? 'flex min-h-0 flex-1 flex-col gap-[11px] overflow-y-auto px-[22px] pb-1 pt-4'
+              : 'flex flex-col gap-[11px] px-[22px] pb-1 pt-4'
+          }
+        >
           <div>
             <label htmlFor="add-url" className="mb-1 block text-xs font-semibold text-text-muted">
               URL
@@ -506,6 +555,12 @@ export function AddDownloadDialog({
               value={url}
               onChange={(e) => setUrl(e.target.value)}
               placeholder="https://example.com/file.zip"
+              disabled={captureMode}
+              title={
+                captureMode
+                  ? 'Captured link — the address cannot be changed here'
+                  : undefined
+              }
               aria-invalid={!urlValid || undefined}
               aria-describedby={error ? 'add-error' : undefined}
               className="h-9 w-full rounded-md border border-border-input bg-surface px-3 text-[13px] focus:border-accent focus:outline-none"
@@ -667,7 +722,13 @@ export function AddDownloadDialog({
         {/* Actions — the default-action button is the gradient
          *  primary (with the default setting that is Start
          *  Download, exactly as the mockup shows). */}
-        <div className="flex items-center justify-end gap-2.5 px-[22px] pb-[18px] pt-4">
+        <div
+          className={
+            standalone
+              ? 'flex shrink-0 items-center justify-end gap-2.5 px-[22px] pb-[18px] pt-4'
+              : 'flex items-center justify-end gap-2.5 px-[22px] pb-[18px] pt-4'
+          }
+        >
           <Button
             variant={primaryIsLater ? 'primary' : 'secondary'}
             style={primaryIsLater ? primaryStyle : undefined}
