@@ -249,6 +249,19 @@ impl Drop for AppAliveMutexGuard {
     }
 }
 
+// Round 75b — the VPS build failed with E0277: `app.manage(guard)`
+// (lib.rs:3207) requires `T: Send + Sync + 'static`, but the guard
+// wraps a raw windows-sys HANDLE (`*mut c_void`), which is neither.
+// SAFETY: the guard is just an owned Windows HANDLE — a process-wide
+// kernel-object value. Moving it between threads is safe, and sharing
+// &references is safe because the only thing that touches the handle
+// is Drop, which needs &mut self. The guard is never cloned or
+// copied, so CloseHandle runs exactly once.
+#[cfg(windows)]
+unsafe impl Send for AppAliveMutexGuard {}
+#[cfg(windows)]
+unsafe impl Sync for AppAliveMutexGuard {}
+
 /// Create (or open, when the app is already running) the
 /// app-alive mutex and hold it. `None` when the mutex cannot be
 /// created, or off Windows (no named mutex there).
