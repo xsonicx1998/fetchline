@@ -182,10 +182,45 @@ fn host_ping_and_get_settings() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let pong = handle_host_message(&store, &HostMessage::Ping);
     assert!(pong.ok);
+    // Round 75 — off Windows there is no named mutex, so the ping
+    // carries no app_alive (the popup treats "unknown" as
+    // connected when the host answers). The Windows value is
+    // covered by host_ping_app_alive_follows_the_mutex below.
+    #[cfg(not(windows))]
+    assert_eq!(pong.app_alive, None);
     let settings = handle_host_message(&store, &HostMessage::GetSettings);
     assert!(settings.ok);
     assert_eq!(settings.browser_integration, Some(true));
     assert_eq!(settings.excluded_sites.as_deref(), Some(&[] as &[String]));
+}
+
+/// Round 75 — the ping reply reports whether the APP is alive
+/// (named mutex), not just whether this host answered. Windows
+/// only: there is no named mutex off Windows. Serialised: the
+/// tests run in parallel, and holding the mutex in one thread
+/// while another asserts its absence would flake. (It also
+/// assumes no real app is running while the suite runs — the
+/// suite never launches one.)
+#[test]
+#[cfg(windows)]
+fn host_ping_app_alive_follows_the_mutex() {
+    use fetchline_engine::native_host::create_app_alive_mutex;
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _lock = LOCK.lock().unwrap();
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    // No mutex held: the app is closed.
+    let pong = handle_host_message(&store, &HostMessage::Ping);
+    assert_eq!(pong.app_alive, Some(false));
+    // Hold the mutex, as a running app does: the ping says alive.
+    let held = create_app_alive_mutex().expect("the app-alive mutex creates");
+    let pong = handle_host_message(&store, &HostMessage::Ping);
+    assert_eq!(pong.app_alive, Some(true));
+    // Drop it (the app exited or crashed): the OS releases the
+    // mutex and the ping says closed again.
+    drop(held);
+    let pong = handle_host_message(&store, &HostMessage::Ping);
+    assert_eq!(pong.app_alive, Some(false));
 }
 
 #[test]

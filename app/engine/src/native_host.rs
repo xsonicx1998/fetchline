@@ -191,7 +191,10 @@ pub enum HostMessage {
 /// on a `get_settings` reply. `pending_count` (Milestone 2) is the
 /// number of links still waiting in the `pending_links` queue — the
 /// popup shows it, so the user can see what the browser handed over
-/// that the desktop app has not drained yet.
+/// that the desktop app has not drained yet. `app_alive` (Round 75)
+/// is only set on a `ping` reply: whether the desktop app itself is
+/// running (the named mutex), as opposed to just this standalone
+/// host answering.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostReply {
     pub ok: bool,
@@ -211,6 +214,100 @@ pub struct HostReply {
     pub excluded_sites: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_alive: Option<bool>,
+}
+
+/// Round 75 — is the desktop app alive? The app creates a NAMED
+/// MUTEX at the very start of `run()` and holds it for the process
+/// lifetime; this host (a separate process the extension spawns)
+/// probes it here. The old popup check pinged the host directly,
+/// but the host is standalone and answered even with the app
+/// closed, so the popup said "Connected" forever. A named mutex is
+/// released by the OS the instant the app dies — even on a crash —
+/// so this is exact, with no polling and no disk I/O. Off Windows
+/// there is no named mutex: `None`, and the popup treats "unknown"
+/// as connected when the host answers (the old behaviour — the app
+/// only ships on Windows).
+pub const APP_ALIVE_MUTEX_NAME: &str = "Local\\FetchlineAppRunning";
+
+/// A held app-alive mutex. Dropping it closes the handle, and when
+/// it is the last handle the OS destroys the mutex — which is
+/// exactly what happens when the app crashes. The app holds one in
+/// Tauri managed state for the process lifetime; tests hold one to
+/// simulate a running app. A second launch opening the same named
+/// mutex gets its own handle to the SAME mutex object — closing it
+/// on exit does not disturb the primary instance's handle.
+pub struct AppAliveMutexGuard(#[cfg(windows)] windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Drop for AppAliveMutexGuard {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+/// Create (or open, when the app is already running) the
+/// app-alive mutex and hold it. `None` when the mutex cannot be
+/// created, or off Windows (no named mutex there).
+pub fn create_app_alive_mutex() -> Option<AppAliveMutexGuard> {
+    #[cfg(windows)]
+    {
+        let name = mutex_name_wide();
+        let handle = unsafe {
+            windows_sys::Win32::System::Threading::CreateMutexW(std::ptr::null(), 0, name.as_ptr())
+        };
+        if handle.is_null() {
+            None
+        } else {
+            Some(AppAliveMutexGuard(handle))
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// Whether the desktop app is alive right now: `Some(true)` when
+/// the mutex opens, `Some(false)` when it does not exist, `None`
+/// off Windows.
+pub fn app_is_alive() -> Option<bool> {
+    #[cfg(windows)]
+    {
+        // SYNCHRONIZE (0x00100000) — the only right needed to
+        // test for the mutex's existence.
+        const SYNCHRONIZE: u32 = 0x0010_0000;
+        let name = mutex_name_wide();
+        let handle = unsafe {
+            windows_sys::Win32::System::Threading::OpenMutexW(SYNCHRONIZE, 0, name.as_ptr())
+        };
+        if handle.is_null() {
+            Some(false)
+        } else {
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(handle);
+            }
+            Some(true)
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// The mutex name as a null-terminated UTF-16 string for the
+/// Win32 calls. Built from the one `APP_ALIVE_MUTEX_NAME` const
+/// so create and probe can never drift apart.
+#[cfg(windows)]
+fn mutex_name_wide() -> Vec<u16> {
+    APP_ALIVE_MUTEX_NAME
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 impl HostReply {
@@ -225,6 +322,7 @@ impl HostReply {
             browser_integration: None,
             excluded_sites: None,
             pending_count: None,
+            app_alive: None,
         }
     }
 
@@ -239,6 +337,7 @@ impl HostReply {
             browser_integration: None,
             excluded_sites: None,
             pending_count: None,
+            app_alive: None,
         }
     }
 
@@ -301,7 +400,15 @@ pub fn write_message<W: Write>(writer: &mut W, value: &serde_json::Value) -> Res
 /// empty `links` list is refused here — the host binary expands it.
 pub fn handle_host_message(store: &Store, msg: &HostMessage) -> HostReply {
     match msg {
-        HostMessage::Ping => HostReply::ok("pong"),
+        HostMessage::Ping => {
+            // Round 75 — the ping reply carries whether the APP is
+            // alive (named mutex), not just whether this host
+            // answered: the popup shows Connected only on
+            // app_alive, and "Sonic Manager is closed" otherwise.
+            let mut reply = HostReply::ok("pong");
+            reply.app_alive = app_is_alive();
+            reply
+        }
         HostMessage::GetSettings => {
             let settings = store.get_settings().unwrap_or_default();
             let mut reply = HostReply::ok("settings");

@@ -110,6 +110,25 @@ test("popup shows Connected when the desktop app answers the ping", async () => 
   assert.equal(env.elements.statusDetail.textContent, "");
 });
 
+test("popup shows Connected when the ping says the app is alive (Round 75)", async () => {
+  const env = loadPopup({ nativeReply: { ok: true, type: "pong", app_alive: true } });
+  await env.domContentLoaded();
+  await tick();
+  assert.equal(env.elements.statusText.textContent, "Connected");
+  assert.match(env.elements.status.className, /status-ok/);
+});
+
+test("popup shows the app is closed when the ping says app_alive is false (Round 75)", async () => {
+  // The host is standalone and answers even with fetchline.exe
+  // closed — the old popup said "Connected" forever. Now the
+  // ping reply's app_alive decides.
+  const env = loadPopup({ nativeReply: { ok: true, type: "pong", app_alive: false } });
+  await env.domContentLoaded();
+  await tick();
+  assert.equal(env.elements.statusText.textContent, "Sonic Manager is closed - open it to catch downloads");
+  assert.match(env.elements.status.className, /status-bad/);
+});
+
 test("popup shows Not connected when the host is unreachable", async () => {
   const env = loadPopup();
   env.setNativeHandler(() => new Error("Could not establish connection"));

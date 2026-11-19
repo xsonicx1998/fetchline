@@ -103,6 +103,60 @@ function isExcluded(host, state) {
   );
 }
 
+// Round 75 — per-tab video scans, aggregated across frames.
+// `chrome.tabs.sendMessage` without a frameId broadcasts to every
+// frame and the FIRST response wins, so a rescan used to report an
+// ad iframe's "0 videos" while the page had videos; and every
+// frame's `videos_found` overwrote the stored scan, so the last
+// writer won. Now each frame's scan is kept keyed by tab + frame,
+// and the popup shows the SUM across frames. A 0-video frame can
+// never overwrite a non-zero aggregate — it only contributes 0.
+// In-memory only: the worker rebuilds it from the frames'
+// reports on start, and the stored `lastVideoScan` always holds
+// the aggregate (not one frame's numbers) for the popup fallback.
+const tabVideoScans = new Map(); // tabId -> { pageUrl, frames: Map<frameId, {total, downloadable, at}> }
+
+function recordFrameScan(tabId, frameId, scan) {
+  if (tabId == null || frameId == null) return;
+  let tab = tabVideoScans.get(tabId);
+  if (!tab) {
+    tab = { pageUrl: scan.pageUrl || null, frames: new Map() };
+    tabVideoScans.set(tabId, tab);
+  }
+  // Frame 0 is the page itself: a new page URL there means the tab
+  // navigated — the old frames' scans belong to the old page.
+  if (frameId === 0 && scan.pageUrl) {
+    if (tab.pageUrl && scan.pageUrl !== tab.pageUrl) tab.frames.clear();
+    tab.pageUrl = scan.pageUrl;
+  }
+  tab.frames.set(frameId, {
+    total: scan.total || 0,
+    downloadable: scan.downloadable || 0,
+    at: Date.now(),
+  });
+}
+
+function tabVideoAggregate(tabId) {
+  const tab = tabVideoScans.get(tabId);
+  if (!tab || tab.frames.size === 0) return null;
+  let total = 0;
+  let downloadable = 0;
+  for (const frame of tab.frames.values()) {
+    total += frame.total;
+    downloadable += frame.downloadable;
+  }
+  return { pageUrl: tab.pageUrl, total, downloadable };
+}
+
+// A closed tab's scans are forgotten, so a later tab reusing the
+// id never inherits stale frames. Guarded: the test fake's
+// chrome.tabs has no onRemoved.
+if (chrome.tabs && chrome.tabs.onRemoved && chrome.tabs.onRemoved.addListener) {
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    tabVideoScans.delete(tabId);
+  });
+}
+
 async function loadState() {
   const stored = await chrome.storage.local.get([
     STORE_KEYS.catchEnabled,
@@ -556,8 +610,27 @@ async function scanActiveTab() {
     throw new Error("This site is opted out — videos here are not scanned.");
   }
   try {
-    const reply = await chrome.tabs.sendMessage(tab.id, { type: "rescan_videos" });
-    return reply || {};
+    // Round 75 — the rescan broadcast reaches every frame, and
+    // each frame reports its own `videos_found`. The FIRST
+    // sendResponse is NOT the answer (an ad iframe with 0 videos
+    // used to win it), so the reply here is ignored: wait ~400 ms
+    // for the frames to report, then return the tab aggregate —
+    // the SUM across frames. A rejection still means "no content
+    // script here" and falls back to injection.
+    let answered;
+    try {
+      await chrome.tabs.sendMessage(tab.id, { type: "rescan_videos" });
+      answered = true;
+    } catch {
+      answered = false;
+    }
+    if (!answered) {
+      await injectVideoDetector();
+      return {};
+    }
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const aggregate = tabVideoAggregate(tab.id);
+    return aggregate ? { total: aggregate.total, downloadable: aggregate.downloadable } : {};
   } catch {
     await injectVideoDetector();
     return {};
@@ -593,16 +666,45 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       .catch((err) => sendResponse({ ok: false, error: String(err) }));
     return true;
   }
-  // The content script's scan summary, cached for the popup to read.
+  // The content script's scan summary, aggregated per tab across
+  // frames for the popup to read (Round 75). Each frame reports
+  // its own numbers; the stored scan always holds the SUM, so a
+  // 0-video iframe can never overwrite a page that has videos.
   if (message && message.type === "videos_found") {
-    void chrome.storage.local.set({
-      lastVideoScan: {
-        pageUrl: message.pageUrl,
-        total: message.total || 0,
-        downloadable: message.downloadable || 0,
-        at: Date.now(),
-      },
-    });
+    const tabId = _sender && _sender.tab && _sender.tab.id;
+    const frameId = _sender && typeof _sender.frameId === "number" ? _sender.frameId : null;
+    if (tabId != null && frameId != null) {
+      // Which frame answered, for the diagnosis (counts only —
+      // never a URL or a message body).
+      if (typeof console !== "undefined" && console.debug) {
+        console.debug(
+          `[sonic] videos_found tab=${tabId} frame=${frameId} total=${message.total || 0} downloadable=${message.downloadable || 0}`,
+        );
+      }
+      recordFrameScan(tabId, frameId, message);
+      const aggregate = tabVideoAggregate(tabId);
+      if (aggregate) {
+        void chrome.storage.local.set({
+          lastVideoScan: {
+            pageUrl: aggregate.pageUrl,
+            total: aggregate.total,
+            downloadable: aggregate.downloadable,
+            at: Date.now(),
+          },
+        });
+      }
+    } else {
+      // No tab/frame on the sender (an older content script):
+      // keep the old single-scan write rather than dropping it.
+      void chrome.storage.local.set({
+        lastVideoScan: {
+          pageUrl: message.pageUrl,
+          total: message.total || 0,
+          downloadable: message.downloadable || 0,
+          at: Date.now(),
+        },
+      });
+    }
     return false;
   }
   // Video grabber (S08): scan the active tab — the same helper

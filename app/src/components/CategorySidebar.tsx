@@ -149,11 +149,13 @@ export function CategorySidebar({
       <p className="px-2 pb-1 pt-1 text-xs font-semibold uppercase tracking-wider text-text-muted">Categories</p>
       <button
         type="button"
-        onClick={() => {
-          onSelectCategory(null)
-          onSelectQueue(null)
-          onSelectFilter('all')
-        }}
+        // Round 75: exactly ONE handler. `selectFilter('all')`
+        // already clears the category and the queue (App.tsx), so
+        // the extra onSelectCategory(null) + onSelectQueue(null)
+        // calls were not just redundant — React batches the three
+        // setStates and the last write won, which is what broke
+        // category and queue clicks below.
+        onClick={() => onSelectFilter('all')}
         aria-current={allActive || undefined}
         className={rowClass(allActive, 'all')}
       >
@@ -165,11 +167,13 @@ export function CategorySidebar({
         <div key={c.id} className="group relative flex items-center gap-1" {...dropProps(`cat:${c.id}`, { kind: 'category', id: c.id })}>
           <button
             type="button"
-            onClick={() => {
-              onSelectCategory(c.id)
-              onSelectQueue(null)
-              onSelectFilter('all')
-            }}
+            // Round 75: exactly ONE handler — onSelectCategory
+            // already clears the queue and the filter (App.tsx).
+            // Calling onSelectQueue(null) + onSelectFilter('all')
+            // as well made React batch the three setStates with
+            // the last write winning, so selectedCategory ended
+            // null and the click did nothing.
+            onClick={() => onSelectCategory(c.id)}
             aria-current={selectedCategory === c.id || undefined}
             className={`${rowClass(selectedCategory === c.id, `cat:${c.id}`)} flex-1`}
           >
@@ -296,11 +300,11 @@ export function CategorySidebar({
           ) : (
             <button
               type="button"
-              onClick={() => {
-                onSelectQueue(q.id)
-                onSelectCategory(null)
-                onSelectFilter('all')
-              }}
+              // Round 75: exactly ONE handler — onSelectQueue
+              // already clears the category and the filter
+              // (App.tsx). Same triple-call bug as the category
+              // rows above.
+              onClick={() => onSelectQueue(q.id)}
               onDoubleClick={() => onOpenScheduler(q.id)}
               aria-current={selectedQueue === q.id || undefined}
               title={`${q.name} — double-click to open the scheduler`}

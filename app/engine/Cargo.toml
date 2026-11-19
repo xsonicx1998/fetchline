@@ -26,3 +26,10 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # Only used by real_download_tests.rs (SHA-256 of the pinned file).
 # Test-only: it does not ship in the app.
 sha2 = "0.10"
+
+# Round 75: the named mutex the extension's host probes to tell
+# whether the app is alive (Win32_System_Threading +
+# Win32_Foundation). Windows-only; the Linux build never sees it.
+# windows-sys 0.61 is already in the local registry cache.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }

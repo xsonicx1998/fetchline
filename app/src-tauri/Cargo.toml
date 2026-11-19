@@ -39,3 +39,10 @@ tokio = { version = "1", features = ["full"] }
 [target.'cfg(windows)'.dependencies]
 wry = "0.57"
 webview2-com = "0.39"
+# Round 75: the clipboard sequence number (Win32_System_DataExchange)
+# is the clipboard change signal, and the named mutex
+# (Win32_System_Threading + Win32_Foundation) tells the extension
+# whether the app is alive. windows-sys 0.61 is already in the
+# local registry cache, so this adds no new download on the VPS
+# build.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_DataExchange", "Win32_System_Threading"] }

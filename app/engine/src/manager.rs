@@ -4803,49 +4803,75 @@ impl DownloadManager {
         })
     }
 
-    /// Clipboard monitoring (Round 52): check clipboard text for a
-    /// fresh download link and, when there is one, return the offer
-    /// the shell shows ("Download this link?"). Copying a link never
-    /// downloads anything — the user must accept the offer. Returns
-    /// `None` when monitoring is off, the text is not a file link,
-    /// the same text was already seen, the URL was already offered
-    /// or dismissed, the host is excluded, or the URL is already
-    /// downloading/downloaded. An offered URL is remembered, so a
-    /// second call with the same text (or a re-copy of the same
-    /// link) offers nothing.
-    pub fn check_clipboard_offer(&self, text: &str) -> Result<Option<ClipboardOffer>> {
+    /// Clipboard monitoring (Round 52, reworked Round 75): check
+    /// clipboard text for a fresh download link and, when there
+    /// is one, return the offer the shell shows (which now opens
+    /// the Add URL window directly). Copying a link never
+    /// downloads anything — the user must accept the offer.
+    ///
+    /// `sequence` is the OS clipboard sequence number (Windows
+    /// `GetClipboardSequenceNumber`), the change signal: when it
+    /// equals the last sequence seen, the clipboard has not
+    /// changed since the last check and this returns `None`
+    /// without re-offering. A fresh copy of the same text is a
+    /// NEW sequence, so it IS offered again. `None` (no sequence
+    /// available, e.g. off Windows) evaluates the text every
+    /// time — the shell's own sequence gate is what stops the
+    /// re-read on Windows. The sequence is recorded even when
+    /// the text is not a link, so a non-link clipboard is not
+    /// re-read every poll.
+    ///
+    /// Returns `None` when monitoring is off, the text is not a
+    /// file link, the sequence is unchanged, or the host is
+    /// excluded. An already-downloaded URL is NOT swallowed any
+    /// more: it is offered with `already_in_list` set, so the
+    /// Add URL window can show "This link is already in your
+    /// list" and let the user continue or cancel.
+    pub fn check_clipboard_offer(
+        &self,
+        text: &str,
+        sequence: Option<u32>,
+    ) -> Result<Option<ClipboardOffer>> {
         let settings = self.store.get_settings().unwrap_or_default();
         if !settings.clipboard_monitoring {
             return Ok(None);
         }
-        let Some(offer) = extract_download_link(text) else {
+        // The sequence gate comes first: an unchanged clipboard
+        // is not re-evaluated at all.
+        let mut monitor = self.clipboard.lock().unwrap();
+        if let Some(seq) = sequence {
+            if monitor.last_sequence == Some(seq) {
+                return Ok(None);
+            }
+            monitor.last_sequence = Some(seq);
+        }
+        let Some(mut offer) = extract_download_link(text) else {
             return Ok(None);
         };
-        let mut monitor = self.clipboard.lock().unwrap();
-        let hash = ClipboardMonitor::hash_text(text.trim());
-        if hash == monitor.last_text_hash {
-            return Ok(None);
-        }
-        monitor.last_text_hash = hash;
-        if monitor.seen.iter().any(|u| u == &offer.url) {
-            return Ok(None);
-        }
         let host = url_host(&offer.url).unwrap_or_default();
         if crate::store::site_is_excluded(&host, &settings.excluded_sites) {
             return Ok(None);
         }
-        if self.store.url_exists(&offer.url)? {
-            return Ok(None);
-        }
-        monitor.remember(&offer.url);
+        offer.already_in_list = self.store.url_exists(&offer.url)?;
         Ok(Some(offer))
     }
 
-    /// Clipboard monitoring (Round 52): record a URL as dismissed
-    /// (or already handled), so it is never offered again this
-    /// session. Infallible and idempotent.
-    pub fn dismiss_clipboard_offer(&self, url: &str) {
-        self.clipboard.lock().unwrap().remember(url);
+    /// Clipboard monitoring (Round 75): has this clipboard
+    /// sequence already been seen? The shell's poll loop asks
+    /// this before opening the clipboard at all, so an unchanged
+    /// clipboard costs no read. `false` when no sequence has
+    /// been recorded yet.
+    pub fn clipboard_sequence_seen(&self, sequence: u32) -> bool {
+        self.clipboard.lock().unwrap().last_sequence == Some(sequence)
+    }
+
+    /// Clipboard monitoring (Round 75): record a clipboard
+    /// sequence number as seen without offering anything. The
+    /// shell calls this right after OUR OWN clipboard writes
+    /// (the update dialog copies the installer URL), so the
+    /// next poll does not offer our own link back to the user.
+    pub fn note_clipboard_sequence(&self, sequence: u32) {
+        self.clipboard.lock().unwrap().last_sequence = Some(sequence);
     }
 
     /// Stop a download and mark it deleted; the partial file is removed.

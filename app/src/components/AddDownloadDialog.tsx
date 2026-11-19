@@ -56,6 +56,11 @@ interface AddDownloadDialogProps {
    *  known (the clipboard offer carries one); the probe fills it
    *  in otherwise. */
   captureTitle?: string | null
+  /** Round 75: a clipboard capture of a URL that is already in
+   *  the download list — the dialog shows "This link is already
+   *  in your list" and lets the user continue or cancel, instead
+   *  of the engine swallowing the offer. */
+  alreadyInList?: boolean
   /** Round 74 (13): render as the standalone Add URL window's
    *  content (fills its window, no overlay/backdrop) instead of
    *  the in-window overlay. */
@@ -125,6 +130,7 @@ export function AddDownloadDialog({
   initialCookies = null,
   captureMode = false,
   captureTitle = null,
+  alreadyInList = false,
   standalone = false,
 }: AddDownloadDialogProps) {
   const [url, setUrl] = useState('')
@@ -548,6 +554,11 @@ export function AddDownloadDialog({
             <label htmlFor="add-url" className="mb-1 block text-xs font-semibold text-text-muted">
               URL
             </label>
+            {captureMode && alreadyInList ? (
+              <p className="mb-1 text-xs font-semibold text-warning">
+                This link is already in your list — you can download it again or cancel.
+              </p>
+            ) : null}
             <input
               ref={urlRef}
               id="add-url"

@@ -8,7 +8,6 @@ import {
   deleteCategory,
   deleteDownload,
   deleteQueue,
-  dismissClipboardOffer,
   executeQueueAction,
   exitApp,
   getCategories,
@@ -48,14 +47,15 @@ import {
   withTimeout,
 } from './lib/api'
 import { formatBytes, formatEta, formatSpeed } from './lib/format'
+import { BannerDismissals, FailedCaptures, type BannerError } from './lib/bannerErrors'
+import { selectVisibleRows, useSidebarSelection } from './lib/useSidebarSelection'
 import type { CategoryRow, ClipboardOffer, DownloadRow, GrabberProjectRow, PendingAction, PendingLinkRow, QueueRow, QuotaStatus, Settings, UpdateCheckResult } from './lib/types'
 import { AddCategoryDialog } from './components/AddCategoryDialog'
 import { AddDownloadDialog } from './components/AddDownloadDialog'
 import { AddQueueDialog } from './components/AddQueueDialog'
 import { BatchDialog } from './components/BatchDialog'
 import { Button } from './components/Button'
-import { CategorySidebar, type SidebarFilter } from './components/CategorySidebar'
-import { ClipboardOfferDialog } from './components/ClipboardOfferDialog'
+import { CategorySidebar } from './components/CategorySidebar'
 import { DownloadAllDialog } from './components/DownloadAllDialog'
 import { DownloadErrorDialog } from './components/DownloadErrorDialog'
 import { DownloadPropertiesDialog } from './components/DownloadPropertiesDialog'
@@ -99,14 +99,23 @@ export default function App() {
   const [grabberProjects, setGrabberProjects] = useState<GrabberProjectRow[]>([])
   const [queueFiles, setQueueFiles] = useState<DownloadRow[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [selectedCategory, setSelectedCategory] = useState<string | null>(null)
-  const [selectedQueue, setSelectedQueue] = useState<string | null>(null)
-  /** Which list the table shows: every download (or one
-   *  category's), the unfinished / finished filter, the download
-   *  history (Round 53 — the main area renders HistoryView
-   *  instead of the table), or one grabber project's downloads. */
-  const [selectedFilter, setSelectedFilter] = useState<SidebarFilter>('all')
-  const [selectedGrabberId, setSelectedGrabberId] = useState<string | null>(null)
+  /** Round 75 — sidebar selection lives in useSidebarSelection
+   *  (one list at a time: category / queue / filter / grabber),
+   *  shared with the sidebar test so the test drives the real
+   *  selection functions. */
+  const {
+    selectedCategory,
+    selectedQueue,
+    /** Which list the table shows: every download (or one
+     *  category's), the unfinished / finished filter, the download
+     *  history (Round 53 — the main area renders HistoryView
+     *  instead of the table), or one grabber project's downloads. */
+    selectedFilter,
+    selectedGrabberId,
+    selectCategory,
+    selectQueue,
+    selectFilter,
+  } = useSidebarSelection()
   const [showAdd, setShowAdd] = useState(false)
   /** Round 67 — browser-extension captures waiting for the Add
    *  URL dialog (like IDM: the download only starts when the
@@ -124,7 +133,12 @@ export default function App() {
    *  the title, URL locked) instead of adding the download
    *  straight away. */
   const [clipboardCapture, setClipboardCapture] = useState<ClipboardOffer | null>(null)
-  const clipboardAddedRef = useRef(false)
+  /** Round 75 — the capture the Add URL dialog is open for (mirrors
+   *  `clipboardCapture` for the clipboard-link listener, whose
+   *  closure cannot read the current state): while one is open,
+   *  new offers wait — one at a time, and never a second window
+   *  for the same URL. */
+  const clipboardCaptureRef = useRef<ClipboardOffer | null>(null)
   const refreshCapturesInFlight = useRef(false)
   const [showDownloadAll, setShowDownloadAll] = useState(false)
   const [showBatch, setShowBatch] = useState(false)
@@ -136,15 +150,16 @@ export default function App() {
   const [showScheduler, setShowScheduler] = useState(false)
   const [schedulerQueueId, setSchedulerQueueId] = useState<string | null>(null)
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<BannerError | null>(null)
   /** Round 55 (defect 4): action errors are STICKY — the 1 s poll
    *  clears `error` on every successful refresh, so a Resume /
    *  Pause failure used to flash for under a second and vanish,
    *  looking like a silent no-op. `bannerError` is only cleared by
    *  the dismiss button or by a later successful action, never by
    *  the poll. The banner shows it first, else the transient poll
-   *  error. */
-  const [bannerError, setBannerError] = useState<string | null>(null)
+   *  error. Both carry their source (Round 75), so dismissals are
+   *  keyed per (source, message). */
+  const [bannerError, setBannerError] = useState<BannerError | null>(null)
   /** Round 72 (C) — row-action busy feedback: Resume /
    *  Redownload re-probe first, and against a flaky server the
    *  probe takes up to 16 s with no UI change — the Round 71
@@ -155,27 +170,53 @@ export default function App() {
    *  the bar. */
   const [actionBusy, setActionBusy] = useState(false)
   const actionBusyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  /** Round 71 (D2) — the banner's X must STICK. The 1 s poll
-   *  re-ran `list_downloads` (and the secondary polls) and every
-   *  failure re-populated `error` from the same old error rows,
-   *  so the banner came back a second after the user dismissed
-   *  it. `dismissedBannerRef` remembers the exact message the
-   *  user dismissed; `setPollError` — used by every poll-failure
-   *  path — refuses to re-show that message. A NEW error (a
-   *  different message) still shows, and a successful poll clears
-   *  the memory, so a genuinely new failure with the same text
-   *  is not muted forever. */
-  const dismissedBannerRef = useRef<string | null>(null)
-  const setPollError = useCallback((msg: string) => {
-    if (dismissedBannerRef.current === msg) return
-    setError(msg)
+  /** Round 71 (D2), reworked Round 75 — the banner's X must
+   *  STICK. The 1 s poll re-ran `list_downloads` (and the
+   *  secondary polls) and every failure re-populated `error`
+   *  from the same old error rows, so the banner came back a
+   *  second after the user dismissed it. `dismissedBannerRef`
+   *  remembers the exact (source, message) the user dismissed;
+   *  `setPollError` — used by every poll-failure path — refuses
+   *  to re-show it. A NEW error (a different message, or the
+   *  same message from another source) still shows, and a
+   *  successful poll clears ONLY its own source's memory, so a
+   *  non-poll error (e.g. a capture auto-open failure) is never
+   *  un-dismissed by an unrelated successful poll. See
+   *  `lib/bannerErrors.ts`. */
+  const dismissedBannerRef = useRef(new BannerDismissals())
+  /** Round 75 — a capture whose auto-open failed. Its id stays
+   *  here until the user clicks Retry or a NEW pending id
+   *  arrives; the effect never retries it on its own (the old
+   *  code forgot the id, so the next poll re-queued it and the
+   *  red banner looped every second). */
+  const failedCaptureIds = useRef(new FailedCaptures())
+  /** Round 75 — the capture waiting on a retry, for the
+   *  banner's Retry button ("Capture failed — Open"). Null when
+   *  no capture is waiting. */
+  const [failedCapture, setFailedCapture] = useState<PendingLinkRow | null>(null)
+  const setPollError = useCallback((source: string, msg: string) => {
+    if (!dismissedBannerRef.current.shouldShow(source, msg)) return
+    setError({ source, message: msg })
+  }, [])
+  /** A sticky (non-poll) error: shown unless the user dismissed
+   *  exactly this (source, message). */
+  const showBannerError = useCallback((source: string, msg: string) => {
+    if (!dismissedBannerRef.current.shouldShow(source, msg)) return
+    setBannerError({ source, message: msg })
+  }, [])
+  /** A successful poll of `source` forgets that source's
+   *  dismissal and clears a poll error from that source — other
+   *  sources are untouched. */
+  const clearPollErrorForSource = useCallback((source: string) => {
+    dismissedBannerRef.current.clearForSource(source)
+    setError((prev) => (prev && prev.source === source ? null : prev))
   }, [])
   /** Round 69 (d) — an Add URL submit failure, shown in the
    *  standalone error dialog (IDM-style, with Details) as an
    *  overlay above the Add dialog. */
   const [addError, setAddError] = useState<{ title: string; message: string } | null>(null)
   function actionError(e: unknown) {
-    setBannerError(e instanceof Error ? e.message : String(e))
+    showBannerError('action', e instanceof Error ? e.message : String(e))
   }
   /** Round 56 (§7.3): backend-not-responding guard. The 1 s poll
    *  used to fire a new `list_downloads` invoke every second even
@@ -231,9 +272,6 @@ export default function App() {
   /** Round 65 — Properties (right-click menu): the row whose
    *  details are showing; null when the dialog is closed. */
   const [propertiesTarget, setPropertiesTarget] = useState<DownloadRow | null>(null)
-  /** Round 52 — clipboard monitoring: the copied link currently
-   *  offered to the user; null when no offer is showing. */
-  const [clipboardOffer, setClipboardOffer] = useState<ClipboardOffer | null>(null)
   /** Update check (S09): Help > Check for updates, and the weekly
    *  check's `update-available` event, both land here. */
   const [updateResult, setUpdateResult] = useState<UpdateCheckResult | null>(null)
@@ -272,12 +310,13 @@ export default function App() {
     secondaryRefreshInFlight.current = true
     try {
       setQueues(await withTimeout(listQueues(), 5000, 'Backend did not respond within 5 seconds'))
+      clearPollErrorForSource('poll:queues')
     } catch (e) {
-      setPollError(e instanceof Error ? e.message : String(e))
+      setPollError('poll:queues', e instanceof Error ? e.message : String(e))
     } finally {
       secondaryRefreshInFlight.current = false
     }
-  }, [])
+  }, [clearPollErrorForSource])
 
   const refreshGrabberProjects = useCallback(async () => {
     // In-flight guard + 5 s timeout (§9.2d, Round 57) — see
@@ -302,20 +341,22 @@ export default function App() {
     secondaryRefreshInFlight.current = true
     try {
       setQueueFiles(await withTimeout(getQueueFiles(selectedQueue), 5000, 'Backend did not respond within 5 seconds'))
+      clearPollErrorForSource('poll:queue-files')
     } catch (e) {
-      setPollError(e instanceof Error ? e.message : String(e))
+      setPollError('poll:queue-files', e instanceof Error ? e.message : String(e))
     } finally {
       secondaryRefreshInFlight.current = false
     }
-  }, [selectedQueue])
+  }, [selectedQueue, clearPollErrorForSource])
 
   const refreshCategories = useCallback(async () => {
     try {
       setCategories(await getCategories())
+      clearPollErrorForSource('poll:categories')
     } catch (e) {
-      setPollError(e instanceof Error ? e.message : String(e))
+      setPollError('poll:categories', e instanceof Error ? e.message : String(e))
     }
-  }, [])
+  }, [clearPollErrorForSource])
 
   const refresh = useCallback(async () => {
     // In-flight guard (§7.3): skip the tick while a refresh is
@@ -325,22 +366,23 @@ export default function App() {
     refreshInFlight.current = true
     try {
       setDownloads(await withTimeout(listDownloads(), 5000, 'Backend did not respond within 5 seconds'))
-      setError(null)
-      // Round 71 (D2) — a successful poll clears the dismissed
-      // memory: the old failure is gone, so a later failure with
-      // the same text is a new failure and must show again.
-      dismissedBannerRef.current = null
+      // Round 75 — a successful poll clears ONLY its own
+      // source's dismissal: the old failure is gone, so a later
+      // failure with the same text is a new failure and must
+      // show again — but a dismissed non-poll error (e.g. a
+      // capture failure) is never un-dismissed by this poll.
+      clearPollErrorForSource('poll:downloads')
       lastPollOkAt.current = Date.now()
       if (backendDeadRef.current) {
         backendDeadRef.current = false
         setBackendDead(false)
       }
     } catch (e) {
-      setPollError(e instanceof Error ? e.message : String(e))
+      setPollError('poll:downloads', e instanceof Error ? e.message : String(e))
     } finally {
       refreshInFlight.current = false
     }
-  }, [])
+  }, [clearPollErrorForSource])
 
   /** Resume polling after the backend-dead banner (§7.3): clear
    *  the stop flag, reset the staleness clock, and refresh at
@@ -438,7 +480,7 @@ export default function App() {
       } else {
         void executeQueueAction(action.queue_id)
           .then(() => void refreshAll())
-          .catch((e: unknown) => setPollError(e instanceof Error ? e.message : String(e)))
+          .catch((e: unknown) => setPollError('queue-action', e instanceof Error ? e.message : String(e)))
       }
     }).then((fn) => {
       unlistenAction = fn
@@ -452,11 +494,19 @@ export default function App() {
     }).then((fn) => {
       unlistenUpdate = fn
     })
-    // Round 52 — clipboard monitoring: a download link was copied.
-    // While an offer is already showing, new events are ignored —
-    // offers never stack on top of each other.
+    // Round 52, reworked Round 75 — clipboard monitoring: a
+    // download link was copied. The offer opens the Add URL
+    // dialog DIRECTLY in capture mode (file name on top, URL
+    // locked) — the small intermediate ClipboardOfferDialog is
+    // gone. While the dialog is already open for a capture, new
+    // offers wait: one at a time, and never a second window for
+    // the same URL. A fresh copy re-offers (new clipboard
+    // sequence), so nothing is lost by dismissing.
     void onClipboardLink((offer) => {
-      setClipboardOffer((current) => current ?? offer)
+      if (clipboardCaptureRef.current !== null) return
+      clipboardCaptureRef.current = offer
+      setClipboardCapture(offer)
+      setShowAdd(true)
     }).then((fn) => {
       unlistenClipboard = fn
     })
@@ -481,23 +531,34 @@ export default function App() {
     }
   }, [refresh, refreshAll, refreshCategories, refreshQueues, refreshGrabberProjects, refreshSettings, refreshPendingCaptures])
 
-  /** Round 74 (13) — a queued capture opens its own standalone
-   *  Add URL window (`open_add_url_window`), popped in front
-   *  over whatever window the user has open — never the
-   *  in-window overlay, which stays for manual Add URL only.
-   *  One capture at a time: the effect takes the next one off
-   *  the queue, and that window resolves it (accepted on submit,
-   *  rejected on close). A window that fails to open forgets
-   *  the id, so the next poll offers the capture again. */
+  /** Round 74 (13), reworked Round 75 — a queued capture opens
+   *  its own standalone Add URL window (`open_add_url_window`),
+   *  popped in front over whatever window the user has open —
+   *  never the in-window overlay, which stays for manual Add URL
+   *  only. One capture at a time: the effect takes the next one
+   *  off the queue, and that window resolves it (accepted on
+   *  submit, rejected on close). A window that FAILS to open is
+   *  remembered in `failedCaptureIds` and is NOT retried — the
+   *  old code forgot the id, so the next poll re-queued it and
+   *  the red banner looped every second. It is offered again
+   *  only when the user clicks Retry on the banner, or when a
+   *  NEW pending id arrives for the same link. A failure never
+   *  blocks the other queued captures. */
   useEffect(() => {
     if (captureQueue.length === 0) return
     const [next, ...rest] = captureQueue
     setCaptureQueue(rest)
-    void openAddUrlWindow(next.id).catch((e: unknown) => {
-      setBannerError(e instanceof Error ? e.message : String(e))
-      seenCaptureIds.current.delete(next.id)
+    if (failedCaptureIds.current.has(next.id)) return
+    void openAddUrlWindow(next.id).then(() => {
+      // The window opened: a previous sticky capture error for
+      // this retry is spent.
+      setBannerError((prev) => (prev && prev.source === 'capture' ? null : prev))
+    }).catch((e: unknown) => {
+      failedCaptureIds.current.markFailed(next.id)
+      setFailedCapture(next)
+      showBannerError('capture', e instanceof Error ? e.message : String(e))
     })
-  }, [captureQueue])
+  }, [captureQueue, showBannerError])
 
   /** Dark only (Round 45): the theme is a constant now, but the
    *  attribute stays set so the Tailwind dark-mode selector keeps
@@ -608,18 +669,19 @@ export default function App() {
     () => downloads.find((d) => d.id === selectedId) ?? null,
     [downloads, selectedId],
   )
-  const visible = useMemo(() => {
-    let rows: DownloadRow[]
-    if (selectedQueue !== null) rows = queueFiles
-    else if (selectedFilter === 'unfinished') rows = downloads.filter((d) => d.status !== 'complete')
-    else if (selectedFilter === 'finished') rows = downloads.filter((d) => d.status === 'complete')
-    else if (selectedFilter === 'grabber') rows = downloads.filter((d) => d.grabber_project_id === selectedGrabberId)
-    else if (selectedCategory === null) rows = downloads
-    else rows = downloads.filter((d) => d.category_id === selectedCategory)
-    const query = searchQuery.trim().toLowerCase()
-    if (query) rows = rows.filter((d) => d.filename.toLowerCase().includes(query))
-    return rows
-  }, [downloads, selectedCategory, selectedQueue, selectedFilter, selectedGrabberId, queueFiles, searchQuery])
+  const visible = useMemo(
+    () =>
+      selectVisibleRows({
+        downloads,
+        queueFiles,
+        selectedCategory,
+        selectedQueue,
+        selectedFilter,
+        selectedGrabberId,
+        searchQuery,
+      }),
+    [downloads, selectedCategory, selectedQueue, selectedFilter, selectedGrabberId, queueFiles, searchQuery],
+  )
   /** The queue Start/Stop/Sync act on: the selected queue, else
    *  the main queue. */
   const activeQueueRow = useMemo(
@@ -666,29 +728,9 @@ export default function App() {
     }
   }
 
-  /** Sidebar selection: one list at a time — picking a category,
-   *  a queue or a filter clears the other two. */
-  function selectCategory(id: string | null) {
-    setSelectedCategory(id)
-    setSelectedQueue(null)
-    setSelectedFilter('all')
-    setSelectedGrabberId(null)
-  }
-
-  function selectQueue(id: string | null) {
-    setSelectedQueue(id)
-    setSelectedCategory(null)
-    setSelectedFilter('all')
-    setSelectedGrabberId(null)
-  }
-
-  function selectFilter(filter: SidebarFilter, grabberId: string | null = null) {
-    setSelectedFilter(filter)
-    setSelectedGrabberId(grabberId)
-    setSelectedCategory(null)
-    setSelectedQueue(null)
-  }
-
+  /** Sidebar selection: one list at a time — the handlers live in
+   *  useSidebarSelection (Round 75) and clear the other selections
+   *  themselves, so the sidebar calls exactly one per click. */
   function openScheduler(queueId?: string) {
     setSchedulerQueueId(queueId ?? selectedQueue ?? 'queue-main')
     setShowScheduler(true)
@@ -936,7 +978,7 @@ export default function App() {
   function openGuarded(id: string, open: (id: string) => Promise<void>) {
     const row = downloads.find((d) => d.id === id)
     if (row?.status === 'complete' && row.file_missing) {
-      setBannerError(`“${row.filename}” is no longer on disk — Redownload it to get it again.`)
+      showBannerError('action', `“${row.filename}” is no longer on disk — Redownload it to get it again.`)
       return
     }
     void run(() => open(id))
@@ -1007,23 +1049,50 @@ export default function App() {
         const banner = bannerError ?? error
         return banner ? (
           <div role="alert" className="flex shrink-0 items-center justify-between gap-2 border-b border-border bg-danger-soft px-4 py-2 text-sm text-danger">
-            <span>{banner}</span>
-            <button
-              type="button"
-              onClick={() => {
-                // Round 71 (D2) — remember the dismissed message
-                // so the next poll cannot re-populate the banner
-                // with it; see `dismissedBannerRef` above.
-                dismissedBannerRef.current = banner
-                setBannerError(null)
-                setError(null)
-              }}
-              aria-label="Dismiss error"
-              className="rounded-md p-1 hover:bg-surface-2"
-              style={{ WebkitAppRegion: 'no-drag' } as CSSProperties}
-            >
-              <X className="h-4 w-4" aria-hidden="true" />
-            </button>
+            <span>{banner.message}</span>
+            <span className="flex shrink-0 items-center gap-1">
+              {banner.source === 'capture' && failedCapture ? (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    // Round 75 — "Capture failed — Open": retry
+                    // this capture's Add URL window. The dismissal
+                    // for 'capture' is forgotten first, so a
+                    // second failure can show again.
+                    const retry = failedCapture
+                    failedCaptureIds.current.clear(retry.id)
+                    dismissedBannerRef.current.clearForSource('capture')
+                    setFailedCapture(null)
+                    setBannerError(null)
+                    setCaptureQueue((current) => [retry, ...current])
+                  }}
+                >
+                  Retry
+                </Button>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => {
+                  // Round 71 (D2), reworked Round 75 — remember
+                  // the dismissed (source, message) so the next
+                  // poll cannot re-populate the banner with it;
+                  // see `dismissedBannerRef` above. A capture
+                  // dismissal also drops its Retry: the link can
+                  // still be re-sent from the browser (a NEW
+                  // pending id opens normally).
+                  dismissedBannerRef.current.dismiss(banner.source, banner.message)
+                  setBannerError(null)
+                  setError(null)
+                  setFailedCapture(null)
+                }}
+                aria-label="Dismiss error"
+                className="rounded-md p-1 hover:bg-surface-2"
+                style={{ WebkitAppRegion: 'no-drag' } as CSSProperties}
+              >
+                <X className="h-4 w-4" aria-hidden="true" />
+              </button>
+            </span>
           </div>
         ) : null
       })()}
@@ -1040,7 +1109,7 @@ export default function App() {
               size="sm"
               onClick={() => {
                 void reloadWebviewWindow('main').catch((e: unknown) =>
-                  setBannerError(e instanceof Error ? e.message : String(e)),
+                  showBannerError('action', e instanceof Error ? e.message : String(e)),
                 )
               }}
             >
@@ -1100,7 +1169,7 @@ export default function App() {
                 selectFilter('all')
                 void refreshAll()
               }}
-              onError={(message) => setBannerError(message)}
+              onError={(message) => showBannerError('action', message)}
             />
           ) : (
             <DownloadTable
@@ -1174,27 +1243,23 @@ export default function App() {
         initialUrl={clipboardCapture?.url ?? pickedVideoUrl}
         captureMode={clipboardCapture !== null}
         captureTitle={clipboardCapture?.filename ?? null}
+        alreadyInList={clipboardCapture?.already_in_list ?? false}
         onClose={() => {
-          // Round 74 (12) — a clipboard capture closed without a
-          // submit is dismissed, so the engine does not offer the
-          // same URL again. (Extension captures live in their own
+          // Round 75 — a clipboard capture closed without a submit
+          // is simply forgotten: a fresh copy re-offers it (new
+          // clipboard sequence), so no engine-side dismiss is
+          // needed any more. (Extension captures live in their own
           // standalone window now and resolve themselves.)
-          const capture = clipboardCapture
-          if (capture) {
+          if (clipboardCapture) {
             setClipboardCapture(null)
-            if (!clipboardAddedRef.current) {
-              void dismissClipboardOffer(capture.url).catch(() => undefined)
-            }
+            clipboardCaptureRef.current = null
           }
           setShowAdd(false)
           setPickedVideoUrl('')
         }}
         onAdded={(id) => {
-          // Round 74 (12) — a submitted clipboard capture must
-          // not be dismissed by `onClose` afterwards.
-          if (clipboardCapture) {
-            clipboardAddedRef.current = true
-          }
+          // Round 75 — the submitted capture is consumed; the
+          // dialog's close afterwards clears the ref (onClose).
           // Round 55 (defect 3a): the new row must be visible — a
           // download auto-assigned to another category used to be
           // hidden by the sidebar filter and look like a silent
@@ -1204,7 +1269,7 @@ export default function App() {
           setSelectedId(id)
           void refreshAll()
         }}
-        onLateError={(message) => setBannerError(message)}
+        onLateError={(message) => showBannerError('action', message)}
         onSubmitError={(message, filename) =>
           setAddError({ title: filename || 'Download failed', message })
         }
@@ -1242,29 +1307,6 @@ export default function App() {
         queues={queues}
         onClose={() => setPropertiesTarget(null)}
       />
-      {clipboardOffer ? (
-        <ClipboardOfferDialog
-          offer={clipboardOffer}
-          onDownload={() => {
-            // Round 74 (12) — accepting the offer opens the SAME
-            // Add URL window in capture mode (file name as the
-            // title, URL locked) so the user confirms folder /
-            // name / category first. The old path added the row
-            // and started it at once, with no chance to confirm
-            // anything — and a start failure left a stuck
-            // "Waiting" row (Round 68).
-            clipboardAddedRef.current = false
-            setClipboardCapture(clipboardOffer)
-            setClipboardOffer(null)
-            setShowAdd(true)
-          }}
-          onDismiss={() => {
-            const url = clipboardOffer.url
-            void dismissClipboardOffer(url).catch(() => undefined)
-            setClipboardOffer(null)
-          }}
-        />
-      ) : null}
       <VideoGrabberDialog
         open={showVideoGrabber}
         queues={queues}

@@ -191,6 +191,10 @@ export interface PendingLinkRow {
 export interface ClipboardOffer {
   url: string
   filename: string
+  /** Round 75 — the URL is already in the download list. The
+   *  offer is still shown (with a "This link is already in your
+   *  list" note), so the user can continue or cancel. */
+  already_in_list: boolean
 }
 
 /** Round 53 — download history: one finished download, as the

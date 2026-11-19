@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { X } from 'lucide-react'
 import type { UpdateCheckResult } from '../lib/types'
+import { noteOwnClipboardWrite } from '../lib/api'
 import { Button } from './Button'
 
 interface UpdateDialogProps {
@@ -38,6 +39,11 @@ export function UpdateDialog({ result, checkError, checking, onClose }: UpdateDi
   async function copyDownloadUrl(url: string) {
     try {
       await navigator.clipboard.writeText(url)
+      // Round 75 — this write is OURS: record the clipboard
+      // sequence right after, so the monitor does not offer the
+      // installer URL back as a download. A failure to record
+      // only risks one extra offer, never a lost download.
+      void noteOwnClipboardWrite().catch(() => undefined)
       setCopied(true)
     } catch {
       // Clipboard unavailable (e.g. outside the desktop app):

@@ -174,15 +174,17 @@ export async function confirmPendingLink(args: {
  *  backend; the window's `__ADD_URL_ID__` init script carries
  *  the link id). */
 export async function getPendingLink(linkId: string): Promise<PendingLinkRow> {
-  return invoke<PendingLinkRow>('get_pending_link', { link_id: linkId })
+  return invoke<PendingLinkRow>('get_pending_link', { linkId })
 }
 
 /** Round 74 (13) — open (or focus, when it already exists) the
  *  standalone Add URL window for a captured link, and pop it in
- *  front over whatever window the user has open. The backend
- *  command is `open_add_url_window(link_id)`. */
+ *  front over whatever window the user has open. Tauri v2 commands
+ *  take camelCase argument keys by default, so the Rust parameter
+ *  `link_id` is sent as `linkId` (Round 75: sending `link_id`
+ *  failed every call with "missing required key linkId"). */
 export async function openAddUrlWindow(linkId: string): Promise<void> {
-  return invoke('open_add_url_window', { link_id: linkId })
+  return invoke('open_add_url_window', { linkId })
 }
 
 /** Round 67 — set the Add URL dialog's Description note on a
@@ -354,15 +356,20 @@ export async function renameQueue(id: string, name: string): Promise<QueueRow> {
 }
 
 export async function updateQueue(id: string, update: QueueUpdate): Promise<QueueRow> {
+  // Round 75: Tauri v2 commands take camelCase argument keys — the
+  // snake_case keys sent before made EVERY call fail with
+  // "missing required key scheduleType" (the Rust parameters are
+  // schedule_type/start_on_startup/on_complete_action), so queue
+  // scheduling could never be saved from the UI.
   return invoke<QueueRow>('update_queue', {
     id,
-    schedule_type: update.schedule_type,
-    start_at: update.start_at,
-    stop_at: update.stop_at,
-    start_on_startup: update.start_on_startup,
-    on_complete_action: update.on_complete_action,
-    on_complete_program: update.on_complete_program,
-    sync_interval_minutes: update.sync_interval_minutes,
+    scheduleType: update.schedule_type,
+    startAt: update.start_at,
+    stopAt: update.stop_at,
+    startOnStartup: update.start_on_startup,
+    onCompleteAction: update.on_complete_action,
+    onCompleteProgram: update.on_complete_program,
+    syncIntervalMinutes: update.sync_interval_minutes,
   })
 }
 
@@ -439,17 +446,21 @@ export async function createGrabberProject(args: {
   onCompleteAction?: string
   onCompleteProgram?: string | null
 }): Promise<GrabberProjectRow> {
+  // Round 75: camelCase invoke keys (Tauri v2 default) — the
+  // snake_case keys sent before made EVERY call fail with
+  // "missing required key startUrl", so no Site Grabber project
+  // could ever be created from the UI.
   return invoke<GrabberProjectRow>('create_grabber_project', {
     name: args.name,
-    start_url: args.startUrl,
+    startUrl: args.startUrl,
     types: args.types,
     depth: args.depth,
-    max_pages: args.maxPages,
+    maxPages: args.maxPages,
     mode: args.mode,
-    schedule_start_at: args.scheduleStartAt,
-    queue_id: args.queueId ?? null,
-    on_complete_action: args.onCompleteAction ?? 'none',
-    on_complete_program: args.onCompleteProgram ?? null,
+    scheduleStartAt: args.scheduleStartAt,
+    queueId: args.queueId ?? null,
+    onCompleteAction: args.onCompleteAction ?? 'none',
+    onCompleteProgram: args.onCompleteProgram ?? null,
   })
 }
 
@@ -719,14 +730,18 @@ export function onUpdateAvailable(
 /** Round 52 — clipboard monitoring: subscribe to
  *  `clipboard-link-found` events. The shell polls the clipboard
  *  once a second; the engine only emits when the copied text is
- *  a new downloadable link. Nothing is downloaded without the
- *  user — the UI shows the offer dialog for it. */
+ *  a new downloadable link (a fresh copy of the same link is a
+ *  new clipboard sequence, so it emits again). Nothing is
+ *  downloaded without the user — the UI opens the Add URL
+ *  dialog for it directly (Round 75). */
 export function onClipboardLink(cb: (offer: ClipboardOffer) => void): Promise<() => void> {
   return listen<ClipboardOffer>('clipboard-link-found', (e) => cb(e.payload))
 }
 
-/** Round 52 — clipboard monitoring: the user dismissed the
- *  offer for this URL — the engine will not offer it again. */
-export async function dismissClipboardOffer(url: string): Promise<void> {
-  return invoke('dismiss_clipboard_offer', { url })
+/** Round 75 — the app itself just wrote to the clipboard (the
+ *  update dialog copies the installer URL): record the current
+ *  clipboard sequence as seen, so the monitor does not offer our
+ *  own link back to the user. */
+export async function noteOwnClipboardWrite(): Promise<void> {
+  return invoke('note_own_clipboard_write')
 }

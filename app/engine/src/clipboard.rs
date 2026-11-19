@@ -1,23 +1,39 @@
-//! Clipboard monitoring (Round 52): offer to download a file link
-//! the user copied. Pure logic only — no clipboard access here, so
-//! tests never touch the real clipboard. The shell reads the OS
-//! clipboard and hands the text to
-//! `DownloadManager::check_clipboard_offer`; the offer the shell
-//! shows is a `ClipboardOffer`. Copying a link never downloads
-//! anything by itself — the user must accept the offer.
-
-use std::collections::VecDeque;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+//! Clipboard monitoring (Round 52, reworked Round 75): offer to
+//! download a file link the user copied. Pure logic only — no
+//! clipboard access here, so tests never touch the real clipboard.
+//! The shell reads the OS clipboard and hands the text to
+//! `DownloadManager::check_clipboard_offer` together with the
+//! clipboard's change signal; the offer the shell shows is a
+//! `ClipboardOffer`. Copying a link never downloads anything by
+//! itself — the user must accept the offer.
+//!
+//! Round 75 — the change signal is the OS clipboard sequence
+//! number (`GetClipboardSequenceNumber` on Windows): it increments
+//! on every clipboard write, so a fresh copy of the same link is a
+//! NEW sequence and is offered again, while the same clipboard
+//! sitting unchanged across polls is offered exactly once. The old
+//! design blocked re-offers three ways — the same-text hash, a
+//! session-long `seen` set (remembered on offer AND on dismiss),
+//! and the `url_exists` hard block — which is why clipboard
+//! "worked once, then never again" on the user's PC. All three are
+//! gone: the only dedupe left is the sequence number, and an
+//! already-downloaded URL is offered with `already_in_list` set
+//! instead of being swallowed.
 
 use serde::{Deserialize, Serialize};
 
 /// The offer the shell shows when the clipboard holds a fresh
-/// download link: the URL and the filename the link points to.
+/// download link: the URL, the filename the link points to, and
+/// whether the URL is already in the download list (Round 75 —
+///
+/// an already-downloaded URL is still offered, with a visible
+/// "This link is already in your list" note, instead of being
+/// silently dropped).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClipboardOffer {
     pub url: String,
     pub filename: String,
+    pub already_in_list: bool,
 }
 
 /// Extensions the browser extension catches
@@ -33,10 +49,6 @@ pub const CAPTURE_EXTENSIONS: &[&str] = &[
 
 /// Maximum clipboard text considered: a longer paste is not one link.
 pub const MAX_CLIPBOARD_TEXT_LEN: usize = 2048;
-
-/// How many offered-or-dismissed URLs are remembered, so the same
-/// link is never offered twice in a row.
-pub const MAX_SEEN_URLS: usize = 64;
 
 /// Parse clipboard text as a single download link, or `None` when it
 /// is not one: empty text, text longer than 2048 chars, text with any
@@ -67,23 +79,24 @@ pub fn extract_download_link(text: &str) -> Option<ClipboardOffer> {
     Some(ClipboardOffer {
         url: trimmed.to_string(),
         filename,
+        // Round 75: set by `check_clipboard_offer` after the
+        // `url_exists` lookup — a link is not known to be a
+        // duplicate from its text alone.
+        already_in_list: false,
     })
 }
 
-/// Per-session clipboard state: the hash of the last text seen (so
-/// re-reading the same clipboard never re-offers) and the URLs
-/// already offered or dismissed (so a re-copied link is not offered
-/// again). Pure logic — no clipboard access.
+/// Per-session clipboard state: the last clipboard sequence number
+/// seen (Round 75). `None` until the first check with a sequence.
+/// Pure logic — no clipboard access.
 pub struct ClipboardMonitor {
-    pub last_text_hash: u64,
-    pub seen: VecDeque<String>,
+    pub last_sequence: Option<u32>,
 }
 
 impl Default for ClipboardMonitor {
     fn default() -> Self {
         Self {
-            last_text_hash: 0,
-            seen: VecDeque::new(),
+            last_sequence: None,
         }
     }
 }
@@ -91,23 +104,5 @@ impl Default for ClipboardMonitor {
 impl ClipboardMonitor {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Hash of the trimmed clipboard text, for the same-text dedupe.
-    pub fn hash_text(text: &str) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        text.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    /// Record `url` as offered-or-dismissed (idempotent), keeping at
-    /// most 64 entries — the oldest is dropped when full.
-    pub fn remember(&mut self, url: &str) {
-        if !self.seen.iter().any(|u| u == url) {
-            self.seen.push_back(url.to_string());
-            while self.seen.len() > MAX_SEEN_URLS {
-                self.seen.pop_front();
-            }
-        }
     }
 }

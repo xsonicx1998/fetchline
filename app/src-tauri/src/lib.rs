@@ -309,14 +309,30 @@ async fn refresh_download_address(
         .map_err(|e| e.to_string())
 }
 
-/// Clipboard monitoring (Round 52): the user dismissed the
-/// "Download this link?" offer for this URL — the engine will
-/// not offer it again. The engine method is infallible and
-/// idempotent (it just records the URL in session state).
+/// Clipboard monitoring (Round 75): the app itself just wrote to
+/// the clipboard (the update dialog copies the installer URL) —
+/// record the current clipboard sequence number as seen, so the
+/// monitor does not offer our own link back to the user. The
+/// sequence is read here, on the shell side, because only the
+/// shell calls Win32. Off Windows this is a no-op.
 #[tauri::command]
-fn dismiss_clipboard_offer(state: State<'_, AppState>, url: String) -> Result<(), String> {
-    state.manager.dismiss_clipboard_offer(&url);
-    Ok(())
+fn note_own_clipboard_write(state: State<'_, AppState>) {
+    if let Some(seq) = clipboard_sequence_number() {
+        state.manager.note_clipboard_sequence(seq);
+    }
+}
+
+/// Round 75 — the clipboard change signal: the OS sequence number,
+/// which increments on every clipboard write. Windows only; `None`
+/// elsewhere (the engine then evaluates the text on every poll —
+/// the app only ships on Windows).
+#[cfg(windows)]
+fn clipboard_sequence_number() -> Option<u32> {
+    Some(unsafe { windows_sys::Win32::System::DataExchange::GetClipboardSequenceNumber() })
+}
+#[cfg(not(windows))]
+fn clipboard_sequence_number() -> Option<u32> {
+    None
 }
 
 #[tauri::command]
@@ -3082,6 +3098,17 @@ fn register_native_host_best_effort(app: &AppHandle, log: Option<&std::path::Pat
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Round 75 — the app-alive mutex: created at the very start of
+    // run(), before any window exists, and held for the process
+    // lifetime (Tauri managed state, in setup below). The
+    // extension's host probes it, so the popup's "Connected" means
+    // the APP is running — not just that the standalone host
+    // answered a ping. A second launch opens the SAME named mutex
+    // and gets its own handle; single-instance (Round 74) exits
+    // that process before setup, closing only its own handle — the
+    // primary instance's mutex survives. Off Windows this is None
+    // (no named mutex) and the popup keeps its old behaviour.
+    let app_alive_mutex = fetchline_engine::native_host::create_app_alive_mutex();
     // BUG-029: a panic on the main thread exits silently in a
     // `windows_subsystem` release build (no console, no WER entry),
     // so record every panic — payload and location — in the startup
@@ -3167,10 +3194,18 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
-        .setup(|app| {
+        .setup(move |app| {
             let log = startup_log_path_from_app(app.handle());
             let log = log.as_deref();
             log_startup(log, "setup start");
+            // Round 75 — hold the app-alive mutex for the process
+            // lifetime (see run() above). A crash releases it: the
+            // OS destroys a named mutex when its last handle
+            // closes, so the popup stops saying "Connected" the
+            // moment the app dies.
+            if let Some(guard) = app_alive_mutex {
+                app.manage(guard);
+            }
             // Round 61 (§13 confirm): log the main thread id so it
             // can be compared against the Round 60 "build() entered
             // on thread" lines — setup runs on the main thread.
@@ -3282,14 +3317,19 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 let _ = startup_manager.start_startup_queues().await;
             });
-            // Clipboard monitoring (Round 52): poll the system
-            // clipboard once a second and offer a copied download
-            // link. The engine decides whether the text is a new
-            // downloadable link (it dedupes against dismissed
-            // offers and existing downloads) and honours the
-            // `clipboard_monitoring` setting; the shell only reads
-            // the clipboard and forwards offers. The check is sync
-            // and cheap (store lock + tiny work) — nothing is held
+            // Clipboard monitoring (Round 52, reworked Round 75):
+            // poll the system clipboard once a second and offer a
+            // copied download link. The change signal is the OS
+            // clipboard sequence number: when it equals the last
+            // sequence the engine saw, the clipboard has not
+            // changed — the read is skipped entirely (no arboard
+            // open, no RDP channel cross). When it changed, the
+            // shell reads the text and the engine decides whether
+            // it is a download link, honouring the
+            // `clipboard_monitoring` setting; the shell only
+            // forwards offers. A failed read records nothing, so
+            // the next tick retries it. The check is sync and
+            // cheap (store lock + tiny work) — nothing is held
             // across an await.
             // Round 74 (12) — TWO repairs to the reader. (1) A
             // FRESH clipboard handle per read: arboard's Windows
@@ -3329,6 +3369,14 @@ pub fn run() {
                 let mut read_failed_logged = false;
                 loop {
                     interval.tick().await;
+                    // Round 75 — the sequence gate: an unchanged
+                    // clipboard costs no read at all.
+                    let sequence = clipboard_sequence_number();
+                    if let Some(seq) = sequence {
+                        if clipboard_manager.clipboard_sequence_seen(seq) {
+                            continue;
+                        }
+                    }
                     // Round 57 (§9.2a): the clipboard read runs
                     // on a blocking thread, NOT on a tokio worker.
                     // `arboard::Clipboard::get_text()` is a
@@ -3375,9 +3423,11 @@ pub fn run() {
                         Err(_) => None, // spawn_blocking join failed; next tick retries
                     };
                     let Some(text) = text else {
+                        // Read failed: nothing recorded, so the
+                        // next tick retries the same sequence.
                         continue;
                     };
-                    match clipboard_manager.check_clipboard_offer(&text) {
+                    match clipboard_manager.check_clipboard_offer(&text, sequence) {
                         Ok(Some(offer)) => {
                             log_startup(
                                 clipboard_log.as_deref(),
@@ -3633,7 +3683,7 @@ pub fn run() {
             resume_download,
             redownload_download,
             refresh_download_address,
-            dismiss_clipboard_offer,
+            note_own_clipboard_write,
             cancel_download,
             retry_now,
             open_folder,

@@ -65,7 +65,17 @@ async function refreshStatus() {
   try {
     const reply = await sendToHost({ type: "ping" });
     if (reply && reply.ok !== false) {
-      setStatus("ok", "Connected");
+      // Round 75 — the host is standalone and answers even with
+      // the app closed, so a ping alone never meant "Connected".
+      // The ping reply carries app_alive (the named mutex the
+      // host probes): Connected ONLY when the app itself is
+      // alive. app_alive is absent off Windows, where the old
+      // behaviour stands — a host answer means Connected.
+      if (reply.app_alive === false) {
+        setStatus("bad", "Sonic Manager is closed - open it to catch downloads");
+      } else {
+        setStatus("ok", "Connected");
+      }
     } else {
       setStatus(
         "bad",
