@@ -48,7 +48,7 @@ import {
 } from './lib/api'
 import { formatBytes, formatEta, formatSpeed } from './lib/format'
 import { BannerDismissals, FailedCaptures, type BannerError } from './lib/bannerErrors'
-import { selectVisibleRows, useSidebarSelection } from './lib/useSidebarSelection'
+import { selectCompletedDownloads, selectVisibleRows, useSidebarSelection } from './lib/useSidebarSelection'
 import type { CategoryRow, ClipboardOffer, DownloadRow, GrabberProjectRow, PendingAction, PendingLinkRow, QueueRow, QuotaStatus, Settings, UpdateCheckResult } from './lib/types'
 import { AddCategoryDialog } from './components/AddCategoryDialog'
 import { AddDownloadDialog } from './components/AddDownloadDialog'
@@ -568,12 +568,13 @@ export default function App() {
   }, [])
 
   /** Round 62 — status-bar free space: the drive of the default
-   *  download folder, polled every 30 s (and once when the
-   *  settings load). Off Windows the command rejects and the
-   *  figure stays hidden. Round 74 (2) — the same refresh runs
-   *  right after a delete / remove completes and after a
-   *  download finishes, so the figure never sits stale until
-   *  the next 30 s poll. */
+   *  download folder, polled every 10 s (Round 76 (5): 30 s was
+   *  slow enough for the user to notice the figure lagging after
+   *  a cancel) and once when the settings load. Off Windows the
+   *  command rejects and the figure stays hidden. Round 74 (2) —
+   *  the same refresh runs right after a delete / remove
+   *  completes and after a download finishes, so the figure
+   *  never sits stale until the next poll. */
   const refreshFreeSpace = useCallback(async () => {
     const folder = settings?.default_download_folder || 'C:\\'
     const drive = /^([A-Za-z]:)/.exec(folder)?.[1] ?? 'C:'
@@ -587,9 +588,29 @@ export default function App() {
 
   useEffect(() => {
     void refreshFreeSpace()
-    const timer = window.setInterval(() => void refreshFreeSpace(), 30_000)
+    const timer = window.setInterval(() => void refreshFreeSpace(), 10_000)
     return () => window.clearInterval(timer)
   }, [refreshFreeSpace])
+
+  /** Round 76 (5) — the main window has no direct cancel path
+   *  (cancelling happens in the progress window, which deletes
+   *  the partial file), so refresh the free-space figure when
+   *  the download list itself changes shape — a row vanishing
+   *  or changing status (cancel / finish / remove / delete
+   *  completed). The signature ignores byte progress, so the
+   *  1 s poll does not spam the drive with a refresh per tick. */
+  const downloadSignatureRef = useRef<string | null>(null)
+  useEffect(() => {
+    const signature = downloads.map((d) => `${d.id}:${d.status}`).join(',')
+    if (downloadSignatureRef.current === null) {
+      downloadSignatureRef.current = signature
+      return
+    }
+    if (downloadSignatureRef.current !== signature) {
+      downloadSignatureRef.current = signature
+      void refreshFreeSpace()
+    }
+  }, [downloads, refreshFreeSpace])
 
   /** Manual update check (Settings > Check for updates). Runs even
    *  when the weekly setting is off; a failure shows the error
@@ -769,10 +790,13 @@ export default function App() {
 
   /** Delete Completed (toolbar / Tasks menu): remove every
    *  finished download from the list. The files on disk are kept,
-   *  exactly like the single Remove. */
+   *  exactly like the single Remove. Round 76 (6) — the filter
+   *  is `selectCompletedDownloads` (status 'complete' only, the
+   *  whole list, not just the visible view): no confirmation,
+   *  it executes directly, per the user's decision. */
   async function handleDeleteCompleted() {
     try {
-      for (const d of downloads.filter((x) => x.status === 'complete')) {
+      for (const d of selectCompletedDownloads(downloads)) {
         await deleteDownload(d.id, false)
       }
       setSelectedId(null)
@@ -1267,6 +1291,11 @@ export default function App() {
           // it is in view and the toolbar acts on it.
           selectFilter('all')
           setSelectedId(id)
+          // Round 76 (2) — the remembered folder is stored by the
+          // submit (updateCategory), but the dialog's autofill
+          // reads `categories` state: refresh it now, or the next
+          // dialog still shows the old folder for the category.
+          void refreshCategories()
           void refreshAll()
         }}
         onLateError={(message) => showBannerError('action', message)}

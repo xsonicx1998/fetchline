@@ -94,6 +94,11 @@ function partInfo(
 export function ProgressWindow({ downloadId }: { downloadId: string }) {
   const [download, setDownload] = useState<DownloadRow | null>(null)
   const [loaded, setLoaded] = useState(false)
+  /** Round 76 (8) — the last filename a poll returned. When the
+   *  download is removed the row is gone, but the window's
+   *  title bar still shows the file's name (not "Sonic
+   *  Manager"); null when no poll ever returned a row. */
+  const [lastFilename, setLastFilename] = useState<string | null>(null)
   /** Round 55 (defect 2, diagnostics): the last poll failure, if
    *  any — a bridge failure is not "Download removed", and the
    *  window should say so instead of showing the wrong empty
@@ -224,6 +229,11 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
         if (stopped) return
         const row = rows.find((d) => d.id === downloadId) ?? null
         setDownload(row)
+        // Round 76 (8) — remember the name while the row exists,
+        // so the "Download removed" state can still show it.
+        if (row) {
+          setLastFilename((prev) => (prev === row.filename ? prev : row.filename))
+        }
         setLoaded(true)
         setPollError(null)
         lastPollOkAt.current = Date.now()
@@ -322,16 +332,21 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
   /** Completion actions (Round 62): when the polled status
    *  flips into 'complete' while this window is open, act on
    *  the checked Options — shut down wins over close (closing
-   *  the program would stop the shutdown). A download that was
-   *  already complete when the window opened does not fire
-   *  them: the options were chosen for a run that already
-   *  ended. Round 66: with neither option checked, this window
-   *  closes itself — the main window opens the "Download
-   *  complete" dialog at the same moment, and the dialog
-   *  replaces this window. Suppressed (the dialog turned off
-   *  in Settings, or settings not loaded yet) keeps today's
-   *  behaviour: the window stays open with Open file /
-   *  Open folder in the footer. */
+   *  the program would stop the shutdown). Round 66: with
+   *  neither option checked, this window closes itself — the
+   *  main window opens the "Download complete" dialog at the
+   *  same moment, and the dialog replaces this window.
+   *  Suppressed (the dialog turned off in Settings, or settings
+   *  not loaded yet) keeps today's behaviour: the window stays
+   *  open with Open file / Open folder in the footer.
+   *  Round 76 (3): the plain close fires whenever the status
+   *  IS complete, not only on a flip — a window opened for a
+   *  just-finished download has prev null, so the old flip-only
+   *  close never fired and both windows stayed open together.
+   *  The shutdown / close-after options still need a flip: they
+   *  were chosen for a run that already ended. The effect also
+   *  re-runs when the settings load, so a complete status that
+   *  arrived before them still closes. */
   useEffect(() => {
     const status = download?.status ?? null
     const prev = prevStatusRef.current
@@ -340,19 +355,21 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
       completionActedRef.current = false
       return
     }
-    if ((prev === 'downloading' || prev === 'paused') && !completionActedRef.current) {
+    if (completionActedRef.current) return
+    const flipped = prev === 'downloading' || prev === 'paused'
+    if (shutdownAfterRef.current && flipped) {
       completionActedRef.current = true
-      if (shutdownAfterRef.current) {
-        setShutdownCountdown(30)
-      } else if (closeAfterRef.current) {
-        void exitApp().catch((e: unknown) =>
-          setActionError(e instanceof Error ? e.message : String(e)),
-        )
-      } else if (settingsRef.current?.show_download_complete_dialog) {
-        void getCurrentWindow().close()
-      }
+      setShutdownCountdown(30)
+    } else if (closeAfterRef.current && flipped) {
+      completionActedRef.current = true
+      void exitApp().catch((e: unknown) =>
+        setActionError(e instanceof Error ? e.message : String(e)),
+      )
+    } else if (settingsRef.current?.show_download_complete_dialog) {
+      completionActedRef.current = true
+      void getCurrentWindow().close()
     }
-  }, [download?.status])
+  }, [download?.status, settings])
 
   /** The 30 s shutdown countdown: one second at a time, then
    *  the Windows shutdown command. Cancelling (below) clears
@@ -534,12 +551,17 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
     // mostly-empty window (a heading and one line floating in a
     // 660x480 frame). It is now a compact centred card like the
     // other dialogs: icon + heading + one line + Close.
+    // Round 76 (8) — the card is in full Sonic identity now
+    // (pink glowing icon, gradient Close, like the approved
+    // preview), and the title bar shows the last-seen filename
+    // instead of "Sonic Manager" — the name appears ONLY there,
+    // never repeated in the body text.
     return (
       <div className="flex h-full flex-col text-text">
-        <TitleBar title="Sonic Manager" />
+        <TitleBar title={lastFilename ?? 'Sonic Manager'} />
         <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
-          <div className="flex h-12 w-12 items-center justify-center rounded-full border-[1.5px] border-border bg-surface-2 text-text-muted">
-            <FileX className="h-6 w-6" aria-hidden="true" />
+          <div className="flex h-16 w-16 items-center justify-center rounded-full border-[1.5px] border-danger bg-danger-soft text-danger shadow-[0_0_24px_rgba(240,45,205,0.35)]">
+            <FileX className="h-8 w-8" aria-hidden="true" />
           </div>
           <h1 className="text-lg font-semibold">
             {pollError ? 'Could not load this download' : 'Download removed'}
@@ -560,7 +582,15 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
                 </Button>
               </>
             ) : null}
-            <Button variant="primary" onClick={() => getCurrentWindow().close()}>
+            <Button
+              variant="primary"
+              onClick={() => getCurrentWindow().close()}
+              style={{
+                background: 'linear-gradient(90deg, #8B20FF, #F02DCD)',
+                boxShadow: '0 4px 16px rgba(240,45,205,0.40)',
+              }}
+              className="hover:brightness-110"
+            >
               Close
             </Button>
           </div>
@@ -631,7 +661,7 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
           </button>
         ))}
       </div>
-      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4">
+      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden p-4">
         {backendDead ? (
           <div role="alert" className="flex shrink-0 items-center justify-between gap-2 rounded-md border border-border bg-danger-soft px-3 py-2 text-sm text-danger">
             <span>Backend not responding — restart the app. Your downloads are safe on disk.</span>

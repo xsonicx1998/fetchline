@@ -51,6 +51,17 @@ export function useSidebarSelection() {
 
 export type SidebarSelection = ReturnType<typeof useSidebarSelection>
 
+/** Round 76 (6) — Delete Completed: exactly the rows whose
+ *  status is 'complete' — nothing else. The scope is the WHOLE
+ *  list, not just the visible view: a finished download in
+ *  another category or queue is completed too, and deleting it
+ *  is what the user saw (and accepted). The engine only
+ *  soft-deletes the given row, so this selection IS the whole
+ *  behaviour — pin it with a test, do not add a confirmation. */
+export function selectCompletedDownloads(downloads: DownloadRow[]): DownloadRow[] {
+  return downloads.filter((d) => d.status === 'complete')
+}
+
 /** Which rows the main table shows for a selection — the same
  *  computation App.tsx used inline. A selected queue shows the
  *  queue's files (loaded separately by the app); otherwise the

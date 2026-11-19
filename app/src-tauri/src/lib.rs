@@ -1173,6 +1173,21 @@ async fn open_complete_dialog(
     let log = startup_log_path_from_app(&app);
     let log = log.as_deref();
     let label = complete_window_label(&download_id);
+    // Round 76 (3) — the close is authoritative: the progress
+    // window must not survive the complete dialog. The progress
+    // window closes itself on its own poll, but that races this
+    // open (and never fires at all for a download that was
+    // already complete when the window opened), so both windows
+    // stayed open together. Close it here, before building (or
+    // focusing) the dialog.
+    let progress_label = progress_window_label(&download_id);
+    if let Some(progress) = app.get_webview_window(&progress_label) {
+        let _ = progress.close();
+        log_startup(
+            log,
+            &format!("complete dialog {label}: closed progress window {progress_label}"),
+        );
+    }
     if let Some(window) = app.get_webview_window(&label) {
         // Already open — bring it forward instead of a second
         // copy (the main window and a progress window can both

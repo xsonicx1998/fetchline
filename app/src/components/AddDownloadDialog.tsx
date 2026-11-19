@@ -77,8 +77,9 @@ interface AddDownloadDialogProps {
 /** The Save As field shows the full path (folder + filename).
  *  Split on the last separator so the filename part is the one
  *  the user edits; a bare name (no separator) is a rename — the
- *  folder stays. */
-function filenameFromUrl(rawUrl: string): string {
+ *  folder stays. Exported for the standalone Add URL window
+ *  (Round 76 (1)): its title bar shows the URL's last segment. */
+export function filenameFromUrl(rawUrl: string): string {
   try {
     const parsed = new URL(rawUrl.trim())
     const segment = parsed.pathname.split('/').filter(Boolean).pop() ?? ''
@@ -362,8 +363,17 @@ export function AddDownloadDialog({
       if (rememberPath && categoryValue && folderValue) {
         try {
           await updateCategory({ id: categoryValue, folder: folderValue })
-        } catch {
-          // Keep going — the download still starts.
+        } catch (e) {
+          // Round 76 (2) — a failed remember-path save used to
+          // vanish silently (`catch {}`), so a user who checked
+          // the box never knew the folder was not stored. Surface
+          // it (main-window banner / standalone-window alert);
+          // the download still starts.
+          onLateError(
+            `Could not remember this folder for the category: ${
+              e instanceof Error ? e.message : String(e)
+            } — the download still starts.`,
+          )
         }
       }
       if (pendingLinkId) {

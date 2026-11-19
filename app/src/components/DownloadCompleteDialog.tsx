@@ -165,7 +165,9 @@ export function DownloadCompleteDialog({ downloadId }: { downloadId: string }) {
   if (!loaded || !download) {
     return (
       <div className="flex h-full flex-col bg-bg text-text">
-        <TitleBar title="Download complete" showMinimize={false} showMaximize={false} draggable={false} />
+        {/* Round 76 (3) — draggable: the user overrides Round 74
+            (16) for this dialog, like the standalone Add URL. */}
+        <TitleBar title="Download complete" showMinimize={false} showMaximize={false} draggable />
         <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
           {pollError ? (
             <p className="text-sm text-danger">{pollError}</p>
@@ -186,7 +188,9 @@ export function DownloadCompleteDialog({ downloadId }: { downloadId: string }) {
 
   return (
     <div className="flex h-full flex-col bg-bg text-text">
-      <TitleBar title="Download complete" showMinimize={false} showMaximize={false} draggable={false} />
+      {/* Round 76 (3) — draggable: the user overrides Round 74
+          (16) for this dialog, like the standalone Add URL. */}
+      <TitleBar title="Download complete" showMinimize={false} showMaximize={false} draggable />
       {/* Purple→pink divider under the title bar, like the
           progress bar (approved mockup). */}
       <div
