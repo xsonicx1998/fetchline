@@ -68,7 +68,9 @@ pub const PROXY_AUTH_NEGOTIATE_AUTO: &str = "negotiate-auto";
 /// for rows written before the column existed.
 pub fn resolve_proxy_auth(auth: &str) -> &str {
     match auth {
-        PROXY_AUTH_BASIC | PROXY_AUTH_NTLM | PROXY_AUTH_KERBEROS | PROXY_AUTH_NEGOTIATE_AUTO => auth,
+        PROXY_AUTH_BASIC | PROXY_AUTH_NTLM | PROXY_AUTH_KERBEROS | PROXY_AUTH_NEGOTIATE_AUTO => {
+            auth
+        }
         _ => PROXY_AUTH_NEGOTIATE_AUTO,
     }
 }
@@ -89,10 +91,16 @@ pub enum ProxyAuthScheme {
 /// proxy offers (de-duplicated, in first-seen order — the order
 /// here does not matter: `proxy_auth_order` imposes its own).
 /// Unknown schemes are ignored, not rejected.
-pub fn offered_proxy_auth_schemes<'a>(values: impl IntoIterator<Item = &'a str>) -> Vec<ProxyAuthScheme> {
+pub fn offered_proxy_auth_schemes<'a>(
+    values: impl IntoIterator<Item = &'a str>,
+) -> Vec<ProxyAuthScheme> {
     let mut out: Vec<ProxyAuthScheme> = Vec::new();
     for value in values {
-        let scheme = value.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+        let scheme = value
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
         let parsed = match scheme.as_str() {
             "negotiate" => ProxyAuthScheme::Kerberos,
             "ntlm" => ProxyAuthScheme::Ntlm,
@@ -157,7 +165,8 @@ pub fn proxy_auth_order(
             if offered.contains(&ProxyAuthScheme::Ntlm) {
                 order.push(ProxyAuthScheme::Ntlm);
             }
-            if has_basic_creds && (offered.contains(&ProxyAuthScheme::Basic) || offered.is_empty()) {
+            if has_basic_creds && (offered.contains(&ProxyAuthScheme::Basic) || offered.is_empty())
+            {
                 order.push(ProxyAuthScheme::Basic);
             }
             order
@@ -171,7 +180,10 @@ pub fn proxy_auth_order(
 /// API, and the client-level `Proxy::basic_auth` is only applied
 /// when the auth setting is `basic` (see `to_reqwest_proxy`).
 pub fn basic_proxy_auth_header(user: &str, password: &str) -> String {
-    format!("Basic {}", crate::secret::base64_encode(format!("{user}:{password}").as_bytes()))
+    format!(
+        "Basic {}",
+        crate::secret::base64_encode(format!("{user}:{password}").as_bytes())
+    )
 }
 
 /// The error for a 407 whose offered schemes do not include the
@@ -266,8 +278,15 @@ impl ProxyConfig {
     /// Whether a proxy username + password are configured (what
     /// the NTLM and Basic attempts need; Kerberos never does).
     pub fn has_basic_creds(&self) -> bool {
-        self.username.as_deref().map(|u| !u.trim().is_empty()).unwrap_or(false)
-            && self.password.as_deref().map(|p| !p.is_empty()).unwrap_or(false)
+        self.username
+            .as_deref()
+            .map(|u| !u.trim().is_empty())
+            .unwrap_or(false)
+            && self
+                .password
+                .as_deref()
+                .map(|p| !p.is_empty())
+                .unwrap_or(false)
     }
 
     /// "host:port", with IPv6 hosts bracketed.
@@ -311,7 +330,8 @@ impl ProxyConfig {
             // a proxy that offers Negotiate silently settle for
             // Basic instead.
             if !user.trim().is_empty()
-                && (self.proxy_type == "socks" || resolve_proxy_auth(&self.auth) == PROXY_AUTH_BASIC)
+                && (self.proxy_type == "socks"
+                    || resolve_proxy_auth(&self.auth) == PROXY_AUTH_BASIC)
             {
                 proxy = proxy.basic_auth(user, self.password.as_deref().unwrap_or(""));
             }
@@ -431,11 +451,14 @@ pub fn validate_proxy_input(input: &ProxyConfigInput) -> Result<()> {
     }
     let host = input.host.trim();
     if host.is_empty() {
-        return Err(EngineError::InvalidState("Give the proxy a host".to_string()));
+        return Err(EngineError::InvalidState(
+            "Give the proxy a host".to_string(),
+        ));
     }
     if host.contains("://") || host.contains(char::is_whitespace) {
         return Err(EngineError::InvalidState(
-            "The proxy host is just a name or address, without http:// and without spaces".to_string(),
+            "The proxy host is just a name or address, without http:// and without spaces"
+                .to_string(),
         ));
     }
     if !(1..=65535).contains(&input.port) {
@@ -455,7 +478,9 @@ pub fn validate_proxy_input(input: &ProxyConfigInput) -> Result<()> {
         // Kerberos and NTLM are HTTP-proxy schemes only: a SOCKS5
         // proxy authenticates with username/password, and an FTP
         // proxy with USER/PASS — neither offers Negotiate/NTLM.
-        if matches!(auth.as_str(), PROXY_AUTH_KERBEROS | PROXY_AUTH_NTLM) && input.proxy_type != "http" {
+        if matches!(auth.as_str(), PROXY_AUTH_KERBEROS | PROXY_AUTH_NTLM)
+            && input.proxy_type != "http"
+        {
             return Err(EngineError::InvalidState(
                 "Kerberos and NTLM proxy authentication only apply to HTTP proxies — \
                  a SOCKS5 or FTP proxy uses the username and password"
@@ -512,12 +537,18 @@ mod tests {
     fn offered_schemes_parse_proxy_authenticate_values() {
         use ProxyAuthScheme::*;
         assert_eq!(
-            offered_proxy_auth_schemes(["Negotiate", "NTLM", "Basic realm=\"proxy\""].iter().copied()),
+            offered_proxy_auth_schemes(
+                ["Negotiate", "NTLM", "Basic realm=\"proxy\""]
+                    .iter()
+                    .copied()
+            ),
             vec![Kerberos, Ntlm, Basic]
         );
         // Case-insensitive, de-duplicated, unknown schemes ignored.
         assert_eq!(
-            offered_proxy_auth_schemes(["negotiate", "NEGOTIATE", "Digest", "ntlm"].iter().copied()),
+            offered_proxy_auth_schemes(
+                ["negotiate", "NEGOTIATE", "Digest", "ntlm"].iter().copied()
+            ),
             vec![Kerberos, Ntlm]
         );
         // A token after the scheme is part of the value, not a scheme.
@@ -564,23 +595,41 @@ mod tests {
             proxy_auth_order(PROXY_AUTH_NEGOTIATE_AUTO, &[], true),
             vec![Basic]
         );
-        assert_eq!(proxy_auth_order(PROXY_AUTH_NEGOTIATE_AUTO, &[], false), Vec::<ProxyAuthScheme>::new());
+        assert_eq!(
+            proxy_auth_order(PROXY_AUTH_NEGOTIATE_AUTO, &[], false),
+            Vec::<ProxyAuthScheme>::new()
+        );
     }
 
     #[test]
     fn explicit_auth_settings_try_exactly_one_scheme() {
         use ProxyAuthScheme::*;
         let all = [Kerberos, Ntlm, Basic];
-        assert_eq!(proxy_auth_order(PROXY_AUTH_KERBEROS, &all, true), vec![Kerberos]);
+        assert_eq!(
+            proxy_auth_order(PROXY_AUTH_KERBEROS, &all, true),
+            vec![Kerberos]
+        );
         assert_eq!(proxy_auth_order(PROXY_AUTH_NTLM, &all, true), vec![Ntlm]);
         assert_eq!(proxy_auth_order(PROXY_AUTH_BASIC, &all, true), vec![Basic]);
         // …and an empty order when the proxy does not offer the
         // selected scheme — the caller must fail clearly, never
         // silently try another scheme.
-        assert_eq!(proxy_auth_order(PROXY_AUTH_KERBEROS, &[Ntlm, Basic], true), Vec::<ProxyAuthScheme>::new());
-        assert_eq!(proxy_auth_order(PROXY_AUTH_KERBEROS, &[Basic], true), Vec::<ProxyAuthScheme>::new());
-        assert_eq!(proxy_auth_order(PROXY_AUTH_NTLM, &[Kerberos], true), Vec::<ProxyAuthScheme>::new());
-        assert_eq!(proxy_auth_order(PROXY_AUTH_BASIC, &all, false), Vec::<ProxyAuthScheme>::new());
+        assert_eq!(
+            proxy_auth_order(PROXY_AUTH_KERBEROS, &[Ntlm, Basic], true),
+            Vec::<ProxyAuthScheme>::new()
+        );
+        assert_eq!(
+            proxy_auth_order(PROXY_AUTH_KERBEROS, &[Basic], true),
+            Vec::<ProxyAuthScheme>::new()
+        );
+        assert_eq!(
+            proxy_auth_order(PROXY_AUTH_NTLM, &[Kerberos], true),
+            Vec::<ProxyAuthScheme>::new()
+        );
+        assert_eq!(
+            proxy_auth_order(PROXY_AUTH_BASIC, &all, false),
+            Vec::<ProxyAuthScheme>::new()
+        );
         // Unknown stored values resolve to negotiate-auto.
         assert_eq!(resolve_proxy_auth(""), PROXY_AUTH_NEGOTIATE_AUTO);
         assert_eq!(resolve_proxy_auth("digest"), PROXY_AUTH_NEGOTIATE_AUTO);

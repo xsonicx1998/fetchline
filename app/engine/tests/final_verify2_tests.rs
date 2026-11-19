@@ -105,9 +105,7 @@ impl OpenPageServer {
         let port = listener.local_addr().unwrap().port();
         let stop = Arc::new(AtomicBool::new(false));
         let s = Arc::clone(&stop);
-        let html = format!(
-            "<html><body><a href=\"{link_url}\">gated file</a></body></html>"
-        );
+        let html = format!("<html><body><a href=\"{link_url}\">gated file</a></body></html>");
         thread::spawn(move || {
             listener.set_nonblocking(true).unwrap();
             while !s.load(Ordering::SeqCst) {
@@ -200,9 +198,8 @@ fn handle_gated_page(mut stream: TcpStream, expected: &str) {
         return;
     }
     let Some((body, ctype)) = gated_body(&path) else {
-        let _ = stream.write_all(
-            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-        );
+        let _ = stream
+            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         return;
     };
     if method == "HEAD" {
@@ -264,17 +261,32 @@ async fn verify2_page_scan_sends_saved_site_login() {
     let links = mgr.fetch_page_links(&server.base).await.unwrap();
     let by_url = |suffix: &str| links.iter().find(|l| l.url.ends_with(suffix)).unwrap();
     let file = by_url("/file.bin");
-    assert_eq!(file.error, None, "gated file link must probe OK: {:?}", file.error);
+    assert_eq!(
+        file.error, None,
+        "gated file link must probe OK: {:?}",
+        file.error
+    );
     assert_eq!(file.size, Some(64 * 1024));
     let clip = by_url("/clip.mp4");
-    assert_eq!(clip.error, None, "gated video link must probe OK: {:?}", clip.error);
+    assert_eq!(
+        clip.error, None,
+        "gated video link must probe OK: {:?}",
+        clip.error
+    );
     assert_eq!(clip.size, Some(32 * 1024));
 
     // The video panel path rides on the same scan: the gated clip
     // must be listed downloadable, not flagged with a 401.
     let videos = mgr.detect_page_videos(&server.base).await.unwrap();
-    let clip_v = videos.iter().find(|v| v.url.ends_with("/clip.mp4")).unwrap();
-    assert!(clip_v.downloadable, "gated clip must be downloadable, got {:?}", clip_v.error);
+    let clip_v = videos
+        .iter()
+        .find(|v| v.url.ends_with("/clip.mp4"))
+        .unwrap();
+    assert!(
+        clip_v.downloadable,
+        "gated clip must be downloadable, got {:?}",
+        clip_v.error
+    );
     assert_eq!(clip_v.size, Some(32 * 1024));
 }
 
@@ -314,7 +326,11 @@ async fn verify2_page_scan_login_not_sent_to_another_host() {
     mgr.save_site_login(&login_input("127.0.0.1")).unwrap();
     let links = mgr.fetch_page_links(&page.base).await.unwrap();
     let file = links.iter().find(|l| l.url.ends_with("/file.bin")).unwrap();
-    assert_eq!(file.error, None, "login for the gated host must probe OK: {:?}", file.error);
+    assert_eq!(
+        file.error, None,
+        "login for the gated host must probe OK: {:?}",
+        file.error
+    );
     assert_eq!(file.size, Some(64 * 1024));
 }
 
@@ -330,19 +346,36 @@ async fn verify2_hls_variant_scan_sends_saved_site_login() {
     mgr.save_site_login(&login_input("127.0.0.1")).unwrap();
 
     let videos = mgr.detect_page_videos(&server.base).await.unwrap();
-    let variants: Vec<_> = videos.iter().filter(|v| v.url.contains("/v720.m3u8") || v.url.contains("/v480.m3u8")).collect();
+    let variants: Vec<_> = videos
+        .iter()
+        .filter(|v| v.url.contains("/v720.m3u8") || v.url.contains("/v480.m3u8"))
+        .collect();
     assert_eq!(
         variants.len(),
         2,
         "gated master must expand into 2 variants, got: {:?}",
-        videos.iter().map(|v| (&v.url, v.downloadable, &v.error)).collect::<Vec<_>>()
+        videos
+            .iter()
+            .map(|v| (&v.url, v.downloadable, &v.error))
+            .collect::<Vec<_>>()
     );
     for v in &variants {
-        assert!(v.downloadable, "gated variant {} must be downloadable, got {:?}", v.url, v.error);
-        assert!(v.size.is_some(), "gated variant {} must carry its real size", v.url);
+        assert!(
+            v.downloadable,
+            "gated variant {} must be downloadable, got {:?}",
+            v.url, v.error
+        );
+        assert!(
+            v.size.is_some(),
+            "gated variant {} must carry its real size",
+            v.url
+        );
     }
     // The 720p variant carries its resolution from the playlist
     // (as the honest dimension label the engine derives).
-    let v720 = variants.iter().find(|v| v.url.contains("/v720.m3u8")).unwrap();
+    let v720 = variants
+        .iter()
+        .find(|v| v.url.contains("/v720.m3u8"))
+        .unwrap();
     assert_eq!(v720.quality, "1280 × 720");
 }

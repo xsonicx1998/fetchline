@@ -147,12 +147,14 @@ export function StandaloneAddUrlWindow({ linkId }: { linkId: string }) {
 
   return (
     <div className="flex h-full flex-col bg-bg text-text">
-      {/* Round 76 (1) — the title is the file name (the URL's
-          last segment; the pending row carries no filename), and
-          the window is draggable — the user overrides Round 74
-          (16) for this window. "Add URL" only while loading. */}
+      {/* Round 76 (1) — the title is the file name: the pending
+          row's filename first (a resolved video's sanitized
+          title — the URL's last segment would be "videoplayback"
+          for a googlevideo link), then the URL's last segment,
+          and the window is draggable — the user overrides Round
+          74 (16) for this window. "Add URL" only while loading. */}
       <TitleBar
-        title={link ? filenameFromUrl(link.url) || 'Add URL' : 'Add URL'}
+        title={link ? link.filename || filenameFromUrl(link.url) || 'Add URL' : 'Add URL'}
         showMinimize={false}
         showMaximize={false}
         draggable
@@ -190,6 +192,11 @@ export function StandaloneAddUrlWindow({ linkId }: { linkId: string }) {
               initialUrl={link.url}
               pendingLinkId={link.id}
               initialCookies={link.cookies}
+              // Round 78 — the row's resolved-video filename
+              // prefills the dialog, and its headers ride the
+              // size probe.
+              captureTitle={link.filename ?? null}
+              initialHeaders={link.headers ?? null}
               onClose={handleClose}
               onAdded={handleAdded}
               onLateError={(message) => setLateError(message)}

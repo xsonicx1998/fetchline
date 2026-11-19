@@ -98,6 +98,23 @@ CREATE TABLE IF NOT EXISTS downloads (
   scan_status TEXT,
   scan_detail TEXT,
   scan_scanned_at TEXT,
+  -- Round 78 (2026-11-19): yt-dlp platform downloads. A DASH
+  -- (video+audio) download is a PARENT row with two CHILD rows:
+  -- `parent_id` points at the parent, `child_kind` is 'video' or
+  -- 'audio' (NULL on parents and normal downloads); `merge_status`
+  -- is the parent's ffmpeg merge state (NULL unless a parent:
+  -- 'pending' | 'merging' | 'done' | 'failed'). `source_url` is
+  -- the page URL the video was resolved from and `format_id` the
+  -- yt-dlp format id — both are what a 403/410 re-resolve needs.
+  -- `direct_ytdlp` marks a (B)-fallback download: yt-dlp itself
+  -- downloads it (fragmented/manifest formats the engine cannot
+  -- fetch), instead of the segmented engine.
+  parent_id TEXT REFERENCES downloads(id) ON DELETE CASCADE,
+  child_kind TEXT,
+  merge_status TEXT,
+  source_url TEXT,
+  format_id TEXT,
+  direct_ytdlp INTEGER NOT NULL DEFAULT 0,
   referrer TEXT,
   headers_json TEXT NOT NULL DEFAULT '{}',
   cookies_json TEXT NOT NULL DEFAULT '{}',
@@ -269,6 +286,13 @@ CREATE TABLE IF NOT EXISTS settings (
   quota_enabled INTEGER NOT NULL DEFAULT 0,
   quota_mb INTEGER,                 -- NULL = no quota configured
   quota_hours INTEGER,              -- NULL = no quota configured
+  -- Round 78 (2026-11-19): platform downloads (YouTube /
+  -- Facebook / Instagram / TikTok) via yt-dlp — 1 = on (default).
+  -- `ytdlp_extractor_args` is a hidden override (e.g.
+  -- youtube:player_client=android_vr,tv) for field fixes — no
+  -- Settings UI in v1.
+  platform_downloads_enabled INTEGER NOT NULL DEFAULT 1,
+  ytdlp_extractor_args TEXT,
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -325,6 +349,20 @@ CREATE TABLE IF NOT EXISTS pending_links (
   download_id TEXT REFERENCES downloads(id) ON DELETE SET NULL,
   error TEXT,
   cookies TEXT,
+  -- Round 78 (2026-11-19): resolved-video captures carry what
+  -- the Add URL dialog and the engine need — `filename`
+  -- (sanitized video title, never videoplayback.mp4), `headers`
+  -- (JSON map of User-Agent/Referer from yt-dlp, Cookie keys
+  -- stripped), `source_url` (page URL, for re-resolve),
+  -- `format_id`, `audio_url` (the DASH pair's audio stream, NULL
+  -- otherwise), `fragmented` (1 = (B) fallback: yt-dlp itself
+  -- downloads this link).
+  filename TEXT,
+  headers TEXT,
+  source_url TEXT,
+  format_id TEXT,
+  audio_url TEXT,
+  fragmented INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

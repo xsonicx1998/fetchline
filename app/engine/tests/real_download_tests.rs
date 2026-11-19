@@ -52,8 +52,7 @@ use fetchline_engine::{probe, DownloadManager, Store};
 /// Pinned LICENSE URL (commit 7255dff9, on main).
 const PINNED_URL: &str = "https://raw.githubusercontent.com/mohandksonic-ui/fetchline/7255dff9ec2863b16bda2772a839654b51274c32/LICENSE";
 /// SHA-256 of the repo's LICENSE (1,079 bytes, MIT text).
-const EXPECTED_SHA256: &str =
-    "c2ef3696eecd8d51c0e615afe9437e5d620abcd9272b9d9f4bcbbd1e4a95f793";
+const EXPECTED_SHA256: &str = "c2ef3696eecd8d51c0e615afe9437e5d620abcd9272b9d9f4bcbbd1e4a95f793";
 /// The file is tiny; 90 s is generous even on a cold CI runner.
 const WAIT_SECS: u64 = 90;
 
@@ -84,7 +83,13 @@ async fn real_download_of_pinned_license_matches_sha256() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let (id, _) = mgr
-        .add_download(PINNED_URL, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            PINNED_URL,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();

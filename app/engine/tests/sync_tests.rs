@@ -31,9 +31,18 @@ fn test_mgr(dir: &std::path::Path) -> Arc<DownloadManager> {
 /// Create a periodic queue with the given check interval (minutes).
 async fn make_periodic(mgr: &Arc<DownloadManager>, name: &str, interval: i64) -> String {
     let queue = mgr.create_queue(name).unwrap();
-    mgr.update_queue(&queue.id, "periodic", None, None, false, "none", None, Some(interval))
-        .await
-        .unwrap();
+    mgr.update_queue(
+        &queue.id,
+        "periodic",
+        None,
+        None,
+        false,
+        "none",
+        None,
+        Some(interval),
+    )
+    .await
+    .unwrap();
     queue.id
 }
 
@@ -110,7 +119,10 @@ async fn sync_skips_unchanged_file_with_zero_get_requests() {
     let id = add_completed(&mgr, &server.url, &dir, "file.bin", &queue).await;
     let row = mgr.get_download(&id).unwrap().unwrap();
     let before_bytes = std::fs::read(&row.save_path).unwrap();
-    let before_mtime = std::fs::metadata(&row.save_path).unwrap().modified().unwrap();
+    let before_mtime = std::fs::metadata(&row.save_path)
+        .unwrap()
+        .modified()
+        .unwrap();
     let gets_before = server.get_requests();
     let heads_before = server.head_requests();
 
@@ -123,12 +135,23 @@ async fn sync_skips_unchanged_file_with_zero_get_requests() {
     assert_eq!(result.files[0].status, "unchanged");
     // Unchanged means skipped at the probe: HEAD only, zero GETs —
     // not a single byte was re-downloaded.
-    assert_eq!(server.get_requests(), gets_before, "an unchanged file must not be re-downloaded");
-    assert_eq!(server.head_requests(), heads_before + 1, "the sync must probe once per file");
+    assert_eq!(
+        server.get_requests(),
+        gets_before,
+        "an unchanged file must not be re-downloaded"
+    );
+    assert_eq!(
+        server.head_requests(),
+        heads_before + 1,
+        "the sync must probe once per file"
+    );
     // The file on disk is untouched, and it stays in the queue.
     assert_eq!(std::fs::read(&row.save_path).unwrap(), before_bytes);
     assert_eq!(
-        std::fs::metadata(&row.save_path).unwrap().modified().unwrap(),
+        std::fs::metadata(&row.save_path)
+            .unwrap()
+            .modified()
+            .unwrap(),
         before_mtime,
         "an unchanged file must not be rewritten"
     );
@@ -159,7 +182,11 @@ async fn sync_redownloads_changed_file_byte_identical() {
     assert_eq!(row.size_bytes, Some(513 * 1024));
     assert_eq!(row.etag.as_deref(), Some("\"v2\""));
     assert_eq!(std::fs::read(&row.save_path).unwrap(), payload(513 * 1024));
-    assert_eq!(mgr.list_queue_files(&queue).unwrap().len(), 1, "a re-downloaded file stays in its sync queue");
+    assert_eq!(
+        mgr.list_queue_files(&queue).unwrap().len(),
+        1,
+        "a re-downloaded file stays in its sync queue"
+    );
     let q = mgr.get_queue(&queue).await.unwrap().unwrap();
     assert_eq!(q.last_sync_changed, 1);
 }
@@ -198,7 +225,11 @@ async fn sync_reports_remote_deleted_file_and_keeps_the_local_copy() {
     assert_eq!(result.changed, 0);
     assert_eq!(result.files[0].status, "removed");
     assert!(
-        result.files[0].message.as_deref().unwrap_or("").contains("404"),
+        result.files[0]
+            .message
+            .as_deref()
+            .unwrap_or("")
+            .contains("404"),
         "the report must say the file is gone: {:?}",
         result.files[0].message
     );
@@ -229,8 +260,15 @@ async fn sync_does_not_redownload_everything() {
     assert_eq!(result.changed, 1);
     assert_eq!(result.unchanged, 1);
     assert_eq!(result.files.len(), 2);
-    assert_eq!(server_a.get_requests(), gets_a_before, "the unchanged server must see no GET");
-    assert!(server_b.get_requests() > gets_b_before, "the changed file must be re-downloaded");
+    assert_eq!(
+        server_a.get_requests(),
+        gets_a_before,
+        "the unchanged server must see no GET"
+    );
+    assert!(
+        server_b.get_requests() > gets_b_before,
+        "the changed file must be re-downloaded"
+    );
     assert_eq!(
         std::fs::read(&mgr.get_download(&id_a).unwrap().unwrap().save_path).unwrap(),
         payload(512 * 1024)
@@ -311,11 +349,19 @@ async fn sync_skips_excluded_site_without_any_request() {
     assert_eq!(result.skipped, 1);
     assert_eq!(result.files[0].status, "skipped");
     assert!(
-        result.files[0].message.as_deref().unwrap_or("").contains("excluded"),
+        result.files[0]
+            .message
+            .as_deref()
+            .unwrap_or("")
+            .contains("excluded"),
         "the skip must say why: {:?}",
         result.files[0].message
     );
-    assert_eq!(server.head_requests(), heads_before, "an excluded site must not even be probed");
+    assert_eq!(
+        server.head_requests(),
+        heads_before,
+        "an excluded site must not even be probed"
+    );
     assert_eq!(server.get_requests(), gets_before);
 }
 
@@ -354,7 +400,10 @@ async fn sync_redownloads_a_file_whose_local_copy_is_gone() {
     std::fs::remove_file(&path).unwrap();
 
     let result = mgr.run_sync_queue(&queue).await.unwrap();
-    assert_eq!(result.changed, 1, "a missing local file must be fetched again");
+    assert_eq!(
+        result.changed, 1,
+        "a missing local file must be fetched again"
+    );
     assert_eq!(std::fs::read(&path).unwrap(), payload(512 * 1024));
 }
 
@@ -425,27 +474,66 @@ async fn sync_tick_respects_the_start_stop_window() {
     let mgr = test_mgr(&dir);
     // Start time in the future: no sync yet.
     let future = mgr.create_queue("Future").unwrap();
-    mgr.update_queue(&future.id, "periodic", Some(&iso_in(3600)), None, false, "none", None, Some(5))
-        .await
-        .unwrap();
+    mgr.update_queue(
+        &future.id,
+        "periodic",
+        Some(&iso_in(3600)),
+        None,
+        false,
+        "none",
+        None,
+        Some(5),
+    )
+    .await
+    .unwrap();
     let _id = add_completed(&mgr, &server.url, &dir, "f.bin", &future.id).await;
     mgr.scheduler_tick_at(now_unix()).await.unwrap();
     tokio::time::sleep(Duration::from_secs(1)).await;
-    assert!(mgr.get_queue(&future.id).await.unwrap().unwrap().last_sync_at.is_none());
+    assert!(mgr
+        .get_queue(&future.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .last_sync_at
+        .is_none());
     // Window already passed: never syncs.
     let stale = mgr.create_queue("Stale").unwrap();
-    mgr.update_queue(&stale.id, "periodic", Some(&iso_in(-3600)), Some(&iso_in(-60)), false, "none", None, Some(5))
-        .await
-        .unwrap();
+    mgr.update_queue(
+        &stale.id,
+        "periodic",
+        Some(&iso_in(-3600)),
+        Some(&iso_in(-60)),
+        false,
+        "none",
+        None,
+        Some(5),
+    )
+    .await
+    .unwrap();
     let _id2 = add_completed(&mgr, &server.url, &dir, "s.bin", &stale.id).await;
     mgr.scheduler_tick_at(now_unix()).await.unwrap();
     tokio::time::sleep(Duration::from_secs(1)).await;
-    assert!(mgr.get_queue(&stale.id).await.unwrap().unwrap().last_sync_at.is_none());
+    assert!(mgr
+        .get_queue(&stale.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .last_sync_at
+        .is_none());
     // Inside the window: syncs.
     let live = mgr.create_queue("Live").unwrap();
-    mgr.update_queue(&live.id, "periodic", Some(&iso_in(-60)), Some(&iso_in(3600)), false, "none", None, Some(5))
-        .await
-        .unwrap();
+    mgr.update_queue(
+        &live.id,
+        "periodic",
+        Some(&iso_in(-60)),
+        Some(&iso_in(3600)),
+        false,
+        "none",
+        None,
+        Some(5),
+    )
+    .await
+    .unwrap();
     let _id3 = add_completed(&mgr, &server.url, &dir, "l.bin", &live.id).await;
     mgr.scheduler_tick_at(now_unix()).await.unwrap();
     assert!(wait_for_sync(&mgr, &live.id, 30).await);
@@ -488,8 +576,15 @@ async fn sync_tick_does_not_fight_a_one_time_drain() {
     // (same pattern as the finished-file drain wait in
     // engine_tests.rs) before asserting.
     assert!(wait_for_queue_empty(&mgr, &drain.id, 30).await);
-    assert!(mgr.list_queue_files(&drain.id).unwrap().is_empty(), "the one-time drain still empties its queue");
-    assert_eq!(mgr.list_queue_files(&queue).unwrap().len(), 1, "the sync queue keeps its files");
+    assert!(
+        mgr.list_queue_files(&drain.id).unwrap().is_empty(),
+        "the one-time drain still empties its queue"
+    );
+    assert_eq!(
+        mgr.list_queue_files(&queue).unwrap().len(),
+        1,
+        "the sync queue keeps its files"
+    );
 }
 
 #[tokio::test]
@@ -517,7 +612,10 @@ async fn sync_redownloads_on_last_modified_only_change() {
     server.bump_last_modified();
 
     let result = mgr.run_sync_queue(&queue).await.unwrap();
-    assert_eq!(result.changed, 1, "a Last-Modified-only change must re-download");
+    assert_eq!(
+        result.changed, 1,
+        "a Last-Modified-only change must re-download"
+    );
     assert_eq!(result.unchanged, 0);
     assert_eq!(result.files[0].status, "changed");
     let row = mgr.get_download(&id).unwrap().unwrap();
@@ -547,7 +645,10 @@ async fn sync_skips_when_last_modified_unchanged() {
     let id = add_completed(&mgr, &server.url, &dir, "file.bin", &queue).await;
     let row = mgr.get_download(&id).unwrap().unwrap();
     let before_bytes = std::fs::read(&row.save_path).unwrap();
-    let before_mtime = std::fs::metadata(&row.save_path).unwrap().modified().unwrap();
+    let before_mtime = std::fs::metadata(&row.save_path)
+        .unwrap()
+        .modified()
+        .unwrap();
     let gets_before = server.get_requests();
     let heads_before = server.head_requests();
 
@@ -555,11 +656,22 @@ async fn sync_skips_when_last_modified_unchanged() {
     assert_eq!(result.unchanged, 1);
     assert_eq!(result.changed, 0);
     assert_eq!(result.files[0].status, "unchanged");
-    assert_eq!(server.get_requests(), gets_before, "an unchanged file must not be re-downloaded");
-    assert_eq!(server.head_requests(), heads_before + 1, "the sync must probe once per file");
+    assert_eq!(
+        server.get_requests(),
+        gets_before,
+        "an unchanged file must not be re-downloaded"
+    );
+    assert_eq!(
+        server.head_requests(),
+        heads_before + 1,
+        "the sync must probe once per file"
+    );
     assert_eq!(std::fs::read(&row.save_path).unwrap(), before_bytes);
     assert_eq!(
-        std::fs::metadata(&row.save_path).unwrap().modified().unwrap(),
+        std::fs::metadata(&row.save_path)
+            .unwrap()
+            .modified()
+            .unwrap(),
         before_mtime,
         "an unchanged file must not be rewritten"
     );
@@ -570,7 +682,10 @@ async fn sync_redownloads_on_size_only_change() {
     // Size is the only signal: no ETag, no Last-Modified, and the
     // file grows by 1 KiB. (The existing growth test bumps the ETag
     // too, so it never isolated the size comparison.)
-    let server = MockServer::start(MockConfig { no_etag: true, ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        no_etag: true,
+        ..Default::default()
+    });
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
     let queue = make_periodic(&mgr, "Sync", 30).await;
@@ -592,7 +707,10 @@ async fn sync_skips_when_size_only_unchanged() {
     // Same fixture, no change: the size comparison alone must be
     // enough to call the file unchanged — no ETag or Last-Modified
     // is needed to skip it.
-    let server = MockServer::start(MockConfig { no_etag: true, ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        no_etag: true,
+        ..Default::default()
+    });
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
     let queue = make_periodic(&mgr, "Sync", 30).await;
@@ -603,7 +721,11 @@ async fn sync_skips_when_size_only_unchanged() {
     let result = mgr.run_sync_queue(&queue).await.unwrap();
     assert_eq!(result.unchanged, 1);
     assert_eq!(result.changed, 0);
-    assert_eq!(server.get_requests(), gets_before, "an unchanged file must not be re-downloaded");
+    assert_eq!(
+        server.get_requests(),
+        gets_before,
+        "an unchanged file must not be re-downloaded"
+    );
     assert_eq!(server.head_requests(), heads_before + 1);
 }
 
@@ -620,24 +742,47 @@ async fn sync_interval_boundaries_accept_5_min_and_1_week_reject_below_and_above
         let mgr = Arc::clone(mgr);
         let id = id.to_string();
         async move {
-            mgr.update_queue(&id, "periodic", None, None, false, "none", None, Some(minutes))
-                .await
+            mgr.update_queue(
+                &id,
+                "periodic",
+                None,
+                None,
+                false,
+                "none",
+                None,
+                Some(minutes),
+            )
+            .await
         }
     };
     let err = save(&mgr, &queue.id, 4).await.unwrap_err();
-    assert!(err.to_string().contains("at least every 5 minutes"), "{err}");
+    assert!(
+        err.to_string().contains("at least every 5 minutes"),
+        "{err}"
+    );
     let row = save(&mgr, &queue.id, 5).await.unwrap();
     assert_eq!(row.sync_interval_minutes, Some(5));
     // A rejected save stores nothing: the interval is still 5.
     let err = save(&mgr, &queue.id, 10_081).await.unwrap_err();
-    assert!(err.to_string().contains("maximum is 10080 minutes"), "{err}");
+    assert!(
+        err.to_string().contains("maximum is 10080 minutes"),
+        "{err}"
+    );
     assert_eq!(
-        mgr.get_queue(&queue.id).await.unwrap().unwrap().sync_interval_minutes,
+        mgr.get_queue(&queue.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .sync_interval_minutes,
         Some(5),
         "a rejected interval must not overwrite the saved one"
     );
     let row = save(&mgr, &queue.id, 10_080).await.unwrap();
-    assert_eq!(row.sync_interval_minutes, Some(10_080), "exactly one week is accepted");
+    assert_eq!(
+        row.sync_interval_minutes,
+        Some(10_080),
+        "exactly one week is accepted"
+    );
 }
 
 #[tokio::test]
@@ -657,7 +802,10 @@ async fn sync_of_an_empty_queue_finishes_cleanly() {
     assert_eq!(result.skipped, 0);
     assert!(result.files.is_empty());
     let q = mgr.get_queue(&queue).await.unwrap().unwrap();
-    assert!(q.last_sync_at.is_some(), "even an empty sync records when it ran");
+    assert!(
+        q.last_sync_at.is_some(),
+        "even an empty sync records when it ran"
+    );
     assert_eq!(q.last_sync_changed, 0);
     assert_eq!(q.last_sync_unchanged, 0);
 }
@@ -697,28 +845,49 @@ async fn sync_skips_a_file_that_is_mid_download_and_leaves_it_byte_identical() {
     let heads_before = server.head_requests();
 
     let result = mgr.run_sync_queue(&queue).await.unwrap();
-    assert_eq!(result.skipped, 1, "a mid-download file must be skipped, not re-downloaded");
+    assert_eq!(
+        result.skipped, 1,
+        "a mid-download file must be skipped, not re-downloaded"
+    );
     assert_eq!(result.changed, 0);
     assert_eq!(result.failed, 0);
     assert_eq!(result.files[0].status, "skipped");
     assert!(
-        result.files[0].message.as_deref().unwrap_or("").contains("not finished"),
+        result.files[0]
+            .message
+            .as_deref()
+            .unwrap_or("")
+            .contains("not finished"),
         "the skip must say why: {:?}",
         result.files[0].message
     );
     // The sync did not even probe it, and the download is untouched.
-    assert_eq!(server.head_requests(), heads_before, "a mid-download file must not be probed");
-    assert_eq!(mgr.get_download(&id).unwrap().unwrap().status, "downloading");
+    assert_eq!(
+        server.head_requests(),
+        heads_before,
+        "a mid-download file must not be probed"
+    );
+    assert_eq!(
+        mgr.get_download(&id).unwrap().unwrap().status,
+        "downloading"
+    );
     // The download then finishes normally, byte-identical — the
     // sync did not corrupt it.
     assert!(wait_for_status(&mgr, &id, "complete", 30).await);
     let row = mgr.get_download(&id).unwrap().unwrap();
-    assert_eq!(std::fs::read(&row.save_path).unwrap(), payload(2 * 1024 * 1024));
+    assert_eq!(
+        std::fs::read(&row.save_path).unwrap(),
+        payload(2 * 1024 * 1024)
+    );
     assert!(
         !std::path::Path::new(&format!("{}.part", row.save_path)).exists(),
         "no .part file may be left behind"
     );
-    assert_eq!(mgr.list_queue_files(&queue).unwrap().len(), 1, "the file stays in its sync queue");
+    assert_eq!(
+        mgr.list_queue_files(&queue).unwrap().len(),
+        1,
+        "the file stays in its sync queue"
+    );
 }
 
 #[tokio::test]
@@ -740,7 +909,11 @@ async fn sync_redownloads_a_file_that_shrank_byte_identical() {
     assert_eq!(row.status, "complete");
     assert_eq!(row.size_bytes, Some(256 * 1024));
     let bytes = std::fs::read(&row.save_path).unwrap();
-    assert_eq!(bytes.len(), 256 * 1024, "the local file must be exactly the smaller file");
+    assert_eq!(
+        bytes.len(),
+        256 * 1024,
+        "the local file must be exactly the smaller file"
+    );
     assert_eq!(bytes, payload(256 * 1024));
     assert_eq!(mgr.list_queue_files(&queue).unwrap().len(), 1);
 }
@@ -776,14 +949,26 @@ async fn pre_sync_database_migrates_queues_with_sync_columns() {
     let store = Store::open(&path).unwrap();
     let queues = store.list_queues().unwrap();
     // Two rows: the seeded main queue plus the pre-sync one.
-    let old = queues.iter().find(|q| q.id == "q-old").expect("the old queue must survive the migration");
+    let old = queues
+        .iter()
+        .find(|q| q.id == "q-old")
+        .expect("the old queue must survive the migration");
     assert_eq!(old.name, "Old queue");
     assert_eq!(old.sync_interval_minutes, None);
     assert_eq!(old.last_sync_at, None);
     let mgr = DownloadManager::new(Arc::new(store), 4);
-    mgr.update_queue("q-old", "periodic", None, None, false, "none", None, Some(60))
-        .await
-        .unwrap();
+    mgr.update_queue(
+        "q-old",
+        "periodic",
+        None,
+        None,
+        false,
+        "none",
+        None,
+        Some(60),
+    )
+    .await
+    .unwrap();
     let row = mgr.get_queue("q-old").await.unwrap().unwrap();
     assert_eq!(row.schedule_type, "periodic");
     assert_eq!(row.sync_interval_minutes, Some(60));

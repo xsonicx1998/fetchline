@@ -47,6 +47,10 @@ interface AddDownloadDialogProps {
   /** Round 67: the capture's browser cookies (JSON array), so
    *  the size probe works on cookie-gated links. */
   initialCookies?: string | null
+  /** Round 78: a resolved video's headers (yt-dlp's
+   *  `http_headers` JSON), so the size probe sends the
+   *  User-Agent / Referer the stream host expects. */
+  initialHeaders?: string | null
   /** Round 74 (12): capture mode — the dialog shows a captured
    *  link (extension or clipboard), not a typed URL: the file
    *  name is the title instead of "Add URL", and the URL field
@@ -129,6 +133,7 @@ export function AddDownloadDialog({
   onSubmitError,
   pendingLinkId = null,
   initialCookies = null,
+  initialHeaders = null,
   captureMode = false,
   captureTitle = null,
   alreadyInList = false,
@@ -175,7 +180,10 @@ export function AddDownloadDialog({
   useEffect(() => {
     if (open) {
       setUrl(initialUrl)
-      setFilename('')
+      // Round 78 — a filename from the pending row (a resolved
+      // video's sanitized title) is already the right name, so
+      // prefill it at once instead of waiting for the probe.
+      setFilename(captureTitle ?? '')
       setFolder('')
       setCategory('')
       setCap(0)
@@ -186,11 +194,14 @@ export function AddDownloadDialog({
       setError(null)
       setBusy(false)
       folderEdited.current = false
-      userEditedFilename.current = false
+      // Round 78 — a row filename must not be overwritten by
+      // the probe: the probe derives its name from the URL, and
+      // for a googlevideo link that is "videoplayback".
+      userEditedFilename.current = captureTitle != null && captureTitle.trim() !== ''
       probedUrl.current = ''
       urlRef.current?.focus()
     }
-  }, [open, initialUrl, pendingLinkId])
+  }, [open, initialUrl, pendingLinkId, captureTitle])
 
   useEffect(() => {
     if (!open) return
@@ -242,7 +253,10 @@ export function AddDownloadDialog({
     const reqId = ++probeReqId.current
     const timer = window.setTimeout(async () => {
       try {
-        const info: ProbeInfo = await probeUrl(target, initialCookies)
+        // Round 78 — a resolved video's headers ride the probe,
+        // so a stream host that expects its own User-Agent /
+        // Referer answers instead of 403.
+        const info: ProbeInfo = await probeUrl(target, initialCookies, initialHeaders)
         if (probeReqId.current !== reqId || probedUrl.current !== target) return
         setFileSize(info.size ?? null)
         setProbeError(null)
@@ -257,7 +271,7 @@ export function AddDownloadDialog({
     }, 500)
     probedUrl.current = target
     return () => window.clearTimeout(timer)
-  }, [open, url, initialCookies])
+  }, [open, url, initialCookies, initialHeaders])
 
   // Round 67 — IDM behaviour: picking a category fills the
   // folder with that category's default folder (the engine

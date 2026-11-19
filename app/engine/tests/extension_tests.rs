@@ -11,8 +11,8 @@ mod mock;
 
 use std::io::{Cursor, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -72,7 +72,9 @@ fn framing_round_trip_download_link() {
 
 #[test]
 fn framing_empty_stream_is_clean_eof() {
-    assert!(decode_message(&mut Cursor::new(Vec::new())).unwrap().is_none());
+    assert!(decode_message(&mut Cursor::new(Vec::new()))
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -97,7 +99,10 @@ fn host_of_url_extracts_lowercase_host() {
         Some("sub.example.com")
     );
     assert_eq!(host_of_url("not a url"), None);
-    assert_eq!(host_of_url("ftp://files.example.org/x.zip").as_deref(), Some("files.example.org"));
+    assert_eq!(
+        host_of_url("ftp://files.example.org/x.zip").as_deref(),
+        Some("files.example.org")
+    );
 }
 
 // -- host boundary: enqueue + excluded sites + integration flag (c) ------
@@ -118,10 +123,16 @@ fn host_enqueues_download_link() {
     let pending = store.list_pending_links(Some("pending")).unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].url, "https://example.com/file.zip");
-    assert_eq!(pending[0].referrer.as_deref(), Some("https://example.com/page"));
+    assert_eq!(
+        pending[0].referrer.as_deref(),
+        Some("https://example.com/page")
+    );
     assert_eq!(pending[0].source, "browser");
     assert_eq!(pending[0].status, "pending");
-    assert_eq!(reply.pending_link_id.as_deref(), Some(pending[0].id.as_str()));
+    assert_eq!(
+        reply.pending_link_id.as_deref(),
+        Some(pending[0].id.as_str())
+    );
 }
 
 #[test]
@@ -137,7 +148,10 @@ fn host_rejects_invalid_url_without_enqueueing() {
         },
     );
     assert!(!reply.ok);
-    assert!(store.list_pending_links(Some("pending")).unwrap().is_empty());
+    assert!(store
+        .list_pending_links(Some("pending"))
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -242,6 +256,7 @@ fn host_video_found_enqueues_a_video() {
                 live: false,
                 drm: false,
                 note: None,
+                ..Default::default()
             }],
             cookies: vec![],
         },
@@ -272,7 +287,9 @@ fn host_download_all_with_links_enqueues_each() {
     let pending = store.list_pending_links(Some("pending")).unwrap();
     assert_eq!(pending.len(), 2);
     assert!(pending.iter().all(|p| p.source == "download_all"));
-    assert!(pending.iter().all(|p| p.referrer.as_deref() == Some("https://example.com/page.html")));
+    assert!(pending
+        .iter()
+        .all(|p| p.referrer.as_deref() == Some("https://example.com/page.html")));
 }
 
 // -- drain through the real add_download path (b, d) ----------------------
@@ -296,7 +313,9 @@ async fn drain_leaves_browser_capture_for_the_add_url_dialog() {
         },
     );
     assert!(reply.ok, "reply: {:?}", reply);
-    let pending_id = store.list_pending_links(Some("pending")).unwrap()[0].id.clone();
+    let pending_id = store.list_pending_links(Some("pending")).unwrap()[0]
+        .id
+        .clone();
     let summary = mgr.drain_pending_links().await.unwrap();
     assert!(
         summary.accepted.is_empty(),
@@ -327,7 +346,10 @@ async fn drain_leaves_browser_capture_for_the_add_url_dialog() {
     let dl = mgr.get_download(&download_id).unwrap().unwrap();
     assert_eq!(dl.downloaded_bytes, 512 * 1024);
     assert_eq!(std::fs::read(&dl.save_path).unwrap(), payload(512 * 1024));
-    assert!(store.list_pending_links(Some("pending")).unwrap().is_empty());
+    assert!(store
+        .list_pending_links(Some("pending"))
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -358,7 +380,11 @@ async fn drain_skips_browser_and_video_rows_but_drains_download_all() {
     assert_eq!(summary.accepted[0].0, all.id);
     assert!(summary.rejected.is_empty());
     let pending = store.list_pending_links(Some("pending")).unwrap();
-    assert_eq!(pending.len(), 2, "the browser and video rows must stay pending");
+    assert_eq!(
+        pending.len(),
+        2,
+        "the browser and video rows must stay pending"
+    );
     assert!(pending.iter().any(|r| r.source == "browser"));
     assert!(pending.iter().any(|r| r.source == "video"));
 }
@@ -400,7 +426,11 @@ async fn stale_browser_capture_expires_in_drain() {
         row.error
     );
     let pending = store.list_pending_links(Some("pending")).unwrap();
-    assert_eq!(pending.len(), 1, "only the fresh video row must stay pending");
+    assert_eq!(
+        pending.len(),
+        1,
+        "only the fresh video row must stay pending"
+    );
     assert_eq!(pending[0].id, fresh.id);
 }
 
@@ -418,7 +448,10 @@ async fn confirm_pending_link_twice_is_an_error() {
         .confirm_pending_link(&row.id, None, None, None, None, None, false)
         .await
         .unwrap();
-    assert_eq!(mgr.get_download(&download_id).unwrap().unwrap().status, "queued");
+    assert_eq!(
+        mgr.get_download(&download_id).unwrap().unwrap().status,
+        "queued"
+    );
     let err = mgr
         .confirm_pending_link(&row.id, None, None, None, None, None, false)
         .await
@@ -464,9 +497,14 @@ async fn description_round_trip() {
         .await
         .unwrap();
     assert_eq!(mgr.get_download(&id).unwrap().unwrap().description, None);
-    mgr.set_download_description(&id, Some("  my note  ")).unwrap();
+    mgr.set_download_description(&id, Some("  my note  "))
+        .unwrap();
     assert_eq!(
-        mgr.get_download(&id).unwrap().unwrap().description.as_deref(),
+        mgr.get_download(&id)
+            .unwrap()
+            .unwrap()
+            .description
+            .as_deref(),
         Some("my note"),
         "the note is trimmed on write"
     );
@@ -484,7 +522,10 @@ async fn probe_url_for_capture_uses_the_capture_cookies() {
     let server = CookieGatedServer::start(true);
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
-    let err = mgr.probe_url_for_capture(&server.url, None).await.unwrap_err();
+    let err = mgr
+        .probe_url_for_capture(&server.url, None)
+        .await
+        .unwrap_err();
     assert!(err.to_string().contains("401"), "error: {err}");
     let cookies = json!([{ "name": DUMMY_COOKIE_NAME, "value": DUMMY_COOKIE_VALUE }]).to_string();
     let info = mgr
@@ -492,7 +533,10 @@ async fn probe_url_for_capture_uses_the_capture_cookies() {
         .await
         .unwrap();
     assert_eq!(info.size, Some(64 * 1024));
-    assert!(server.cookie_seen() >= 1, "the probe must have sent the cookies");
+    assert!(
+        server.cookie_seen() >= 1,
+        "the probe must have sent the cookies"
+    );
 }
 
 #[tokio::test]
@@ -578,7 +622,10 @@ fn pre_m2_database_migrates_settings_with_browser_start_drained() {
     let store = Store::open(&path).unwrap();
     let settings = store.get_settings().unwrap();
     assert_eq!(settings.default_download_folder, "/tmp/old-downloads");
-    assert!(settings.browser_start_drained, "migration must default start-drained to ON");
+    assert!(
+        settings.browser_start_drained,
+        "migration must default start-drained to ON"
+    );
 }
 
 #[test]
@@ -638,7 +685,10 @@ async fn drain_rejects_excluded_site_at_drain_time() {
     assert!(summary.rejected[0].1.contains("excluded"));
     // Nothing was downloaded, and the row records the reason.
     assert!(mgr.list_downloads().unwrap().is_empty());
-    let row = store.get_pending_link(&summary.rejected[0].0).unwrap().unwrap();
+    let row = store
+        .get_pending_link(&summary.rejected[0].0)
+        .unwrap()
+        .unwrap();
     assert_eq!(row.status, "rejected");
     assert!(row.error.as_deref().unwrap().contains("excluded"));
 }
@@ -688,8 +738,15 @@ async fn drain_duplicate_url_gets_different_save_path() {
         .iter()
         .map(|(_, id)| mgr.get_download(id).unwrap().unwrap().save_path)
         .collect();
-    assert_ne!(paths[0], paths[1], "duplicate guard must suffix the second path");
-    assert!(paths[1].contains("(2)"), "second path should be suffixed: {}", paths[1]);
+    assert_ne!(
+        paths[0], paths[1],
+        "duplicate guard must suffix the second path"
+    );
+    assert!(
+        paths[1].contains("(2)"),
+        "second path should be suffixed: {}",
+        paths[1]
+    );
 }
 
 #[tokio::test]
@@ -712,7 +769,10 @@ async fn drain_marks_dead_link_rejected_and_keeps_going() {
     let summary = mgr.drain_pending_links().await.unwrap();
     assert_eq!(summary.accepted.len(), 1);
     assert_eq!(summary.rejected.len(), 1);
-    assert!(store.list_pending_links(Some("pending")).unwrap().is_empty());
+    assert!(store
+        .list_pending_links(Some("pending"))
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -770,7 +830,11 @@ fn host_download_all_all_skipped_is_an_error() {
             links: vec!["https://example.com/a.zip".to_string()],
         },
     );
-    assert!(!reply.ok, "all-skipped download_all must be an error: {:?}", reply);
+    assert!(
+        !reply.ok,
+        "all-skipped download_all must be an error: {:?}",
+        reply
+    );
     assert!(reply.error.as_deref().unwrap().contains("turned off"));
     assert!(store.list_pending_links(None).unwrap().is_empty());
 }
@@ -805,15 +869,34 @@ fn extension_manifest_is_mv3_and_minimal() {
     // the exact URL being handed over (background.js `cookiesFor`).
     // Firefox needs a stable add-on id so its host manifest can
     // name it in allowed_extensions (BUG-023).
-    for p in ["activeTab", "contextMenus", "cookies", "downloads", "storage", "nativeMessaging", "scripting"] {
+    for p in [
+        "activeTab",
+        "contextMenus",
+        "cookies",
+        "downloads",
+        "storage",
+        "nativeMessaging",
+        "scripting",
+    ] {
         assert!(permissions.contains(&p), "missing permission {p}");
     }
     for forbidden in ["tabs", "webRequest", "history"] {
-        assert!(!permissions.contains(&forbidden), "must not request {forbidden}");
+        assert!(
+            !permissions.contains(&forbidden),
+            "must not request {forbidden}"
+        );
     }
-    let gecko_id = m["browser_specific_settings"]["gecko"]["id"].as_str().unwrap_or("");
-    assert!(!gecko_id.is_empty(), "browser_specific_settings.gecko.id must be set");
-    assert!(m.get("host_permissions").is_none(), "no host_permissions expected");
+    let gecko_id = m["browser_specific_settings"]["gecko"]["id"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        !gecko_id.is_empty(),
+        "browser_specific_settings.gecko.id must be set"
+    );
+    assert!(
+        m.get("host_permissions").is_none(),
+        "no host_permissions expected"
+    );
     for size in ["16", "32", "48", "128"] {
         assert!(
             m["icons"][size].as_str().is_some(),
@@ -954,8 +1037,7 @@ fn handle_cookie_request(mut stream: TcpStream, require_cookie: bool, cookie_see
     if cookie.is_some() {
         cookie_seen.fetch_add(1, Ordering::SeqCst);
     }
-    let authorised =
-        !require_cookie || cookie.as_deref() == Some("session=test-dummy-value");
+    let authorised = !require_cookie || cookie.as_deref() == Some("session=test-dummy-value");
     if !authorised {
         let _ = stream.write_all(
             b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -1010,8 +1092,14 @@ fn cookies_to_header_validates_pairs() {
     );
     assert_eq!(
         cookies_to_header(&[
-            CookiePair { name: "a".into(), value: "1".into() },
-            CookiePair { name: "b".into(), value: "2".into() },
+            CookiePair {
+                name: "a".into(),
+                value: "1".into()
+            },
+            CookiePair {
+                name: "b".into(),
+                value: "2".into()
+            },
         ])
         .unwrap(),
         "a=1; b=2"
@@ -1030,7 +1118,10 @@ fn cookies_to_header_validates_pairs() {
     .is_err());
     // 33 pairs is too many.
     let many: Vec<CookiePair> = (0..33)
-        .map(|i| CookiePair { name: format!("c{i}"), value: "x".into() })
+        .map(|i| CookiePair {
+            name: format!("c{i}"),
+            value: "x".into(),
+        })
         .collect();
     assert!(cookies_to_header(&many).is_err());
 }
@@ -1055,7 +1146,9 @@ fn host_download_link_with_cookies_stores_them_on_the_row() {
         dummy_cookies()
     );
     // The reply never carries the cookie value back.
-    assert!(!serde_json::to_string(&reply).unwrap().contains(DUMMY_COOKIE_VALUE));
+    assert!(!serde_json::to_string(&reply)
+        .unwrap()
+        .contains(DUMMY_COOKIE_VALUE));
 }
 
 #[test]
@@ -1063,8 +1156,14 @@ fn host_download_link_rejects_an_invalid_cookie() {
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     for cookies in [
-        vec![CookiePair { name: "session".into(), value: "a;b".into() }],
-        vec![CookiePair { name: "bad name".into(), value: "x".into() }],
+        vec![CookiePair {
+            name: "session".into(),
+            value: "a;b".into(),
+        }],
+        vec![CookiePair {
+            name: "bad name".into(),
+            value: "x".into(),
+        }],
     ] {
         let reply = handle_host_message(
             &store,
@@ -1076,7 +1175,10 @@ fn host_download_link_rejects_an_invalid_cookie() {
         );
         assert!(!reply.ok, "reply: {:?}", reply);
     }
-    assert!(store.list_pending_links(Some("pending")).unwrap().is_empty());
+    assert!(store
+        .list_pending_links(Some("pending"))
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -1097,7 +1199,9 @@ async fn drain_cookie_gated_link_downloads_when_cookie_present() {
         },
     );
     assert!(reply.ok, "reply: {:?}", reply);
-    let pending_id = store.list_pending_links(Some("pending")).unwrap()[0].id.clone();
+    let pending_id = store.list_pending_links(Some("pending")).unwrap()[0]
+        .id
+        .clone();
     let summary = mgr.drain_pending_links().await.unwrap();
     assert!(
         summary.accepted.is_empty(),
@@ -1121,9 +1225,15 @@ async fn drain_cookie_gated_link_downloads_when_cookie_present() {
     // session behind.
     let row = store.get_pending_link(&pending_id).unwrap().unwrap();
     assert_eq!(row.status, "accepted");
-    assert_eq!(row.cookies, None, "cookies must be wiped when the row is decided");
+    assert_eq!(
+        row.cookies, None,
+        "cookies must be wiped when the row is decided"
+    );
     // The gated server saw cookies (probe + segments).
-    assert!(server.cookie_seen() >= 1, "server saw no Cookie header at all");
+    assert!(
+        server.cookie_seen() >= 1,
+        "server saw no Cookie header at all"
+    );
 }
 
 #[tokio::test]
@@ -1144,7 +1254,9 @@ async fn drain_cookie_gated_link_rejected_without_cookie() {
         },
     );
     assert!(reply.ok, "reply: {:?}", reply);
-    let pending_id = store.list_pending_links(Some("pending")).unwrap()[0].id.clone();
+    let pending_id = store.list_pending_links(Some("pending")).unwrap()[0]
+        .id
+        .clone();
     let summary = mgr.drain_pending_links().await.unwrap();
     assert!(
         summary.accepted.is_empty(),
@@ -1160,8 +1272,15 @@ async fn drain_cookie_gated_link_rejected_without_cookie() {
     let row = store.get_pending_link(&pending_id).unwrap().unwrap();
     assert_eq!(row.status, "rejected");
     assert_eq!(row.cookies, None);
-    assert!(store.list_pending_links(Some("pending")).unwrap().is_empty());
-    assert_eq!(server.cookie_seen(), 0, "no Cookie header should have been sent");
+    assert!(store
+        .list_pending_links(Some("pending"))
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        server.cookie_seen(),
+        0,
+        "no Cookie header should have been sent"
+    );
 }
 
 #[tokio::test]
@@ -1194,7 +1313,11 @@ async fn drain_sends_cookies_only_to_the_download_that_carries_them() {
     // The gated server saw cookies; the plain one never did, even
     // though both downloads ran in the same manager at the same time.
     assert!(gated.cookie_seen() >= 1);
-    assert_eq!(plain.cookie_seen(), 0, "cookies leaked to a download that carries none");
+    assert_eq!(
+        plain.cookie_seen(),
+        0,
+        "cookies leaked to a download that carries none"
+    );
 }
 
 #[tokio::test]
@@ -1213,24 +1336,29 @@ async fn cookies_are_dropped_when_the_app_restarts() {
             },
         );
         assert!(reply.ok, "reply: {:?}", reply);
-        let pending_id = store.list_pending_links(Some("pending")).unwrap()[0].id.clone();
+        let pending_id = store.list_pending_links(Some("pending")).unwrap()[0]
+            .id
+            .clone();
         // Round 67: the drain leaves the browser capture pending;
         // the dialog's confirm (Download Later) adds it queued
         // without starting — its cookies are wiped when the row
         // is decided, so they live only in this manager's memory.
         let summary = mgr.drain_pending_links().await.unwrap();
         assert!(
-        summary.accepted.is_empty(),
-        "the drain must not auto-add a browser capture: {:?}",
-        summary
-    );
+            summary.accepted.is_empty(),
+            "the drain must not auto-add a browser capture: {:?}",
+            summary
+        );
         let (download_id, _) = mgr
             .confirm_pending_link(&pending_id, None, None, None, None, None, false)
             .await
             .unwrap();
         let row = store.get_pending_link(&pending_id).unwrap().unwrap();
         assert_eq!(row.status, "accepted");
-        assert_eq!(row.cookies, None, "cookies must be wiped when the row is decided");
+        assert_eq!(
+            row.cookies, None,
+            "cookies must be wiped when the row is decided"
+        );
         // The download is queued, not started — its cookies are
         // still only in this manager's memory.
         assert_eq!(

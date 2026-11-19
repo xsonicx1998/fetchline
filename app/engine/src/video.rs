@@ -62,8 +62,8 @@ pub const UNKNOWN_QUALITY: &str = "Unknown quality";
 /// never merged — see the module docs. `.mpd` (DASH) is accepted the
 /// same way: a manifest file, saved as-is, never merged.
 pub const KNOWN_MEDIA_EXTENSIONS: &[&str] = &[
-    "mp4", "webm", "flv", "mp3", "m3u8", "mpd", "mkv", "mov", "avi", "m4v", "m4a", "wav",
-    "ogg", "flac", "aac",
+    "mp4", "webm", "flv", "mp3", "m3u8", "mpd", "mkv", "mov", "avi", "m4v", "m4a", "wav", "ogg",
+    "flac", "aac",
 ];
 
 /// The most variants of one master playlist the desktop scan
@@ -201,8 +201,7 @@ pub fn quality_for(url: &str, width: u32, height: u32) -> String {
 /// docs) — with the playlist facts appended when known.
 pub fn playlist_note(format: &str, live: bool) -> String {
     if format == "MPD" {
-        "DASH manifest — saved as-is; its segments are not merged into one video file."
-            .to_string()
+        "DASH manifest — saved as-is; its segments are not merged into one video file.".to_string()
     } else if live {
         "Live stream — the playlist file is saved as-is; it is not merged into one video file."
             .to_string()
@@ -273,9 +272,7 @@ pub fn parse_m3u8(text: &str) -> Option<HlsPlaylist> {
                 };
                 if k.eq_ignore_ascii_case("RESOLUTION") {
                     if let Some((w, h)) = v.split_once('x') {
-                        if let (Ok(w), Ok(h)) =
-                            (w.trim().parse::<u32>(), h.trim().parse::<u32>())
-                        {
+                        if let (Ok(w), Ok(h)) = (w.trim().parse::<u32>(), h.trim().parse::<u32>()) {
                             resolution = Some((w, h));
                         }
                     }
@@ -292,7 +289,10 @@ pub fn parse_m3u8(text: &str) -> Option<HlsPlaylist> {
             // "METHOD=...", not "#EXT-X-KEY:METHOD=...".
             let method = line["#EXT-X-KEY:".len()..]
                 .split(',')
-                .find_map(|a| a.split_once('=').filter(|(k, _)| k.trim().eq_ignore_ascii_case("METHOD")))
+                .find_map(|a| {
+                    a.split_once('=')
+                        .filter(|(k, _)| k.trim().eq_ignore_ascii_case("METHOD"))
+                })
                 .map(|(_, v)| v.trim().trim_matches('"').to_ascii_uppercase());
             if matches!(method.as_deref(), Some(m) if m != "NONE") {
                 encrypted = true;
@@ -345,7 +345,9 @@ pub fn parse_m3u8(text: &str) -> Option<HlsPlaylist> {
 /// "Unknown quality" when the playlist states none.
 pub fn quality_from_resolution(resolution: Option<(u32, u32)>) -> String {
     match resolution {
-        Some((w, h)) => quality_from_dimensions(w, h).unwrap_or_else(|| UNKNOWN_QUALITY.to_string()),
+        Some((w, h)) => {
+            quality_from_dimensions(w, h).unwrap_or_else(|| UNKNOWN_QUALITY.to_string())
+        }
         None => UNKNOWN_QUALITY.to_string(),
     }
 }
@@ -399,7 +401,7 @@ pub fn detect_videos_in_html(html: &str, base_url: &str) -> Vec<DetectedVideo> {
 /// duration); `drm` marks a DRM-protected element (`mediaKeys` set
 /// on the element, or an encrypted-media event fired). `note` is
 /// filled in by validation — the sender does not set it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VideoVariantInput {
     pub url: String,
     #[serde(default)]
@@ -412,6 +414,31 @@ pub struct VideoVariantInput {
     pub drm: bool,
     #[serde(default)]
     pub note: Option<String>,
+    /// Round 78 — a resolved platform video: the extension/host
+    /// already ran yt-dlp, so this variant carries the resolver's
+    /// metadata instead of a plain page-scraped URL. `filename`
+    /// is the sanitized video title (never videoplayback.mp4);
+    /// `headers` is a JSON map of User-Agent/Referer (Cookie
+    /// keys stripped); `audio_url` is the DASH pair's audio
+    /// stream; `source_url` the page URL (for re-resolve);
+    /// `format_id` the yt-dlp format id; `fragmented` marks a
+    /// (B)-fallback download (yt-dlp downloads it itself). All
+    /// `#[serde(default)]` so old extension payloads (which
+    /// never send them) still deserialise.
+    #[serde(default)]
+    pub resolved: bool,
+    #[serde(default)]
+    pub filename: Option<String>,
+    #[serde(default)]
+    pub headers: Option<String>,
+    #[serde(default)]
+    pub audio_url: Option<String>,
+    #[serde(default)]
+    pub source_url: Option<String>,
+    #[serde(default)]
+    pub format_id: Option<String>,
+    #[serde(default)]
+    pub fragmented: bool,
 }
 
 /// Validate one `video_found` message against the desktop settings.
@@ -455,8 +482,8 @@ pub fn validate_video_variants(
             "Browser integration is turned off in Fetchline settings".to_string(),
         ));
     }
-    let parsed_page = reqwest::Url::parse(page_url)
-        .map_err(|e| EngineError::InvalidUrl(e.to_string()))?;
+    let parsed_page =
+        reqwest::Url::parse(page_url).map_err(|e| EngineError::InvalidUrl(e.to_string()))?;
     if !matches!(parsed_page.scheme(), "http" | "https") {
         return Err(EngineError::InvalidUrl(format!(
             "Only http:// and https:// pages can send videos, not {}://",
@@ -495,15 +522,32 @@ pub fn validate_video_variants(
             ));
             continue;
         }
-        let Some(ext) = extension_of_url(url) else {
-            skipped.push(format!("{url}: no media file extension in the link"));
-            continue;
+        // Round 78 — a resolved platform video carries no file
+        // extension (googlevideo URLs have none) and its filename
+        // comes from the sanitized title, so the extension check
+        // is skipped for it. The http(s) check above, and the
+        // DRM/exclusion/dedup checks around it, still apply — a
+        // resolved variant is not trusted blindly. The
+        // file-types allow-list below uses the variant's declared
+        // format instead of a URL extension.
+        let ext: Option<String> = if v.resolved {
+            None
+        } else {
+            match extension_of_url(url) {
+                Some(ext) => Some(ext),
+                None => {
+                    skipped.push(format!("{url}: no media file extension in the link"));
+                    continue;
+                }
+            }
         };
-        if !KNOWN_MEDIA_EXTENSIONS.contains(&ext.as_str()) {
-            skipped.push(format!(
-                "{url}: .{ext} is not a downloadable video or audio format"
-            ));
-            continue;
+        if let Some(ext) = &ext {
+            if !KNOWN_MEDIA_EXTENSIONS.contains(&ext.as_str()) {
+                skipped.push(format!(
+                    "{url}: .{ext} is not a downloadable video or audio format"
+                ));
+                continue;
+            }
         }
         if v.drm {
             skipped.push(format!(
@@ -523,22 +567,41 @@ pub fn validate_video_variants(
                 continue;
             }
         }
-        if !settings.file_types_auto.is_empty()
-            && !settings
-                .file_types_auto
-                .iter()
-                .any(|e| e.eq_ignore_ascii_case(&ext))
-        {
-            skipped.push(format!(
-                "{url}: .{ext} is not in the auto-download file types list (Settings > File Types)"
-            ));
-            continue;
+        // Round 78 — for a resolved variant the allow-list is
+        // checked against the declared format (e.g. "MP4"); a
+        // resolved variant with no declared format cannot be
+        // checked, so it is allowed (yt-dlp already resolved a
+        // real video).
+        let ext_for_types: Option<String> = ext.clone().or_else(|| {
+            v.format
+                .as_deref()
+                .map(str::trim)
+                .filter(|f| !f.is_empty())
+                .map(|f| f.to_ascii_lowercase())
+        });
+        if !settings.file_types_auto.is_empty() {
+            if let Some(ext) = &ext_for_types {
+                if !settings
+                    .file_types_auto
+                    .iter()
+                    .any(|e| e.eq_ignore_ascii_case(ext))
+                {
+                    skipped.push(format!(
+                        "{url}: .{ext} is not in the auto-download file types list (Settings > File Types)"
+                    ));
+                    continue;
+                }
+            }
         }
         // Quality backstop: keep a claimed label only when it IS a
         // clean label ("720p", "4K") or a dimension ("1280 × 720");
         // a sentence containing a resolution ("Ultra HD 8K Pro")
         // is not a label, and is replaced, never trusted.
-        let claimed = v.quality.as_deref().map(str::trim).filter(|q| !q.is_empty());
+        let claimed = v
+            .quality
+            .as_deref()
+            .map(str::trim)
+            .filter(|q| !q.is_empty());
         let quality = match claimed {
             Some(q) if is_clean_quality_label(q) => q.to_string(),
             Some(q) if q == UNKNOWN_QUALITY => UNKNOWN_QUALITY.to_string(),
@@ -547,15 +610,19 @@ pub fn validate_video_variants(
         let mut variant = v.clone();
         variant.url = url.to_string();
         variant.quality = Some(quality);
-        variant.format = Some(v.format.clone().unwrap_or_else(|| ext.to_ascii_uppercase()));
-        if ext == "m3u8" {
+        variant.format = Some(v.format.clone().unwrap_or_else(|| {
+            ext.clone()
+                .unwrap_or_else(|| "mp4".to_string())
+                .to_ascii_uppercase()
+        }));
+        if matches!(ext.as_deref(), Some("m3u8")) {
             variant.note = Some(if v.live {
                 "Live stream — the playlist file is saved as-is; it is not merged into one video file."
                     .to_string()
             } else {
                 "Playlist file — saved as-is; it is not merged into one video file.".to_string()
             });
-        } else if ext == "mpd" {
+        } else if matches!(ext.as_deref(), Some("mpd")) {
             variant.note = Some(
                 "DASH manifest — saved as-is; its segments are not merged into one video file."
                     .to_string(),
@@ -603,13 +670,22 @@ mod tests {
         assert_eq!(quality_for("http://x/clip-720p.mp4", 0, 0), "720p");
         assert_eq!(quality_for("http://x/clip.mp4", 1280, 720), "1280 × 720");
         // Dimensions win over a label in the URL.
-        assert_eq!(quality_for("http://x/clip-720p.mp4", 1920, 1080), "1920 × 1080");
+        assert_eq!(
+            quality_for("http://x/clip-720p.mp4", 1920, 1080),
+            "1920 × 1080"
+        );
     }
 
     #[test]
     fn label_matching_is_bounded() {
-        assert_eq!(quality_from_label("clip-720p.mp4"), Some("720p".to_string()));
-        assert_eq!(quality_from_label("trailer-4k.webm"), Some("4K".to_string()));
+        assert_eq!(
+            quality_from_label("clip-720p.mp4"),
+            Some("720p".to_string())
+        );
+        assert_eq!(
+            quality_from_label("trailer-4k.webm"),
+            Some("4K".to_string())
+        );
         // "17209" is not a resolution label.
         assert_eq!(quality_from_label("file17209.mp4"), None);
         assert_eq!(quality_from_label("clip.mp4"), None);
@@ -667,8 +743,14 @@ mod tests {
         assert_eq!(p.variants[0].resolution, Some((1280, 720)));
         assert_eq!(p.variants[0].bandwidth, Some(800_000));
         assert_eq!(p.variants[2].resolution, None);
-        assert_eq!(quality_from_resolution(p.variants[0].resolution), "1280 × 720");
-        assert_eq!(quality_from_resolution(p.variants[2].resolution), UNKNOWN_QUALITY);
+        assert_eq!(
+            quality_from_resolution(p.variants[0].resolution),
+            "1280 × 720"
+        );
+        assert_eq!(
+            quality_from_resolution(p.variants[2].resolution),
+            UNKNOWN_QUALITY
+        );
     }
 
     #[test]
@@ -680,7 +762,8 @@ mod tests {
         assert!(!p.live, "ENDLIST means the stream has an end");
         assert_eq!(p.segments, 3);
         assert!((p.duration_secs - 25.0).abs() < 0.001);
-        let live = "#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10.0,\nseg1.ts\n#EXTINF:10.0,\nseg2.ts\n";
+        let live =
+            "#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10.0,\nseg1.ts\n#EXTINF:10.0,\nseg2.ts\n";
         let p = parse_m3u8(live).expect("a live playlist parses");
         assert!(p.live, "no ENDLIST means the stream has no end");
         assert_eq!(p.segments, 2);

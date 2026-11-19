@@ -54,6 +54,7 @@ fn variant(url: &str) -> VideoVariantInput {
         live: false,
         drm: false,
         note: None,
+        ..Default::default()
     }
 }
 
@@ -61,8 +62,14 @@ fn variant(url: &str) -> VideoVariantInput {
 
 #[test]
 fn quality_is_unknown_without_evidence() {
-    assert_eq!(quality_for("http://127.0.0.1/clip.mp4", 0, 0), UNKNOWN_QUALITY);
-    assert_eq!(quality_for("http://127.0.0.1/clip.mp4", 0, 0), "Unknown quality");
+    assert_eq!(
+        quality_for("http://127.0.0.1/clip.mp4", 0, 0),
+        UNKNOWN_QUALITY
+    );
+    assert_eq!(
+        quality_for("http://127.0.0.1/clip.mp4", 0, 0),
+        "Unknown quality"
+    );
 }
 
 #[test]
@@ -92,10 +99,7 @@ fn fixture(name: &str) -> String {
 
 #[test]
 fn fixture_video_with_sources_and_multiple_qualities() {
-    let found = detect_videos_in_html(
-        &fixture("video-sources.html"),
-        "http://127.0.0.1/page.html",
-    );
+    let found = detect_videos_in_html(&fixture("video-sources.html"), "http://127.0.0.1/page.html");
     let urls: Vec<&str> = found.iter().map(|v| v.url.as_str()).collect();
     assert_eq!(
         urls,
@@ -122,7 +126,10 @@ fn fixture_audio_only() {
 #[test]
 fn fixture_no_video() {
     let found = detect_videos_in_html(&fixture("no-video.html"), "http://127.0.0.1/page.html");
-    assert!(found.is_empty(), "a page with no media must find none: {found:?}");
+    assert!(
+        found.is_empty(),
+        "a page with no media must find none: {found:?}"
+    );
 }
 
 #[test]
@@ -219,7 +226,10 @@ fn video_validation_rejects_empty_variants_excluded_page_and_integration_off() {
     let store = Store::open(&dir.join("app.db")).unwrap();
     let settings = store.get_settings().unwrap();
     let err = validate_video_variants("https://example.com/watch", &[], &settings).unwrap_err();
-    assert!(err.to_string().contains("No video variants"), "error: {err}");
+    assert!(
+        err.to_string().contains("No video variants"),
+        "error: {err}"
+    );
 
     set_excluded(&store, &["example.com"]);
     let settings = store.get_settings().unwrap();
@@ -276,8 +286,7 @@ fn video_validation_replaces_an_invented_quality_and_keeps_a_real_one() {
     let mut real = variant("https://example.com/clip-720p.mp4");
     real.quality = Some("720p".to_string());
     let (accepted, _) =
-        validate_video_variants("https://example.com/watch", &[invented, real], &settings)
-            .unwrap();
+        validate_video_variants("https://example.com/watch", &[invented, real], &settings).unwrap();
     assert_eq!(accepted[0].quality.as_deref(), Some(UNKNOWN_QUALITY));
     assert_eq!(accepted[1].quality.as_deref(), Some("720p"));
 }
@@ -316,12 +325,19 @@ fn host_video_found_enqueues_into_pending_links_as_video() {
     );
     assert!(reply.ok, "reply: {:?}", reply);
     assert_eq!(reply.enqueued, Some(1));
-    assert!(reply.message.as_deref().unwrap().contains("skipped"), "message: {:?}", reply);
+    assert!(
+        reply.message.as_deref().unwrap().contains("skipped"),
+        "message: {:?}",
+        reply
+    );
     let pending = store.list_pending_links(Some("pending")).unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].source, "video");
     assert_eq!(pending[0].url, "https://example.com/clip-720p.mp4");
-    assert_eq!(pending[0].referrer.as_deref(), Some("https://example.com/watch"));
+    assert_eq!(
+        pending[0].referrer.as_deref(),
+        Some("https://example.com/watch")
+    );
 }
 
 #[test]
@@ -338,7 +354,11 @@ fn host_video_found_all_skipped_is_an_error() {
             cookies: vec![],
         },
     );
-    assert!(!reply.ok, "all-DRM video_found must be an error: {:?}", reply);
+    assert!(
+        !reply.ok,
+        "all-DRM video_found must be an error: {:?}",
+        reply
+    );
     assert!(reply.error.as_deref().unwrap().contains("DRM"));
     assert!(store.list_pending_links(None).unwrap().is_empty());
 }
@@ -402,7 +422,11 @@ fn pre_s08_database_migrates_pending_links_to_allow_video_source() {
     let old = store.get_pending_link("old-row").unwrap().unwrap();
     assert_eq!(old.url, "https://example.com/file.zip");
     let row = store
-        .enqueue_pending_link("https://example.com/clip.mp4", Some("https://example.com/watch"), "video")
+        .enqueue_pending_link(
+            "https://example.com/clip.mp4",
+            Some("https://example.com/watch"),
+            "video",
+        )
         .unwrap();
     assert_eq!(row.source, "video");
 }
@@ -418,15 +442,24 @@ async fn detect_page_videos_lists_media_with_probe_results() {
     // The page links a video, an audio track and a dead video; the
     // images/documents/archives are not media for this panel.
     assert_eq!(found.len(), 3);
-    let video = found.iter().find(|v| v.url.ends_with("/video.mp4")).unwrap();
+    let video = found
+        .iter()
+        .find(|v| v.url.ends_with("/video.mp4"))
+        .unwrap();
     assert_eq!(video.format, "MP4");
     assert_eq!(video.quality, UNKNOWN_QUALITY);
     assert_eq!(video.size, Some(100 * 1024));
     assert!(video.downloadable);
     let audio = found.iter().find(|v| v.url.ends_with("/song.mp3")).unwrap();
     assert_eq!(audio.format, "MP3");
-    let dead = found.iter().find(|v| v.url.ends_with("/missing.mp4")).unwrap();
-    assert!(!dead.downloadable, "a dead link must not offer a download button");
+    let dead = found
+        .iter()
+        .find(|v| v.url.ends_with("/missing.mp4"))
+        .unwrap();
+    assert!(
+        !dead.downloadable,
+        "a dead link must not offer a download button"
+    );
     assert!(dead.error.is_some());
 }
 
@@ -454,7 +487,9 @@ async fn video_found_end_to_end_drains_into_a_real_download() {
     );
     assert!(reply.ok, "reply: {:?}", reply);
     assert_eq!(reply.enqueued, Some(1));
-    let pending_id = store.list_pending_links(Some("pending")).unwrap()[0].id.clone();
+    let pending_id = store.list_pending_links(Some("pending")).unwrap()[0]
+        .id
+        .clone();
     let summary = mgr.drain_pending_links().await.unwrap();
     assert!(
         summary.accepted.is_empty(),
@@ -544,7 +579,11 @@ fn video_validation_accepts_mpd_with_dash_note() {
     assert_eq!(accepted.len(), 1);
     assert!(skipped.is_empty());
     assert_eq!(accepted[0].format.as_deref(), Some("MPD"));
-    assert!(accepted[0].note.as_deref().unwrap().contains("DASH manifest"));
+    assert!(accepted[0]
+        .note
+        .as_deref()
+        .unwrap()
+        .contains("DASH manifest"));
 }
 
 // -- a local HLS fixture server -------------------------------------------
@@ -760,7 +799,10 @@ async fn detect_page_videos_expands_master_playlist_into_real_variants() {
     assert!(urls[2].ends_with("/v-low.m3u8"));
     assert_eq!(found[0].quality, "1280 × 720");
     assert_eq!(found[1].quality, "1920 × 1080");
-    assert_eq!(found[2].quality, UNKNOWN_QUALITY, "a variant with no RESOLUTION stays unknown");
+    assert_eq!(
+        found[2].quality, UNKNOWN_QUALITY,
+        "a variant with no RESOLUTION stays unknown"
+    );
     assert!(!found[0].live, "v720 ends (ENDLIST), so it is not live");
     assert!(found[2].live, "v-low has no ENDLIST, so it is live");
     assert!(found.iter().all(|v| v.downloadable));
@@ -813,8 +855,15 @@ async fn detect_page_videos_encrypted_playlist_is_not_downloadable() {
         .await
         .unwrap();
     assert_eq!(found.len(), 1);
-    assert!(!found[0].downloadable, "an encrypted playlist alone will not play");
-    assert!(found[0].error.as_deref().unwrap().contains("encrypted"), "error: {:?}", found[0].error);
+    assert!(
+        !found[0].downloadable,
+        "an encrypted playlist alone will not play"
+    );
+    assert!(
+        found[0].error.as_deref().unwrap().contains("encrypted"),
+        "error: {:?}",
+        found[0].error
+    );
 }
 
 #[tokio::test]
@@ -867,7 +916,9 @@ async fn video_found_m3u8_drains_into_a_real_playlist_download() {
     );
     assert!(reply.ok, "reply: {:?}", reply);
     assert_eq!(reply.enqueued, Some(1));
-    let pending_id = store.list_pending_links(Some("pending")).unwrap()[0].id.clone();
+    let pending_id = store.list_pending_links(Some("pending")).unwrap()[0]
+        .id
+        .clone();
     // Round 67: the drain leaves the video capture pending for
     // the Add URL dialog; the dialog's confirm adds it.
     let summary = mgr.drain_pending_links().await.unwrap();

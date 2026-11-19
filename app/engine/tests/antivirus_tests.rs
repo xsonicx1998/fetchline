@@ -51,14 +51,15 @@ fn set_scanner(mgr: &DownloadManager, command: Option<&str>, enabled: bool, time
 /// template — `.sh` on Unix, `.bat` on Windows.
 fn fake_scanner(dir: &Path, name: &str, body: &str) -> PathBuf {
     #[cfg(windows)]
-    let path = dir.join(format!(
-        "{}.bat",
-        name.strip_suffix(".sh").unwrap_or(name)
-    ));
+    let path = dir.join(format!("{}.bat", name.strip_suffix(".sh").unwrap_or(name)));
     #[cfg(not(windows))]
     let path = dir.join(name);
     #[cfg(windows)]
-    std::fs::write(&path, format!("@echo off\n{}\n", translate_body_to_batch(body))).unwrap();
+    std::fs::write(
+        &path,
+        format!("@echo off\n{}\n", translate_body_to_batch(body)),
+    )
+    .unwrap();
     #[cfg(not(windows))]
     std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
     #[cfg(unix)]
@@ -156,7 +157,12 @@ async fn clean_scanner_reports_clean_and_scans_the_final_path() {
         "clean.sh",
         &format!("printf '%s\\n' \"$1\" >> {}", record.display()),
     );
-    set_scanner(&mgr, Some(&format!("{} {{file}}", script.display())), true, 60);
+    set_scanner(
+        &mgr,
+        Some(&format!("{} {{file}}", script.display())),
+        true,
+        60,
+    );
 
     let id = complete_download(&mgr, &server.url, &dir, "clean.bin").await;
     let result = wait_for_scan(&mgr, &id, 10)
@@ -188,7 +194,12 @@ async fn threat_scanner_reports_infected_and_nothing_is_auto_deleted_or_opened()
         "threat.sh",
         "echo \"threat found: FakeTest.Threat in $1\"\nexit 1",
     );
-    set_scanner(&mgr, Some(&format!("{} {{file}}", script.display())), true, 60);
+    set_scanner(
+        &mgr,
+        Some(&format!("{} {{file}}", script.display())),
+        true,
+        60,
+    );
 
     let id = complete_download(&mgr, &server.url, &dir, "threat.bin").await;
     let result = wait_for_scan(&mgr, &id, 10)
@@ -196,7 +207,11 @@ async fn threat_scanner_reports_infected_and_nothing_is_auto_deleted_or_opened()
         .expect("a scan result must be recorded");
     assert_eq!(result.status, "infected", "{result:?}");
     assert!(
-        result.detail.as_deref().unwrap_or("").contains("FakeTest.Threat"),
+        result
+            .detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("FakeTest.Threat"),
         "the detail must carry the scanner's own report: {result:?}"
     );
 
@@ -224,12 +239,7 @@ async fn missing_scanner_command_is_a_clear_scan_failure() {
     let dir = tmpdir();
     let server = MockServer::start(MockConfig::default());
     let mgr = test_mgr(&dir);
-    set_scanner(
-        &mgr,
-        Some("/nonexistent/no-such-scanner {file}"),
-        true,
-        60,
-    );
+    set_scanner(&mgr, Some("/nonexistent/no-such-scanner {file}"), true, 60);
 
     let id = complete_download(&mgr, &server.url, &dir, "missing.bin").await;
     let result = wait_for_scan(&mgr, &id, 10)
@@ -237,7 +247,11 @@ async fn missing_scanner_command_is_a_clear_scan_failure() {
         .expect("a scan result must be recorded");
     assert_eq!(result.status, "scan_failed", "{result:?}");
     assert!(
-        result.detail.as_deref().unwrap_or("").contains("Could not start"),
+        result
+            .detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("Could not start"),
         "{result:?}"
     );
     // The download itself still completed — a broken scanner
@@ -280,7 +294,12 @@ async fn scanning_turned_off_records_not_configured_and_never_runs_the_scanner()
         "clean.sh",
         &format!("printf '%s\\n' \"$1\" >> {}", record.display()),
     );
-    set_scanner(&mgr, Some(&format!("{} {{file}}", script.display())), false, 60);
+    set_scanner(
+        &mgr,
+        Some(&format!("{} {{file}}", script.display())),
+        false,
+        60,
+    );
 
     let id = complete_download(&mgr, &server.url, &dir, "off.bin").await;
     let result = mgr
@@ -307,7 +326,12 @@ async fn scan_does_not_block_completion_and_a_slow_scanner_times_out() {
     let server = MockServer::start(MockConfig::default());
     let mgr = test_mgr(&dir);
     let script = fake_scanner(&dir, "slow.sh", "sleep 30\nexit 0");
-    set_scanner(&mgr, Some(&format!("{} {{file}}", script.display())), true, 5);
+    set_scanner(
+        &mgr,
+        Some(&format!("{} {{file}}", script.display())),
+        true,
+        5,
+    );
 
     let (id, _) = mgr
         .add_download(
@@ -348,12 +372,7 @@ async fn run_scan_timeout_kills_a_sleeping_scanner_quickly() {
     let target = dir.join("target.bin");
     std::fs::write(&target, b"hello").unwrap();
     let start = std::time::Instant::now();
-    let result = run_scan(
-        &format!("{} {{file}}", script.display()),
-        &target,
-        1,
-    )
-    .await;
+    let result = run_scan(&format!("{} {{file}}", script.display()), &target, 1).await;
     assert_eq!(result.status, "timed_out", "{result:?}");
     assert!(
         start.elapsed() < Duration::from_secs(10),
@@ -374,7 +393,12 @@ async fn exit_zero_with_a_threat_in_the_output_is_still_infected() {
         "found.sh",
         "echo \"$1: FakeTest.Threat FOUND\"\nexit 0",
     );
-    set_scanner(&mgr, Some(&format!("{} {{file}}", script.display())), true, 60);
+    set_scanner(
+        &mgr,
+        Some(&format!("{} {{file}}", script.display())),
+        true,
+        60,
+    );
 
     let id = complete_download(&mgr, &server.url, &dir, "found.bin").await;
     let result = wait_for_scan(&mgr, &id, 10)
@@ -401,13 +425,15 @@ async fn manual_rescan_after_completion_records_a_new_result() {
     );
     // Configure a clean scanner and re-scan by hand.
     let script = fake_scanner(&dir, "clean.sh", "exit 0");
-    set_scanner(&mgr, Some(&format!("{} {{file}}", script.display())), true, 60);
+    set_scanner(
+        &mgr,
+        Some(&format!("{} {{file}}", script.display())),
+        true,
+        60,
+    );
     let result = mgr.run_antivirus_scan(&id).await.unwrap();
     assert_eq!(result.status, "clean", "{result:?}");
-    assert_eq!(
-        mgr.get_scan_result(&id).unwrap().unwrap().status,
-        "clean"
-    );
+    assert_eq!(mgr.get_scan_result(&id).unwrap().unwrap().status, "clean");
 }
 
 #[tokio::test]
@@ -426,7 +452,10 @@ async fn scan_is_refused_for_an_unfinished_download() {
         .await
         .unwrap();
     let err = mgr.run_antivirus_scan(&id).await.unwrap_err();
-    assert!(err.to_string().contains("Only a finished download"), "{err}");
+    assert!(
+        err.to_string().contains("Only a finished download"),
+        "{err}"
+    );
 }
 
 #[tokio::test]
@@ -435,15 +464,21 @@ async fn quarantine_is_refused_for_a_clean_file() {
     let server = MockServer::start(MockConfig::default());
     let mgr = test_mgr(&dir);
     let script = fake_scanner(&dir, "clean.sh", "exit 0");
-    set_scanner(&mgr, Some(&format!("{} {{file}}", script.display())), true, 60);
+    set_scanner(
+        &mgr,
+        Some(&format!("{} {{file}}", script.display())),
+        true,
+        60,
+    );
 
     let id = complete_download(&mgr, &server.url, &dir, "clean2.bin").await;
-    assert_eq!(
-        wait_for_scan(&mgr, &id, 10).await.unwrap().status,
-        "clean"
-    );
+    assert_eq!(wait_for_scan(&mgr, &id, 10).await.unwrap().status, "clean");
     let err = mgr.quarantine_download(&id).unwrap_err();
-    assert!(err.to_string().contains("Only a file the antivirus scan flagged"), "{err}");
+    assert!(
+        err.to_string()
+            .contains("Only a file the antivirus scan flagged"),
+        "{err}"
+    );
 }
 
 #[tokio::test]
@@ -451,10 +486,19 @@ async fn settings_round_trip_and_test_button_use_the_fake_scanner() {
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
     let clean = fake_scanner(&dir, "clean.sh", "echo clean\nexit 0");
-    let threat = fake_scanner(&dir, "threat.sh", "echo \"threat found: FakeTest.Threat\"\nexit 1");
+    let threat = fake_scanner(
+        &dir,
+        "threat.sh",
+        "echo \"threat found: FakeTest.Threat\"\nexit 1",
+    );
 
     // Round-trip: command + switch + timeout persist.
-    set_scanner(&mgr, Some(&format!("{} {{file}}", clean.display())), true, 120);
+    set_scanner(
+        &mgr,
+        Some(&format!("{} {{file}}", clean.display())),
+        true,
+        120,
+    );
     let saved = mgr.get_settings().unwrap();
     assert_eq!(
         saved.antivirus_command.as_deref(),
@@ -528,7 +572,10 @@ async fn queue_files_read_back_with_scan_columns() {
     let files = mgr.list_queue_files("queue-main").unwrap();
     assert_eq!(files.len(), 1);
     assert_eq!(files[0].id, id);
-    assert_eq!(files[0].scan_status, None, "a queued file was never scanned");
+    assert_eq!(
+        files[0].scan_status, None,
+        "a queued file was never scanned"
+    );
 }
 
 #[tokio::test]
@@ -551,11 +598,17 @@ async fn completion_event_carries_the_scan_result() {
         }
     }
     let event = found.expect("a completion event must arrive");
-    let scan = event.scan.expect("the completion event must carry the scan result");
+    let scan = event
+        .scan
+        .expect("the completion event must carry the scan result");
     assert_eq!(scan.status, "not_configured", "{scan:?}");
     // The row agrees with the event.
     assert_eq!(
-        mgr.get_download(&id).unwrap().unwrap().scan_status.as_deref(),
+        mgr.get_download(&id)
+            .unwrap()
+            .unwrap()
+            .scan_status
+            .as_deref(),
         Some("not_configured")
     );
 }
@@ -566,15 +619,20 @@ async fn scan_result_is_persisted_across_a_store_reopen() {
     let server = MockServer::start(MockConfig::default());
     let mgr = test_mgr(&dir);
     let script = fake_scanner(&dir, "clean.sh", "exit 0");
-    set_scanner(&mgr, Some(&format!("{} {{file}}", script.display())), true, 60);
-    let id = complete_download(&mgr, &server.url, &dir, "persist.bin").await;
-    assert_eq!(
-        wait_for_scan(&mgr, &id, 10).await.unwrap().status,
-        "clean"
+    set_scanner(
+        &mgr,
+        Some(&format!("{} {{file}}", script.display())),
+        true,
+        60,
     );
+    let id = complete_download(&mgr, &server.url, &dir, "persist.bin").await;
+    assert_eq!(wait_for_scan(&mgr, &id, 10).await.unwrap().status, "clean");
     drop(mgr);
     let reopened = Store::open(&dir.join("app.db")).unwrap();
-    let result = reopened.get_scan_result(&id).unwrap().expect("result must survive reopen");
+    let result = reopened
+        .get_scan_result(&id)
+        .unwrap()
+        .expect("result must survive reopen");
     assert_eq!(result.status, "clean");
     assert!(result.scanned_at.is_some());
 }
@@ -634,9 +692,15 @@ fn pre_s14_database_migrates_scan_columns_and_settings() {
 
     let store = Store::open(&db_path).unwrap();
     let settings = store.get_settings().unwrap();
-    assert!(settings.antivirus_enabled, "migration must default scanning ON");
+    assert!(
+        settings.antivirus_enabled,
+        "migration must default scanning ON"
+    );
     assert_eq!(settings.antivirus_timeout_secs, 60);
-    let row = store.get_download("dl-old").unwrap().expect("the old row must survive");
+    let row = store
+        .get_download("dl-old")
+        .unwrap()
+        .expect("the old row must survive");
     assert_eq!(row.scan_status, None, "an old row was never scanned");
     // The migrated columns are writable.
     store

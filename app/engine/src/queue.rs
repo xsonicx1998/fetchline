@@ -89,9 +89,10 @@ pub fn execute_action(action: &PendingAction) -> Result<()> {
             }
         }
         "open_file" => {
-            let path = action.file_path.as_ref().ok_or_else(|| {
-                EngineError::InvalidState("No finished file to open".to_string())
-            })?;
+            let path = action
+                .file_path
+                .as_ref()
+                .ok_or_else(|| EngineError::InvalidState("No finished file to open".to_string()))?;
             open_path(path)
         }
         "run_program" => {

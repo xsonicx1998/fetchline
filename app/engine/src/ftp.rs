@@ -63,9 +63,7 @@ pub struct FtpTarget {
 pub fn parse_ftp_url(url: &str) -> Result<FtpTarget> {
     let parsed = reqwest::Url::parse(url).map_err(|e| EngineError::InvalidUrl(e.to_string()))?;
     if parsed.scheme() != "ftp" {
-        return Err(EngineError::InvalidUrl(format!(
-            "Not an ftp:// URL: {url}"
-        )));
+        return Err(EngineError::InvalidUrl(format!("Not an ftp:// URL: {url}")));
     }
     let host = parsed
         .host_str()
@@ -81,14 +79,19 @@ pub fn parse_ftp_url(url: &str) -> Result<FtpTarget> {
         host,
         port: parsed.port().unwrap_or(21),
         user: percent_decode(parsed.username()).unwrap_or_else(|| "anonymous".to_string()),
-        pass: percent_decode(parsed.password().unwrap_or("")).unwrap_or_else(|| "anonymous@".to_string()),
+        pass: percent_decode(parsed.password().unwrap_or(""))
+            .unwrap_or_else(|| "anonymous@".to_string()),
         path,
     })
 }
 
 fn percent_decode(input: &str) -> Option<String> {
     if !input.contains('%') {
-        return if input.is_empty() { None } else { Some(input.to_string()) };
+        return if input.is_empty() {
+            None
+        } else {
+            Some(input.to_string())
+        };
     }
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -147,7 +150,9 @@ impl FtpClient {
             .map_err(|_| {
                 EngineError::InvalidState(format!("Timed out connecting to {host}:{port}"))
             })??;
-        let mut client = Self { control: BufReader::new(stream) };
+        let mut client = Self {
+            control: BufReader::new(stream),
+        };
         let (code, _) = client.read_reply().await?;
         if code != 220 {
             return Err(EngineError::InvalidState(format!(
@@ -189,9 +194,9 @@ impl FtpClient {
             }
             Ok::<_, EngineError>((code, text))
         };
-        tokio::time::timeout(FTP_TIMEOUT, work)
-            .await
-            .map_err(|_| EngineError::InvalidState("The FTP server did not answer in time".to_string()))?
+        tokio::time::timeout(FTP_TIMEOUT, work).await.map_err(|_| {
+            EngineError::InvalidState("The FTP server did not answer in time".to_string())
+        })?
     }
 
     async fn command(&mut self, cmd: &str) -> Result<(u16, String)> {
@@ -322,7 +327,10 @@ impl FtpClient {
 }
 
 /// Connect (direct, or via the FTP proxy) and log in, in binary mode.
-async fn connect_and_login(url: &str, proxy: Option<&ProxyConfig>) -> Result<(FtpClient, FtpTarget)> {
+async fn connect_and_login(
+    url: &str,
+    proxy: Option<&ProxyConfig>,
+) -> Result<(FtpClient, FtpTarget)> {
     let target = parse_ftp_url(url)?;
     let via = ftp_proxy_for(&target.host, proxy);
     let (host, port) = match via {
@@ -457,24 +465,27 @@ pub async fn ftp_retr(
             return Err(e);
         }
     };
-    let data = match tokio::time::timeout(FTP_TIMEOUT, TcpStream::connect((host.as_str(), port))).await
-    {
-        Ok(Ok(s)) => s,
-        Ok(Err(e)) => {
-            client.quit().await;
-            return Err(EngineError::from(e));
-        }
-        Err(_) => {
-            client.quit().await;
-            return Err(EngineError::InvalidState(
-                "Timed out connecting to the FTP data port".to_string(),
-            ));
-        }
-    };
+    let data =
+        match tokio::time::timeout(FTP_TIMEOUT, TcpStream::connect((host.as_str(), port))).await {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => {
+                client.quit().await;
+                return Err(EngineError::from(e));
+            }
+            Err(_) => {
+                client.quit().await;
+                return Err(EngineError::InvalidState(
+                    "Timed out connecting to the FTP data port".to_string(),
+                ));
+            }
+        };
     let (code, _) = client.command(&format!("RETR {}", target.path)).await?;
     if code != 150 && code != 125 {
         client.quit().await;
-        return Err(EngineError::Status(code, format!("FTP RETR failed ({code})")));
+        return Err(EngineError::Status(
+            code,
+            format!("FTP RETR failed ({code})"),
+        ));
     }
     let remaining = end.map(|e| e.saturating_sub(start) + 1);
     Ok(FtpBodyReader {

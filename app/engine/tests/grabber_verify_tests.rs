@@ -43,7 +43,11 @@ fn all_types() -> Vec<String> {
     types(&["image", "video", "audio", "document", "archive", "program"])
 }
 
-async fn wait_grabber(mgr: &DownloadManager, id: &str, secs: u64) -> fetchline_engine::GrabberProjectRow {
+async fn wait_grabber(
+    mgr: &DownloadManager,
+    id: &str,
+    secs: u64,
+) -> fetchline_engine::GrabberProjectRow {
     let mut last: Option<fetchline_engine::GrabberProjectRow> = None;
     for _ in 0..secs * 10 {
         if let Ok(Some(p)) = mgr.get_grabber_project(id) {
@@ -68,8 +72,8 @@ struct Req {
 }
 
 struct CountSite {
-    base: String,      // main site, 127.0.0.1
-    off_base: String,  // off-site, localhost (different host per same_host)
+    base: String,     // main site, 127.0.0.1
+    off_base: String, // off-site, localhost (different host per same_host)
     page_url: String,
     log: Arc<Mutex<Vec<Req>>>,
     stop: Arc<AtomicBool>,
@@ -138,7 +142,12 @@ impl CountSite {
     }
 
     fn total(&self, host: &str) -> usize {
-        self.log.lock().unwrap().iter().filter(|r| r.host == host).count()
+        self.log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.host == host)
+            .count()
     }
 
     fn clear_log(&self) {
@@ -171,7 +180,9 @@ fn page_html(base: &str, off_base: &str, path: &str) -> Option<String> {
              <a href=\"dead.pdf\">dead</a>\
              </body></html>"
             .to_string(),
-        "/private/page.html" => "<html><body><a href=\"/private/secret.pdf\">secret</a></body></html>".to_string(),
+        "/private/page.html" => {
+            "<html><body><a href=\"/private/secret.pdf\">secret</a></body></html>".to_string()
+        }
         "/private/open/page.html" => {
             "<html><body><a href=\"/private/open/open.pdf\">open</a></body></html>".to_string()
         }
@@ -289,9 +300,8 @@ fn handle_count(
             return;
         }
     }
-    let _ = stream.write_all(
-        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-    );
+    let _ = stream
+        .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
 }
 
 // -- (a) off-site link-back ------------------------------------------------
@@ -302,20 +312,38 @@ async fn verify_off_site_page_linking_back_is_never_followed() {
     let mgr = test_mgr(&dir);
     let site = CountSite::start(None);
     let p = mgr
-        .create_grabber_project("verify-a", &site.page_url, &all_types(), 5, 200, "explore", None)
+        .create_grabber_project(
+            "verify-a",
+            &site.page_url,
+            &all_types(),
+            5,
+            200,
+            "explore",
+            None,
+        )
         .unwrap();
     mgr.run_grabber(&p.id).await.unwrap();
     let done = wait_grabber(&mgr, &p.id, 30).await;
     assert_eq!(done.status, "done");
     // All 7 same-host pages, none via the off-site detour.
     assert_eq!(done.pages_explored, 7, "pages: {done:?}");
-    assert_eq!(site.total("off"), 0, "the off-site server must never be hit");
+    assert_eq!(
+        site.total("off"),
+        0,
+        "the off-site server must never be hit"
+    );
     let urls: Vec<&str> = done.matched_files.iter().map(|f| f.url.as_str()).collect();
-    assert!(!urls.iter().any(|u| u.contains("hidden.pdf")), "hidden.pdf is only reachable via the off-site page");
+    assert!(
+        !urls.iter().any(|u| u.contains("hidden.pdf")),
+        "hidden.pdf is only reachable via the off-site page"
+    );
     assert!(!urls.iter().any(|u| u.contains("evil.png")));
     assert_eq!(done.files_matched, 10);
     // (f) explore-only: zero downloads.
-    assert!(mgr.list_downloads().unwrap().is_empty(), "explore-only must create no downloads");
+    assert!(
+        mgr.list_downloads().unwrap().is_empty(),
+        "explore-only must create no downloads"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -327,14 +355,38 @@ async fn verify_depth_5_accepted_depth_6_rejected() {
     let mgr = test_mgr(&dir);
     let site = CountSite::start(None);
     let err = mgr
-        .create_grabber_project("verify-b6", &site.page_url, &all_types(), 6, 200, "explore", None)
+        .create_grabber_project(
+            "verify-b6",
+            &site.page_url,
+            &all_types(),
+            6,
+            200,
+            "explore",
+            None,
+        )
         .unwrap_err();
     assert!(err.to_string().contains("too deep"), "{err}");
     assert!(mgr
-        .create_grabber_project("verify-b-1", &site.page_url, &all_types(), -1, 200, "explore", None)
+        .create_grabber_project(
+            "verify-b-1",
+            &site.page_url,
+            &all_types(),
+            -1,
+            200,
+            "explore",
+            None
+        )
         .is_err());
     let p = mgr
-        .create_grabber_project("verify-b5", &site.page_url, &all_types(), 5, 200, "explore", None)
+        .create_grabber_project(
+            "verify-b5",
+            &site.page_url,
+            &all_types(),
+            5,
+            200,
+            "explore",
+            None,
+        )
         .unwrap();
     mgr.run_grabber(&p.id).await.unwrap();
     let done = wait_grabber(&mgr, &p.id, 30).await;
@@ -352,7 +404,15 @@ async fn verify_robots_allow_under_disallow_same_group() {
     let robots = "User-agent: *\nDisallow: /private/\nAllow: /private/open/\n".to_string();
     let site = CountSite::start(Some(robots));
     let p = mgr
-        .create_grabber_project("verify-c1", &site.page_url, &all_types(), 2, 200, "explore", None)
+        .create_grabber_project(
+            "verify-c1",
+            &site.page_url,
+            &all_types(),
+            2,
+            200,
+            "explore",
+            None,
+        )
         .unwrap();
     mgr.run_grabber(&p.id).await.unwrap();
     let done = wait_grabber(&mgr, &p.id, 30).await;
@@ -361,8 +421,14 @@ async fn verify_robots_allow_under_disallow_same_group() {
     // /private/page.html is skipped, not counted.
     assert_eq!(done.pages_explored, 5, "pages: {done:?}");
     let urls: Vec<&str> = done.matched_files.iter().map(|f| f.url.as_str()).collect();
-    assert!(urls.iter().any(|u| u.ends_with("/private/open/open.pdf")), "Allow for the sub-path must be honoured");
-    assert!(!urls.iter().any(|u| u.ends_with("/private/secret.pdf")), "the Disallow subtree must stay blocked");
+    assert!(
+        urls.iter().any(|u| u.ends_with("/private/open/open.pdf")),
+        "Allow for the sub-path must be honoured"
+    );
+    assert!(
+        !urls.iter().any(|u| u.ends_with("/private/secret.pdf")),
+        "the Disallow subtree must stay blocked"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -370,9 +436,14 @@ async fn verify_robots_allow_under_disallow_same_group() {
 fn verify_robots_fetchline_allow_beats_star_disallow_both_orders() {
     // Cross-group precedence: an Allow in the Fetchline group must
     // beat a Disallow in the `*` group, whichever group comes first.
-    let star_first = "User-agent: *\nDisallow: /private/\n\nUser-agent: Fetchline\nAllow: /private/open/\n";
-    let fetchline_first = "User-agent: Fetchline\nAllow: /private/open/\n\nUser-agent: *\nDisallow: /private/\n";
-    for (label, txt) in [("star-first", star_first), ("fetchline-first", fetchline_first)] {
+    let star_first =
+        "User-agent: *\nDisallow: /private/\n\nUser-agent: Fetchline\nAllow: /private/open/\n";
+    let fetchline_first =
+        "User-agent: Fetchline\nAllow: /private/open/\n\nUser-agent: *\nDisallow: /private/\n";
+    for (label, txt) in [
+        ("star-first", star_first),
+        ("fetchline-first", fetchline_first),
+    ] {
         assert!(
             !robots_disallows(txt, "/private/open/page.html"),
             "{label}: Allow in the Fetchline group must beat the * Disallow"
@@ -388,17 +459,30 @@ fn verify_robots_fetchline_allow_beats_star_disallow_both_orders() {
 async fn verify_robots_allow_under_disallow_cross_group_crawl() {
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
-    let robots = "User-agent: *\nDisallow: /private/\n\nUser-agent: Fetchline\nAllow: /private/open/\n".to_string();
+    let robots =
+        "User-agent: *\nDisallow: /private/\n\nUser-agent: Fetchline\nAllow: /private/open/\n"
+            .to_string();
     let site = CountSite::start(Some(robots));
     let p = mgr
-        .create_grabber_project("verify-c2", &site.page_url, &all_types(), 2, 200, "explore", None)
+        .create_grabber_project(
+            "verify-c2",
+            &site.page_url,
+            &all_types(),
+            2,
+            200,
+            "explore",
+            None,
+        )
         .unwrap();
     mgr.run_grabber(&p.id).await.unwrap();
     let done = wait_grabber(&mgr, &p.id, 30).await;
     assert_eq!(done.status, "done");
     assert_eq!(done.pages_explored, 5, "pages: {done:?}");
     let urls: Vec<&str> = done.matched_files.iter().map(|f| f.url.as_str()).collect();
-    assert!(urls.iter().any(|u| u.ends_with("/private/open/open.pdf")), "cross-group Allow must be honoured in the crawl");
+    assert!(
+        urls.iter().any(|u| u.ends_with("/private/open/open.pdf")),
+        "cross-group Allow must be honoured in the crawl"
+    );
     assert!(!urls.iter().any(|u| u.ends_with("/private/secret.pdf")));
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -416,7 +500,10 @@ async fn verify_robots_start_url_under_disallow_fails_but_allowed_subpath_runs()
     mgr.run_grabber(&p.id).await.unwrap();
     let done = wait_grabber(&mgr, &p.id, 30).await;
     assert_eq!(done.status, "failed");
-    assert!(done.error_message.unwrap_or_default().contains("robots.txt"));
+    assert!(done
+        .error_message
+        .unwrap_or_default()
+        .contains("robots.txt"));
     assert_eq!(done.pages_explored, 0);
     let allowed = format!("{}/private/open/page.html", site.base);
     let p2 = mgr
@@ -426,7 +513,10 @@ async fn verify_robots_start_url_under_disallow_fails_but_allowed_subpath_runs()
     let done2 = wait_grabber(&mgr, &p2.id, 30).await;
     assert_eq!(done2.status, "done");
     assert_eq!(done2.pages_explored, 1);
-    assert!(done2.matched_files.iter().any(|f| f.url.ends_with("/private/open/open.pdf")));
+    assert!(done2
+        .matched_files
+        .iter()
+        .any(|f| f.url.ends_with("/private/open/open.pdf")));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -438,14 +528,25 @@ async fn verify_page_cap_stops_cleanly_without_extra_fetches() {
     let mgr = test_mgr(&dir);
     let site = CountSite::start(None);
     let p = mgr
-        .create_grabber_project("verify-d", &site.page_url, &all_types(), 5, 3, "explore", None)
+        .create_grabber_project(
+            "verify-d",
+            &site.page_url,
+            &all_types(),
+            5,
+            3,
+            "explore",
+            None,
+        )
         .unwrap();
     mgr.run_grabber(&p.id).await.unwrap();
     let done = wait_grabber(&mgr, &p.id, 30).await;
-    assert_eq!(done.status, "done", "the cap is a clean stop, not a failure");
+    assert_eq!(
+        done.status, "done",
+        "the cap is a clean stop, not a failure"
+    );
     assert_eq!(done.pages_explored, 3);
     assert_eq!(done.files_matched, 6); // pic, doc (index) + song (page2) + exe, notes, dead (page3)
-    // Exactly 3 page fetches + 1 robots.txt fetch, nothing more.
+                                       // Exactly 3 page fetches + 1 robots.txt fetch, nothing more.
     let page_gets = site
         .log
         .lock()
@@ -454,7 +555,11 @@ async fn verify_page_cap_stops_cleanly_without_extra_fetches() {
         .filter(|r| r.host == "main" && r.path.ends_with(".html"))
         .count();
     assert_eq!(page_gets, 3, "no page beyond the cap may be fetched");
-    assert_eq!(site.count("main", "/robots.txt"), 1, "robots.txt is fetched once per run");
+    assert_eq!(
+        site.count("main", "/robots.txt"),
+        1,
+        "robots.txt is fetched once per run"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -468,9 +573,15 @@ async fn verify_dead_file_is_attempted_exactly_twice() {
     let dead = format!("{}/dead.pdf", site.base);
     // Baseline: one direct add_download of the dead URL = 1 probe HEAD.
     site.clear_log();
-    assert!(mgr.add_download(&dead, None, None, None, None).await.is_err());
+    assert!(mgr
+        .add_download(&dead, None, None, None, None)
+        .await
+        .is_err());
     let baseline = site.count("main", "/dead.pdf");
-    assert_eq!(baseline, 1, "one direct add must probe exactly once, saw {baseline}");
+    assert_eq!(
+        baseline, 1,
+        "one direct add must probe exactly once, saw {baseline}"
+    );
     // Grabber run: the same dead file must be attempted exactly twice.
     site.clear_log();
     let p = mgr
@@ -490,7 +601,11 @@ async fn verify_dead_file_is_attempted_exactly_twice() {
     assert_eq!(done.files_failed, 1);
     assert_eq!(done.files_downloaded, 4); // doc, notes, /private/secret, /private/open/open — depth-1 pages' files count too
     let attempts = site.count("main", "/dead.pdf");
-    assert_eq!(attempts, 2 * baseline, "dead file must be attempted exactly twice, saw {attempts} requests");
+    assert_eq!(
+        attempts,
+        2 * baseline,
+        "dead file must be attempted exactly twice, saw {attempts} requests"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -537,7 +652,11 @@ async fn verify_rerun_gives_grabbed_files_distinct_save_paths() {
     let downloads = mgr.list_downloads().unwrap();
     assert_eq!(downloads.len(), 10, "the re-run must add 5 fresh downloads");
     let paths: HashSet<&str> = downloads.iter().map(|d| d.save_path.as_str()).collect();
-    assert_eq!(paths.len(), 10, "BUG-002: every grabbed file needs a distinct save path");
+    assert_eq!(
+        paths.len(),
+        10,
+        "BUG-002: every grabbed file needs a distinct save path"
+    );
     assert!(downloads.iter().all(|d| d.status == "complete"));
     let db = rusqlite::Connection::open(dir.join("app.db")).unwrap();
     let tagged: i64 = db
@@ -547,7 +666,10 @@ async fn verify_rerun_gives_grabbed_files_distinct_save_paths() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(tagged, 10, "every grabbed download must carry the project id");
+    assert_eq!(
+        tagged, 10,
+        "every grabbed download must carry the project id"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -560,10 +682,22 @@ async fn verify_excluded_start_site_makes_no_request() {
     let site = CountSite::start(None);
     set_excluded(mgr.store(), &["127.0.0.1"]);
     let err = mgr
-        .create_grabber_project("verify-h", &site.page_url, &types(&["image"]), 2, 200, "download", None)
+        .create_grabber_project(
+            "verify-h",
+            &site.page_url,
+            &types(&["image"]),
+            2,
+            200,
+            "download",
+            None,
+        )
         .unwrap_err();
     assert!(err.to_string().contains("excluded"), "{err}");
-    assert_eq!(site.total("main"), 0, "an excluded start site must be refused before any network request");
+    assert_eq!(
+        site.total("main"),
+        0,
+        "an excluded start site must be refused before any network request"
+    );
     assert_eq!(site.total("off"), 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -574,7 +708,15 @@ async fn verify_excluded_after_create_stops_the_run_before_any_fetch() {
     let mgr = test_mgr(&dir);
     let site = CountSite::start(None);
     let p = mgr
-        .create_grabber_project("verify-h2", &site.page_url, &types(&["image"]), 0, 200, "explore", None)
+        .create_grabber_project(
+            "verify-h2",
+            &site.page_url,
+            &types(&["image"]),
+            0,
+            200,
+            "explore",
+            None,
+        )
         .unwrap();
     // The site is excluded after the project exists, before the run.
     set_excluded(mgr.store(), &["127.0.0.1"]);
@@ -587,9 +729,19 @@ async fn verify_excluded_after_create_stops_the_run_before_any_fetch() {
         .iter()
         .map(|r| format!("{} {}", r.method, r.path))
         .collect();
-    eprintln!("verify-h2: requests made after exclusion: {seen:?}; status={}", done.status);
-    assert_eq!(site.total("main"), 0, "a run against a now-excluded site must fetch nothing");
-    assert_eq!(done.files_matched, 0, "no files may be listed from an excluded site");
+    eprintln!(
+        "verify-h2: requests made after exclusion: {seen:?}; status={}",
+        done.status
+    );
+    assert_eq!(
+        site.total("main"),
+        0,
+        "a run against a now-excluded site must fetch nothing"
+    );
+    assert_eq!(
+        done.files_matched, 0,
+        "no files may be listed from an excluded site"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -601,7 +753,15 @@ async fn verify_polite_delay_between_page_fetches_is_measured() {
     let mgr = test_mgr(&dir);
     let site = CountSite::start(None);
     let p = mgr
-        .create_grabber_project("verify-i", &site.page_url, &all_types(), 2, 200, "explore", None)
+        .create_grabber_project(
+            "verify-i",
+            &site.page_url,
+            &all_types(),
+            2,
+            200,
+            "explore",
+            None,
+        )
         .unwrap();
     mgr.run_grabber(&p.id).await.unwrap();
     let done = wait_grabber(&mgr, &p.id, 30).await;
@@ -644,14 +804,25 @@ async fn verify_rerun_status_is_stale_immediately_after_run() {
     let mgr = test_mgr(&dir);
     let site = CountSite::start(None);
     let p = mgr
-        .create_grabber_project("verify-race", &site.page_url, &types(&["image"]), 0, 200, "explore", None)
+        .create_grabber_project(
+            "verify-race",
+            &site.page_url,
+            &types(&["image"]),
+            0,
+            200,
+            "explore",
+            None,
+        )
         .unwrap();
     mgr.run_grabber(&p.id).await.unwrap();
     let done = wait_grabber(&mgr, &p.id, 30).await;
     assert_eq!(done.status, "done");
     mgr.run_grabber(&p.id).await.unwrap();
     let stale = mgr.get_grabber_project(&p.id).unwrap().unwrap();
-    eprintln!("verify-race: status immediately after re-run: {}", stale.status);
+    eprintln!(
+        "verify-race: status immediately after re-run: {}",
+        stale.status
+    );
     assert!(
         matches!(stale.status.as_str(), "exploring" | "downloading"),
         "right after run_grabber the project must already read as running, but it still says {:?}",
@@ -669,7 +840,15 @@ async fn verify_stop_is_prompt() {
     let mgr = test_mgr(&dir);
     let site = CountSite::start(None);
     let p = mgr
-        .create_grabber_project("verify-j", &site.page_url, &all_types(), 5, 200, "explore", None)
+        .create_grabber_project(
+            "verify-j",
+            &site.page_url,
+            &all_types(),
+            5,
+            200,
+            "explore",
+            None,
+        )
         .unwrap();
     mgr.run_grabber(&p.id).await.unwrap();
     tokio::time::sleep(Duration::from_millis(600)).await;
@@ -683,6 +862,9 @@ async fn verify_stop_is_prompt() {
         elapsed < Duration::from_secs(5),
         "stop took {elapsed:?}, expected a prompt stop (< 5 s)"
     );
-    eprintln!("verify-j: stop took {elapsed:?}, pages_explored={}", done.pages_explored);
+    eprintln!(
+        "verify-j: stop took {elapsed:?}, pages_explored={}",
+        done.pages_explored
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

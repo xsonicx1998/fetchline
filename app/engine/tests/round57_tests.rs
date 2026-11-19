@@ -53,7 +53,13 @@ async fn thread_watchdog_fires_when_tokio_runtime_is_wedged() {
     mgr.set_run_watchdog_timeout_secs(2);
     server.set_stall_get(true);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -113,7 +119,13 @@ async fn thread_watchdog_spares_a_slow_but_moving_download() {
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     mgr.set_run_watchdog_timeout_secs(2);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();

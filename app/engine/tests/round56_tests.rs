@@ -49,7 +49,13 @@ async fn independent_watchdog_aborts_a_stalled_run() {
     mgr.set_run_watchdog_timeout_secs(2);
     server.set_stall_get(true);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -89,7 +95,13 @@ async fn independent_watchdog_spares_a_slow_but_moving_download() {
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     mgr.set_run_watchdog_timeout_secs(2);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -130,7 +142,13 @@ async fn probe_duration_is_logged() {
     store.set_log_path(log_path.clone());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let (_id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     let log = std::fs::read_to_string(&log_path).unwrap();

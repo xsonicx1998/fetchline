@@ -309,7 +309,8 @@ fn output_detail(output: &std::process::Output) -> String {
 /// A plain "clean" / "OK" / empty output is not a threat.
 pub fn output_names_threat(output: &str) -> bool {
     let lower = output.to_ascii_lowercase();
-    if lower.contains("infected") || lower.contains("threat found") || lower.contains("virus found") {
+    if lower.contains("infected") || lower.contains("threat found") || lower.contains("virus found")
+    {
         return true;
     }
     // ClamAV-style `path: Name FOUND` — line-based, so a plain
@@ -392,7 +393,11 @@ fn run_scan_blocking(cmd: &mut std::process::Command, timeout: Duration) -> Scan
             Ok(Some(status)) => {
                 let stdout = out_handle.join().unwrap_or_default();
                 let stderr = err_handle.join().unwrap_or_default();
-                let output = std::process::Output { status, stdout, stderr };
+                let output = std::process::Output {
+                    status,
+                    stdout,
+                    stderr,
+                };
                 return classify_output(&output);
             }
             Ok(None) => {
@@ -463,10 +468,7 @@ pub async fn test_scanner(command_template: &str, timeout_secs: i64) -> Result<S
             "Enter a scanner command first — there is nothing to test".to_string(),
         ));
     }
-    let dir = std::env::temp_dir().join(format!(
-        "fetchline-av-test-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("fetchline-av-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
     let test_file = dir.join("fetchline-scanner-test.txt");
     std::fs::write(
@@ -497,7 +499,10 @@ mod tests {
             split_command("scan.exe --file '{file}'").unwrap(),
             vec!["scan.exe", "--file", "{file}"]
         );
-        assert_eq!(split_command("  scan.exe   -q  ").unwrap(), vec!["scan.exe", "-q"]);
+        assert_eq!(
+            split_command("  scan.exe   -q  ").unwrap(),
+            vec!["scan.exe", "-q"]
+        );
         // BUG-034: an unquoted Windows path keeps its backslashes
         // (the old code stripped every one, so the program could
         // never be found and every scan failed at spawn).

@@ -200,9 +200,7 @@ pub fn validate_grabber_input(
             continue;
         }
         if !KNOWN_TYPES.contains(&t.as_str()) {
-            return Err(EngineError::InvalidState(format!(
-                "Unknown file type: {t}"
-            )));
+            return Err(EngineError::InvalidState(format!("Unknown file type: {t}")));
         }
         if !clean.contains(&t) {
             clean.push(t);
@@ -319,7 +317,11 @@ pub fn robots_disallows(robots_txt: &str, path: &str) -> bool {
         let value = value.trim().to_string();
         if key == "user-agent" {
             if started {
-                groups.push((std::mem::take(&mut ua), std::mem::take(&mut allows), std::mem::take(&mut disallows)));
+                groups.push((
+                    std::mem::take(&mut ua),
+                    std::mem::take(&mut allows),
+                    std::mem::take(&mut disallows),
+                ));
             }
             ua.push(value.to_ascii_lowercase());
             started = true;
@@ -346,7 +348,10 @@ pub fn robots_disallows(robots_txt: &str, path: &str) -> bool {
         if !applies {
             continue;
         }
-        if allows.iter().any(|a| !a.is_empty() && path.starts_with(a.as_str())) {
+        if allows
+            .iter()
+            .any(|a| !a.is_empty() && path.starts_with(a.as_str()))
+        {
             allowed = true;
         }
         if disallows.iter().any(|d| path.starts_with(d.as_str())) {
@@ -366,7 +371,10 @@ mod tests {
         assert!(robots_disallows(txt, "/private/page.html"));
         assert!(robots_disallows(txt, "/tmpfile"));
         assert!(!robots_disallows(txt, "/public/page.html"));
-        assert!(robots_disallows("User-agent: *\nDisallow: /\n", "/anything"));
+        assert!(robots_disallows(
+            "User-agent: *\nDisallow: /\n",
+            "/anything"
+        ));
         assert!(!robots_disallows("User-agent: *\nDisallow:\n", "/anything"));
     }
 
@@ -375,7 +383,10 @@ mod tests {
         let txt = "User-agent: OtherBot\nDisallow: /\n\nUser-agent: Fetchline\nAllow: /open/\nDisallow: /\n";
         assert!(!robots_disallows(txt, "/open/page.html"));
         assert!(robots_disallows(txt, "/closed/page.html"));
-        assert!(!robots_disallows("User-agent: Googlebot\nDisallow: /\n", "/x"));
+        assert!(!robots_disallows(
+            "User-agent: Googlebot\nDisallow: /\n",
+            "/x"
+        ));
     }
 
     #[test]
@@ -387,19 +398,69 @@ mod tests {
         assert!(!is_page_url("http://127.0.0.1/doc.pdf"));
         assert!(same_host("http://127.0.0.1/a", "http://127.0.0.1:8080/b"));
         assert!(!same_host("http://127.0.0.1/a", "http://localhost:8080/b"));
-        assert!(!same_host("http://a.example.com/x", "http://b.example.com/x"));
+        assert!(!same_host(
+            "http://a.example.com/x",
+            "http://b.example.com/x"
+        ));
     }
 
     #[test]
     fn validation_rejects_depth_pages_and_empty_types() {
-        let err = validate_grabber_input("p", "http://127.0.0.1/", &["image".into()], 6, 200, "download", None)
-            .unwrap_err();
+        let err = validate_grabber_input(
+            "p",
+            "http://127.0.0.1/",
+            &["image".into()],
+            6,
+            200,
+            "download",
+            None,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("too deep"));
-        assert!(validate_grabber_input("p", "http://127.0.0.1/", &[], 2, 200, "download", None).is_err());
-        assert!(validate_grabber_input("p", "http://127.0.0.1/", &["image".into()], 2, 1001, "download", None).is_err());
-        assert!(validate_grabber_input("p", "not a url", &["image".into()], 2, 200, "download", None).is_err());
-        assert!(validate_grabber_input("p", "http://127.0.0.1/", &["exe".into()], 2, 200, "download", None).is_err());
-        let ok = validate_grabber_input("p", "http://127.0.0.1/", &["Image".into(), "image".into()], 2, 200, "download", None).unwrap();
+        assert!(
+            validate_grabber_input("p", "http://127.0.0.1/", &[], 2, 200, "download", None)
+                .is_err()
+        );
+        assert!(validate_grabber_input(
+            "p",
+            "http://127.0.0.1/",
+            &["image".into()],
+            2,
+            1001,
+            "download",
+            None
+        )
+        .is_err());
+        assert!(validate_grabber_input(
+            "p",
+            "not a url",
+            &["image".into()],
+            2,
+            200,
+            "download",
+            None
+        )
+        .is_err());
+        assert!(validate_grabber_input(
+            "p",
+            "http://127.0.0.1/",
+            &["exe".into()],
+            2,
+            200,
+            "download",
+            None
+        )
+        .is_err());
+        let ok = validate_grabber_input(
+            "p",
+            "http://127.0.0.1/",
+            &["Image".into(), "image".into()],
+            2,
+            200,
+            "download",
+            None,
+        )
+        .unwrap();
         assert_eq!(ok.types, vec!["image".to_string()]);
     }
 }

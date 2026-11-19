@@ -290,6 +290,188 @@ function scanLiveMedia(doc, pageUrl) {
   return dedupeVariants(found);
 }
 
+// Round 78 (yt-dlp) — supported platforms. The <video> on
+// these pages is a blob:/MediaSource handle, never the file, so
+// the direct scan above can never supply qualities there — the
+// content script shows the Download button anyway and resolves
+// qualities through the host's yt-dlp on click. Subdomains
+// (www/mobile/m) count; lookalikes (notyoutube.com) do not —
+// the match is exact-or-dot-suffix, never a substring.
+const SUPPORTED_PLATFORM_DOMAINS = [
+  { domain: "youtube.com", name: "YouTube" },
+  { domain: "youtu.be", name: "YouTube" },
+  { domain: "facebook.com", name: "Facebook" },
+  { domain: "fb.watch", name: "Facebook" },
+  { domain: "instagram.com", name: "Instagram" },
+  { domain: "tiktok.com", name: "TikTok" },
+];
+
+function platformOfUrl(url) {
+  let host = "";
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+  return (
+    SUPPORTED_PLATFORM_DOMAINS.find(
+      ({ domain }) => host === domain || host.endsWith(`.${domain}`),
+    ) || null
+  );
+}
+
+function isSupportedPlatform(url) {
+  return platformOfUrl(url) !== null;
+}
+
+function platformName(url) {
+  const hit = platformOfUrl(url);
+  return hit ? hit.name : null;
+}
+
+// On a supported platform the button attaches to a <video> no
+// matter what its src is — blob:, empty, or anything else —
+// because the src is never the downloadable file there. Off a
+// platform this is always false: the button stays gated on a
+// direct downloadable source, exactly as before.
+function shouldShowPlatformButton(pageUrl) {
+  return isSupportedPlatform(pageUrl);
+}
+
+// Cache key: the page URL without its fragment (a #t=… jump is
+// the same video). The query stays — on YouTube the video id
+// lives in ?v=, so dropping it would mix two videos' qualities.
+function normalizePageUrl(url) {
+  try {
+    const u = new URL(url);
+    u.hash = "";
+    return u.toString();
+  } catch {
+    return String(url || "");
+  }
+}
+
+// Resolved format lists live a few minutes in the content
+// script's memory (per page, never persisted — the URLs are
+// signed and go stale). `now` is injectable so tests can move
+// time without waiting out the TTL.
+const RESOLVE_CACHE_TTL_MS = 3 * 60 * 1000;
+
+function createResolveCache(ttlMs = RESOLVE_CACHE_TTL_MS, now = () => Date.now()) {
+  const entries = new Map();
+  const keyOf = (url) => normalizePageUrl(url);
+  return {
+    ttlMs,
+    // The resolved entry ({ resolved, cookies }) or null when
+    // missing or older than the TTL.
+    get(url) {
+      const entry = entries.get(keyOf(url));
+      if (!entry) return null;
+      if (now() - entry.at > ttlMs) {
+        entries.delete(keyOf(url));
+        return null;
+      }
+      return entry.value;
+    },
+    // The raw entry even when stale, so a quality pick can tell
+    // "expired, re-resolve first" apart from "never resolved".
+    getEntry(url) {
+      return entries.get(keyOf(url)) || null;
+    },
+    isStale(url) {
+      const entry = entries.get(keyOf(url));
+      return !entry || now() - entry.at > ttlMs;
+    },
+    set(url, value) {
+      entries.set(keyOf(url), { value, at: now() });
+    },
+    clear() {
+      entries.clear();
+    },
+    size() {
+      return entries.size;
+    },
+  };
+}
+
+// Degraded warning: the server's own text when it has one (it
+// names the cause), else the honest default — never invented
+// detail, and null when nothing is degraded.
+const DEGRADED_WARNING_DEFAULT =
+  "YouTube is limiting higher qualities for this video right now";
+
+function degradedWarningText(resolved) {
+  if (!resolved || !resolved.degraded) return null;
+  const warning = typeof resolved.warning === "string" ? resolved.warning.trim() : "";
+  return warning || DEGRADED_WARNING_DEFAULT;
+}
+
+// Only 360p and up are offered: a 240p/144p row would be a
+// quality nobody picks from this list. A format with no height
+// reported is kept — hiding a quality we cannot judge would
+// invent a limit the resolver never stated.
+function filterResolvableFormats(formats) {
+  return (formats || []).filter((f) => {
+    if (!f) return false;
+    if (typeof f.height === "number") return f.height >= 360;
+    return true;
+  });
+}
+
+// One dropdown row's label: the resolver's label plus the honest
+// note for a video-only row (needs an ffmpeg merge in the app)
+// or a manifest row (a stream, downloaded by yt-dlp itself).
+// Sizes are never shown — nothing here knows one.
+function qualityRowLabel(format) {
+  const label = (format && format.label) || "Unknown quality";
+  if (format && format.fragmented) return `${label} (stream)`;
+  if (format && format.needs_merge) return `${label} (video only — merged in app)`;
+  return label;
+}
+
+// A filename safe to hand to Windows: illegal characters and
+// control characters stripped, whitespace collapsed, "video"
+// when nothing survives.
+function sanitizeTitleFilename(title, ext) {
+  const clean = String(title || "")
+    .replace(/[\\/:*?"<>|\x00-\x1f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const base = clean || "video";
+  const suffix = ext ? `.${String(ext).toLowerCase().replace(/^\./, "")}` : "";
+  return `${base}${suffix}`;
+}
+
+// The single variant sent to the host when the user picks a
+// resolved quality — the existing video_found shape plus the
+// Round 78 fields (serde-defaulted on the Rust side). Quality
+// comes from the height ("1080p"), never from a label guess. A
+// fragmented pick carries the manifest URL, or the page URL
+// when the resolver gave no manifest URL at all.
+function buildResolvedVariant(format, resolved, pageUrl) {
+  const ext = String((format && format.ext) || "mp4").toLowerCase();
+  const height = format && typeof format.height === "number" ? format.height : null;
+  const quality = height ? `${height}p` : (format && format.label) || "Unknown quality";
+  const url =
+    format && format.fragmented
+      ? format.url || pageUrl
+      : (format && format.url) || pageUrl;
+  return {
+    url,
+    quality,
+    format: ext.toUpperCase(),
+    live: !!(resolved && resolved.is_live),
+    drm: false,
+    resolved: true,
+    filename: sanitizeTitleFilename(resolved && resolved.title, ext),
+    headers: (format && format.headers) || {},
+    audio_url: (format && format.audio_url) || null,
+    source_url: pageUrl,
+    format_id: (format && format.format_id) || null,
+    fragmented: !!(format && format.fragmented),
+  };
+}
+
 // Shared with the content script (same JS world when injected as
 // files in order) and with the Node tests. In a classic script
 // (the browser) the functions above are already globals; for the
@@ -310,6 +492,20 @@ if (typeof globalThis !== "undefined") {
     scanLiveMedia,
     parseM3u8,
     playlistNote,
+    SUPPORTED_PLATFORM_DOMAINS,
+    platformOfUrl,
+    isSupportedPlatform,
+    platformName,
+    shouldShowPlatformButton,
+    normalizePageUrl,
+    RESOLVE_CACHE_TTL_MS,
+    createResolveCache,
+    DEGRADED_WARNING_DEFAULT,
+    degradedWarningText,
+    filterResolvableFormats,
+    qualityRowLabel,
+    sanitizeTitleFilename,
+    buildResolvedVariant,
   };
 }
 if (typeof module !== "undefined" && module.exports) {

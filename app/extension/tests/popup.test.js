@@ -16,6 +16,7 @@ import vm from "node:vm";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const videoDetectSrc = fs.readFileSync(path.join(__dirname, "..", "video-detect.js"), "utf8");
 const popupSrc = fs.readFileSync(path.join(__dirname, "..", "popup.js"), "utf8");
 
 const tick = (ms = 10) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -91,6 +92,9 @@ function loadPopup({ nativeReply = { ok: true }, lastVideoScan = null, scanReply
     Date,
     URL,
   });
+  // Round 78 — the popup loads video-detect.js first (see
+  // popup.html), so it runs here first too.
+  vm.runInContext(videoDetectSrc, context, { filename: "video-detect.js" });
   vm.runInContext(popupSrc, context, { filename: "popup.js" });
   return {
     elements,
@@ -237,4 +241,44 @@ test("popup reads storage after the injection-fallback scan (Round 72 A)", async
   await env.domContentLoaded();
   await tick(400);
   assert.match(env.elements.scanLine.textContent, /This page: 1 downloadable video/);
+});
+
+// Round 78 — on a supported platform the direct scan finds
+// nothing (the player's <video> src is a blob:), so the popup
+// must not claim "no videos found": it says to click the
+// Download button on the video instead.
+test("popup shows a platform line instead of 'no videos found' on YouTube", async () => {
+  const env = loadPopup({
+    scanReply: { ok: true, total: 0, downloadable: 0 },
+    tabUrl: "https://www.youtube.com/watch?v=abc123",
+  });
+  await env.domContentLoaded();
+  await tick();
+  assert.match(
+    env.elements.scanLine.textContent,
+    /This page: YouTube video — click the Download button on the video to see qualities\./,
+  );
+
+  const stored = loadPopup({
+    lastVideoScan: { pageUrl: "https://www.tiktok.com/@u/video/1", total: 0, downloadable: 0, at: Date.now() },
+    tabUrl: "https://www.tiktok.com/@u/video/1",
+  });
+  await stored.domContentLoaded();
+  await tick();
+  // The stored scan is for this page, so it is labelled "This
+  // page" — but the platform line still replaces "no videos".
+  assert.match(
+    stored.elements.scanLine.textContent,
+    /This page: TikTok video — click the Download button on the video to see qualities\./,
+  );
+});
+
+test("popup still says 'no videos found' off-platform (Round 78)", async () => {
+  const env = loadPopup({
+    scanReply: { ok: true, total: 0, downloadable: 0 },
+    tabUrl: "https://example.com/page.html",
+  });
+  await env.domContentLoaded();
+  await tick();
+  assert.match(env.elements.scanLine.textContent, /This page: no videos found\./);
 });

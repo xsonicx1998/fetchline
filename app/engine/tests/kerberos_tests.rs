@@ -44,9 +44,8 @@ use std::time::Duration;
 use fetchline_engine::ntlm::{ntlm_hash, ntlmv2_hash, ntlmv2_response};
 use fetchline_engine::secret::{base64_decode, base64_encode};
 use fetchline_engine::{
-    build_neg_token_init, build_neg_token_resp, kerberos_request_with_initiator,
-    DownloadManager, EngineError, ProxyConfig, ProxyConfigInput, SpnegoInitiator, SpnegoStep,
-    Store,
+    build_neg_token_init, build_neg_token_resp, kerberos_request_with_initiator, DownloadManager,
+    EngineError, ProxyConfig, ProxyConfigInput, SpnegoInitiator, SpnegoStep, Store,
 };
 
 fn test_mgr(dir: &std::path::Path) -> Arc<DownloadManager> {
@@ -94,7 +93,12 @@ struct ScriptedInitiator {
 
 impl ScriptedInitiator {
     fn new(tokens: Vec<Vec<u8>>) -> Self {
-        Self { tokens, fail_at: None, calls: Arc::new(AtomicUsize::new(0)), inputs: Arc::new(Mutex::new(Vec::new())) }
+        Self {
+            tokens,
+            fail_at: None,
+            calls: Arc::new(AtomicUsize::new(0)),
+            inputs: Arc::new(Mutex::new(Vec::new())),
+        }
     }
 
     fn failing() -> Self {
@@ -115,14 +119,20 @@ impl ScriptedInitiator {
 impl SpnegoInitiator for ScriptedInitiator {
     fn step(&mut self, input_token: Option<&[u8]>) -> Result<SpnegoStep, EngineError> {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
-        self.inputs.lock().unwrap().push(input_token.map(|t| t.to_vec()));
+        self.inputs
+            .lock()
+            .unwrap()
+            .push(input_token.map(|t| t.to_vec()));
         if self.fail_at == Some(n) {
             return Err(EngineError::InvalidState(
                 "Kerberos (Negotiate) proxy authentication failed: simulated test failure — no credentials in the test cache".to_string(),
             ));
         }
         let token = self.tokens.get(n).cloned().unwrap_or_default();
-        Ok(SpnegoStep { token, complete: n + 1 >= self.tokens.len() })
+        Ok(SpnegoStep {
+            token,
+            complete: n + 1 >= self.tokens.len(),
+        })
     }
 }
 
@@ -435,7 +445,10 @@ fn verify_type3(bytes: &[u8], password: &str) -> bool {
     let dom_off = rd32(32);
     let user_len = rd16(36);
     let user_off = rd32(40);
-    if nt_off + nt_len > bytes.len() || dom_off + dom_len > bytes.len() || user_off + user_len > bytes.len() {
+    if nt_off + nt_len > bytes.len()
+        || dom_off + dom_len > bytes.len()
+        || user_off + user_len > bytes.len()
+    {
         return false;
     }
     let domain = String::from_utf16_lossy(
@@ -463,7 +476,13 @@ fn verify_type3(bytes: &[u8], password: &str) -> bool {
     let target_info = &blob[28..blob.len() - 4];
     let nt = ntlm_hash(password);
     let v2 = ntlmv2_hash(&nt, &user, &domain);
-    let expected = ntlmv2_response(&v2, &NTLM_SERVER_CHALLENGE, &client_chal, timestamp, target_info);
+    let expected = ntlmv2_response(
+        &v2,
+        &NTLM_SERVER_CHALLENGE,
+        &client_chal,
+        timestamp,
+        target_info,
+    );
     expected.as_slice() == nt_resp
 }
 
@@ -551,7 +570,11 @@ fn handle_negotiate_proxy(
                     continue;
                 }
                 Some(value) => {
-                    let scheme = value.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+                    let scheme = value
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
                     let token = value.split_whitespace().nth(1).unwrap_or("");
                     match scheme.as_str() {
                         "negotiate" => {
@@ -631,7 +654,9 @@ fn handle_negotiate_proxy(
             None => (rest, "/"),
         };
         let Ok(mut upstream) = TcpStream::connect(authority) else {
-            let _ = writer.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let _ = writer.write_all(
+                b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
             return;
         };
         let mut out = format!("{method} {path} HTTP/1.1\r\n");
@@ -684,16 +709,33 @@ async fn kerberos_proxy_authenticates_http_request() {
             .unwrap();
     assert_eq!(status, 200);
     assert_eq!(read_all_body(reader).await, payload(512 * 1024));
-    assert_eq!(calls.load(Ordering::SeqCst), 2, "expected exactly two SPNEGO steps");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "expected exactly two SPNEGO steps"
+    );
     // The stub's response token was fed into the second step.
     let seen_inputs = inputs.lock().unwrap().clone();
     assert_eq!(seen_inputs.len(), 2);
     assert_eq!(seen_inputs[0], None, "the first step takes no input token");
     assert_eq!(seen_inputs[1], Some(b"stub-response-token".to_vec()));
-    assert!(proxy.saw_negotiate_init.load(Ordering::SeqCst), "no well-formed NegTokenInit reached the stub");
-    assert!(proxy.saw_negotiate_resp.load(Ordering::SeqCst), "no well-formed NegTokenResp reached the stub");
-    assert_eq!(proxy.forwarded.load(Ordering::SeqCst), 1, "nothing was forwarded after the handshake");
-    assert!(!proxy.saw_basic(), "Basic auth was sent on a Negotiate-only proxy");
+    assert!(
+        proxy.saw_negotiate_init.load(Ordering::SeqCst),
+        "no well-formed NegTokenInit reached the stub"
+    );
+    assert!(
+        proxy.saw_negotiate_resp.load(Ordering::SeqCst),
+        "no well-formed NegTokenResp reached the stub"
+    );
+    assert_eq!(
+        proxy.forwarded.load(Ordering::SeqCst),
+        1,
+        "nothing was forwarded after the handshake"
+    );
+    assert!(
+        !proxy.saw_basic(),
+        "Basic auth was sent on a Negotiate-only proxy"
+    );
 }
 
 #[tokio::test]
@@ -721,7 +763,9 @@ async fn kerberos_proxy_ranged_get_and_head_work() {
     assert_eq!(body.len(), 1024);
     assert_eq!(body, payload(512 * 1024)[..1024]);
     assert!(
-        headers.iter().any(|(n, v)| n == "content-range" && v == "bytes 0-1023/524288"),
+        headers
+            .iter()
+            .any(|(n, v)| n == "content-range" && v == "bytes 0-1023/524288"),
         "no Content-Range on the ranged reply: {headers:?}"
     );
     // HEAD through the same exchange.
@@ -734,9 +778,15 @@ async fn kerberos_proxy_ranged_get_and_head_work() {
             .await
             .unwrap();
     assert_eq!(status, 200);
-    assert_eq!(read_all_body(reader).await.len(), 0, "a HEAD must have no body");
+    assert_eq!(
+        read_all_body(reader).await.len(),
+        0,
+        "a HEAD must have no body"
+    );
     assert!(
-        headers.iter().any(|(n, v)| n == "content-length" && v == "524288"),
+        headers
+            .iter()
+            .any(|(n, v)| n == "content-length" && v == "524288"),
         "no Content-Length on the HEAD reply: {headers:?}"
     );
 }
@@ -786,9 +836,19 @@ async fn kerberos_proxy_failing_initiator_is_a_clear_kerberos_error() {
     .err()
     .expect("a failing initiator must error, not return a response");
     assert!(err.to_string().contains("Kerberos"), "{err}");
-    assert!(!proxy.saw_basic(), "a failed Kerberos attempt sent Basic auth");
-    assert!(!proxy.saw_negotiate(), "a failed Kerberos attempt sent a Negotiate token");
-    assert_eq!(proxy.forwarded.load(Ordering::SeqCst), 0, "a failed handshake forwarded a request");
+    assert!(
+        !proxy.saw_basic(),
+        "a failed Kerberos attempt sent Basic auth"
+    );
+    assert!(
+        !proxy.saw_negotiate(),
+        "a failed Kerberos attempt sent a Negotiate token"
+    );
+    assert_eq!(
+        proxy.forwarded.load(Ordering::SeqCst),
+        0,
+        "a failed handshake forwarded a request"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -809,13 +869,25 @@ async fn kerberos_only_proxy_fails_clearly_with_real_gssapi_and_never_sends_basi
     input.password = Some("hunter2".to_string());
     mgr.save_proxy_config(&input).unwrap();
     let err = mgr
-        .add_download(&origin.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &origin.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap_err();
     assert!(err.to_string().contains("Kerberos"), "{err}");
     assert!(mgr.list_downloads().unwrap().is_empty());
-    assert!(!proxy.saw_basic(), "the engine fell through to Basic on a Negotiate-only proxy");
-    assert!(!proxy.saw_negotiate(), "a token was sent without Kerberos credentials");
+    assert!(
+        !proxy.saw_basic(),
+        "the engine fell through to Basic on a Negotiate-only proxy"
+    );
+    assert!(
+        !proxy.saw_negotiate(),
+        "a token was sent without Kerberos credentials"
+    );
     // The Test button reports the same failure.
     let err = mgr.test_proxy(&input, &origin.url).await.unwrap_err();
     assert!(err.to_string().contains("Kerberos"), "{err}");
@@ -835,7 +907,13 @@ async fn kerberos_falls_back_to_basic_when_no_ticket() {
     input.password = Some("hunter2".to_string());
     mgr.save_proxy_config(&input).unwrap();
     let (id, info) = mgr
-        .add_download(&origin.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &origin.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(info.size, Some(512 * 1024));
@@ -844,7 +922,10 @@ async fn kerberos_falls_back_to_basic_when_no_ticket() {
     let row = mgr.get_download(&id).unwrap().unwrap();
     assert_eq!(std::fs::read(&row.save_path).unwrap(), payload(512 * 1024));
     assert!(proxy.saw_basic(), "the fallback never sent Basic auth");
-    assert!(proxy.forwarded.load(Ordering::SeqCst) > 0, "nothing was forwarded after the fallback");
+    assert!(
+        proxy.forwarded.load(Ordering::SeqCst) > 0,
+        "nothing was forwarded after the fallback"
+    );
     // The Test button takes the same fallback.
     assert_eq!(mgr.test_proxy(&input, &origin.url).await.unwrap(), 200);
 }
@@ -863,7 +944,13 @@ async fn kerberos_falls_back_to_ntlm_when_no_ticket() {
     input.password = Some("hunter2".to_string());
     mgr.save_proxy_config(&input).unwrap();
     let (id, info) = mgr
-        .add_download(&origin.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &origin.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(info.size, Some(512 * 1024));
@@ -871,9 +958,18 @@ async fn kerberos_falls_back_to_ntlm_when_no_ticket() {
     assert!(wait_for_status(&mgr, &id, "complete", 30).await);
     let row = mgr.get_download(&id).unwrap().unwrap();
     assert_eq!(std::fs::read(&row.save_path).unwrap(), payload(512 * 1024));
-    assert!(proxy.saw_type1.load(Ordering::SeqCst), "no NTLM Type 1 was sent on the fallback");
-    assert!(proxy.saw_type3.load(Ordering::SeqCst), "no NTLM Type 3 was sent on the fallback");
-    assert!(proxy.forwarded.load(Ordering::SeqCst) > 0, "nothing was forwarded after the fallback");
+    assert!(
+        proxy.saw_type1.load(Ordering::SeqCst),
+        "no NTLM Type 1 was sent on the fallback"
+    );
+    assert!(
+        proxy.saw_type3.load(Ordering::SeqCst),
+        "no NTLM Type 3 was sent on the fallback"
+    );
+    assert!(
+        proxy.forwarded.load(Ordering::SeqCst) > 0,
+        "nothing was forwarded after the fallback"
+    );
     assert_eq!(mgr.test_proxy(&input, &origin.url).await.unwrap(), 200);
 }
 
@@ -892,12 +988,21 @@ async fn kerberos_auth_setting_never_downgrades_to_basic() {
     input.auth = Some("kerberos".to_string());
     mgr.save_proxy_config(&input).unwrap();
     let err = mgr
-        .add_download(&origin.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &origin.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap_err();
     assert!(err.to_string().contains("Kerberos"), "{err}");
     assert!(mgr.list_downloads().unwrap().is_empty());
-    assert!(!proxy.saw_basic(), "auth=kerberos sent Basic credentials to a Basic-only proxy");
+    assert!(
+        !proxy.saw_basic(),
+        "auth=kerberos sent Basic credentials to a Basic-only proxy"
+    );
     let err = mgr.test_proxy(&input, &origin.url).await.unwrap_err();
     assert!(err.to_string().contains("Kerberos"), "{err}");
 }
@@ -917,13 +1022,22 @@ async fn ntlm_auth_setting_never_uses_kerberos() {
     input.auth = Some("ntlm".to_string());
     mgr.save_proxy_config(&input).unwrap();
     let err = mgr
-        .add_download(&origin.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &origin.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap_err();
     assert!(err.to_string().contains("NTLM"), "{err}");
     assert!(mgr.list_downloads().unwrap().is_empty());
     assert!(!proxy.saw_negotiate(), "auth=ntlm sent a Negotiate token");
-    assert!(!proxy.saw_type1.load(Ordering::SeqCst), "auth=ntlm sent an NTLM Type 1 to a Negotiate-only proxy");
+    assert!(
+        !proxy.saw_type1.load(Ordering::SeqCst),
+        "auth=ntlm sent an NTLM Type 1 to a Negotiate-only proxy"
+    );
 }
 
 #[tokio::test]
@@ -956,16 +1070,26 @@ fn proxy_auth_setting_round_trip_and_validation() {
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     // New proxy defaults to negotiate-auto.
-    let row = store.save_proxy_config(&proxy_input("http", "127.0.0.1", 8080)).unwrap();
+    let row = store
+        .save_proxy_config(&proxy_input("http", "127.0.0.1", 8080))
+        .unwrap();
     assert_eq!(row.auth, "negotiate-auto");
-    assert_eq!(store.get_active_proxy().unwrap().unwrap().auth, "negotiate-auto");
+    assert_eq!(
+        store.get_active_proxy().unwrap().unwrap().auth,
+        "negotiate-auto"
+    );
     // Explicit Kerberos sticks, and saving without auth keeps it.
     let mut input = proxy_input("http", "127.0.0.1", 8080);
     input.auth = Some("kerberos".to_string());
     let row = store.save_proxy_config(&input).unwrap();
     assert_eq!(row.auth, "kerberos");
-    let row = store.save_proxy_config(&proxy_input("http", "127.0.0.1", 8080)).unwrap();
-    assert_eq!(row.auth, "kerberos", "saving without auth must keep the stored setting");
+    let row = store
+        .save_proxy_config(&proxy_input("http", "127.0.0.1", 8080))
+        .unwrap();
+    assert_eq!(
+        row.auth, "kerberos",
+        "saving without auth must keep the stored setting"
+    );
     // Switching to Basic sticks too.
     let mut input = proxy_input("http", "127.0.0.1", 8080);
     input.auth = Some("basic".to_string());
@@ -1016,9 +1140,17 @@ fn proxy_auth_column_migrates_on_old_databases() {
         .unwrap();
     }
     let store = Store::open(&path).unwrap();
-    let row = store.save_proxy_config(&proxy_input("http", "127.0.0.1", 8080)).unwrap();
-    assert_eq!(row.auth, "negotiate-auto", "a pre-Kerberos row migrates to the default");
-    assert_eq!(store.get_active_proxy().unwrap().unwrap().auth, "negotiate-auto");
+    let row = store
+        .save_proxy_config(&proxy_input("http", "127.0.0.1", 8080))
+        .unwrap();
+    assert_eq!(
+        row.auth, "negotiate-auto",
+        "a pre-Kerberos row migrates to the default"
+    );
+    assert_eq!(
+        store.get_active_proxy().unwrap().unwrap().auth,
+        "negotiate-auto"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1050,7 +1182,10 @@ impl CookieGatedOrigin {
                 }
             }
         });
-        Self { url: format!("http://127.0.0.1:{port}/file.bin"), stop }
+        Self {
+            url: format!("http://127.0.0.1:{port}/file.bin"),
+            stop,
+        }
     }
 }
 
@@ -1071,7 +1206,9 @@ fn handle_gated(mut stream: TcpStream) {
         .any(|(n, v)| n == "cookie" && v.contains("session=abc"));
     let body = payload(128 * 1024);
     if !has_cookie {
-        let _ = stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let _ = stream.write_all(
+            b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
         return;
     }
     if method == "HEAD" {
@@ -1153,7 +1290,10 @@ async fn cookie_gated_download_behind_basic_proxy_still_works() {
     assert!(wait_for_status(&mgr, &id, "complete", 30).await);
     let row = mgr.get_download(&id).unwrap().unwrap();
     assert_eq!(std::fs::read(&row.save_path).unwrap(), payload(128 * 1024));
-    assert!(proxy.hits.load(Ordering::SeqCst) > 0, "the proxy was never used");
+    assert!(
+        proxy.hits.load(Ordering::SeqCst) > 0,
+        "the proxy was never used"
+    );
 }
 
 #[tokio::test]

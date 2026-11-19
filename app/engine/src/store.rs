@@ -192,6 +192,19 @@ pub struct Settings {
     pub quota_enabled: bool,
     pub quota_mb: Option<i64>,
     pub quota_hours: Option<i64>,
+    /// Round 78: platform downloads (YouTube / Facebook /
+    /// Instagram / TikTok) via yt-dlp — false disables the
+    /// resolver and the extension's resolve flow entirely.
+    /// `#[serde(default)]` via the helper so a settings payload
+    /// from an older UI (which never sends the field) still
+    /// deserialises instead of failing the whole save.
+    #[serde(default = "default_platform_downloads_enabled")]
+    pub platform_downloads_enabled: bool,
+    /// Round 78: hidden yt-dlp extractor-args override (e.g.
+    /// `youtube:player_client=android_vr,tv`) for field fixes —
+    /// no Settings UI in v1.
+    #[serde(default)]
+    pub ytdlp_extractor_args: Option<String>,
 }
 
 /// Round 73 — default for `Settings::tail_zero_progress_cap_minutes`.
@@ -202,6 +215,11 @@ pub const DEFAULT_TAIL_ZERO_PROGRESS_CAP_MINUTES: i64 = 10;
 
 fn default_tail_zero_progress_cap_minutes() -> i64 {
     DEFAULT_TAIL_ZERO_PROGRESS_CAP_MINUTES
+}
+
+/// Round 78 — default for `Settings::platform_downloads_enabled`.
+fn default_platform_downloads_enabled() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -240,8 +258,27 @@ impl Default for Settings {
             quota_enabled: false,
             quota_mb: None,
             quota_hours: None,
+            platform_downloads_enabled: true,
+            ytdlp_extractor_args: None,
         }
     }
+}
+
+/// Round 78 — the resolved-video fields a `video_found` / host
+/// `resolve_video` reply carries for one chosen quality. The
+/// engine stores them on the pending row so the Add URL dialog
+/// and `confirm_pending_link` can use them without a second
+/// resolve.
+#[derive(Debug, Clone, Default)]
+pub struct ResolvedLink {
+    pub filename: Option<String>,
+    /// JSON map of User-Agent/Referer from yt-dlp (Cookie keys
+    /// already stripped by the caller).
+    pub headers: Option<String>,
+    pub source_url: Option<String>,
+    pub format_id: Option<String>,
+    pub audio_url: Option<String>,
+    pub fragmented: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -258,6 +295,27 @@ pub struct PendingLinkRow {
     /// carried none. Held only while the row is pending; the drain
     /// wipes it when it decides the link.
     pub cookies: Option<String>,
+    /// Round 78 — resolved-video capture fields (all
+    /// `#[serde(default)]` so rows written before Round 78 still
+    /// read): `filename` is the sanitized video title (never
+    /// videoplayback.mp4); `headers` is a JSON map of
+    /// User-Agent/Referer from yt-dlp (Cookie keys stripped);
+    /// `source_url` is the page URL (for re-resolve); `format_id`
+    /// the yt-dlp format id; `audio_url` the DASH pair's audio
+    /// stream (NULL otherwise); `fragmented` marks a (B)-fallback
+    /// download (yt-dlp downloads it itself).
+    #[serde(default)]
+    pub filename: Option<String>,
+    #[serde(default)]
+    pub headers: Option<String>,
+    #[serde(default)]
+    pub source_url: Option<String>,
+    #[serde(default)]
+    pub format_id: Option<String>,
+    #[serde(default)]
+    pub audio_url: Option<String>,
+    #[serde(default)]
+    pub fragmented: bool,
     pub created_at: String,
 }
 
@@ -354,6 +412,30 @@ pub struct DownloadRow {
     pub active_connections: i64,
     #[serde(default)]
     pub segment_count: i64,
+    /// Round 78 — yt-dlp platform downloads. `parent_id` is set
+    /// on the two child rows of a DASH (video+audio) download and
+    /// points at the parent row; `child_kind` is 'video' or
+    /// 'audio' on children, `None` on parents and normal
+    /// downloads. `merge_status` is the parent's ffmpeg merge
+    /// state ('pending' | 'merging' | 'done' | 'failed', `None`
+    /// unless a parent). `source_url` is the page URL the video
+    /// was resolved from and `format_id` the yt-dlp format id —
+    /// what a 403/410 re-resolve needs. `direct_ytdlp` marks a
+    /// (B)-fallback download: yt-dlp itself downloads it.
+    /// `#[serde(default)]` so rows written before Round 78 still
+    /// read.
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    #[serde(default)]
+    pub child_kind: Option<String>,
+    #[serde(default)]
+    pub merge_status: Option<String>,
+    #[serde(default)]
+    pub source_url: Option<String>,
+    #[serde(default)]
+    pub format_id: Option<String>,
+    #[serde(default)]
+    pub direct_ytdlp: bool,
     /// Round 71 (D4) — NOT a column: computed on read (see
     /// `mark_missing`): a Completed download whose file no
     /// longer exists on disk (deleted outside the app — the
@@ -569,6 +651,29 @@ impl Store {
             // a free-text note on the download.
             conn.execute("ALTER TABLE downloads ADD COLUMN description TEXT", [])?;
         }
+        // Added in Round 78 (2026-11-19): yt-dlp platform
+        // downloads — DASH parent/child linkage (`parent_id`,
+        // `child_kind`, `merge_status`), the page URL + format id
+        // a 403/410 re-resolve needs (`source_url`, `format_id`),
+        // and the (B)-fallback flag (`direct_ytdlp`).
+        for (column, ddl) in [
+            (
+                "parent_id",
+                "TEXT REFERENCES downloads(id) ON DELETE CASCADE",
+            ),
+            ("child_kind", "TEXT"),
+            ("merge_status", "TEXT"),
+            ("source_url", "TEXT"),
+            ("format_id", "TEXT"),
+            ("direct_ytdlp", "INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            if !cols.iter().any(|c| c == column) {
+                conn.execute(
+                    &format!("ALTER TABLE downloads ADD COLUMN {column} {ddl}"),
+                    [],
+                )?;
+            }
+        }
         drop(stmt);
         // Added in the browser-extension milestone (S13): the
         // pending-links queue. It is also in schema.sql, so fresh
@@ -667,6 +772,33 @@ impl Store {
             drop(stmt);
             if !cols.iter().any(|c| c == "cookies") {
                 conn.execute("ALTER TABLE pending_links ADD COLUMN cookies TEXT", [])?;
+            }
+        }
+        // Added in Round 78 (2026-11-19): resolved-video capture
+        // fields — filename / headers / source_url / format_id /
+        // audio_url / fragmented. Same PRAGMA-guarded pattern as
+        // `cookies` above; runs AFTER the S08 rebuild above, so a
+        // rebuild cannot drop the columns again.
+        {
+            let mut stmt = conn.prepare("PRAGMA table_info(pending_links)")?;
+            let cols: Vec<String> = stmt
+                .query_map([], |r| r.get::<_, String>(1))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            drop(stmt);
+            for (column, ddl) in [
+                ("filename", "TEXT"),
+                ("headers", "TEXT"),
+                ("source_url", "TEXT"),
+                ("format_id", "TEXT"),
+                ("audio_url", "TEXT"),
+                ("fragmented", "INTEGER NOT NULL DEFAULT 0"),
+            ] {
+                if !cols.iter().any(|c| c == column) {
+                    conn.execute(
+                        &format!("ALTER TABLE pending_links ADD COLUMN {column} {ddl}"),
+                        [],
+                    )?;
+                }
             }
         }
         // Added in the site-grabber milestone (S06): the
@@ -769,7 +901,11 @@ impl Store {
         // schema.sql; older databases gain them here.
         for (table, column, ddl) in [
             ("settings", "start_on_startup", "INTEGER NOT NULL DEFAULT 0"),
-            ("settings", "browser_start_drained", "INTEGER NOT NULL DEFAULT 1"),
+            (
+                "settings",
+                "browser_start_drained",
+                "INTEGER NOT NULL DEFAULT 1",
+            ),
             // Clipboard monitoring (Round 52): the on/off switch,
             // default on.
             (
@@ -794,10 +930,22 @@ impl Store {
             // Notification sounds (Round 68): the master on/off
             // switch, default on.
             ("settings", "sounds_enabled", "INTEGER NOT NULL DEFAULT 1"),
-            ("settings", "default_action", "TEXT NOT NULL DEFAULT 'start_now'"),
-            ("settings", "duplicate_action", "TEXT NOT NULL DEFAULT 'rename'"),
+            (
+                "settings",
+                "default_action",
+                "TEXT NOT NULL DEFAULT 'start_now'",
+            ),
+            (
+                "settings",
+                "duplicate_action",
+                "TEXT NOT NULL DEFAULT 'rename'",
+            ),
             ("settings", "confirm_delete", "INTEGER NOT NULL DEFAULT 1"),
-            ("settings", "connection_timeout_secs", "INTEGER NOT NULL DEFAULT 30"),
+            (
+                "settings",
+                "connection_timeout_secs",
+                "INTEGER NOT NULL DEFAULT 30",
+            ),
             ("settings", "max_retries", "INTEGER NOT NULL DEFAULT 5"),
             // Patient tail (Round 73): zero-progress cap in
             // minutes, default 10.
@@ -806,6 +954,15 @@ impl Store {
                 "tail_zero_progress_cap_minutes",
                 "INTEGER NOT NULL DEFAULT 10",
             ),
+            // Platform downloads (Round 78): the yt-dlp on/off
+            // switch, default on, and the hidden extractor-args
+            // override for field fixes.
+            (
+                "settings",
+                "platform_downloads_enabled",
+                "INTEGER NOT NULL DEFAULT 1",
+            ),
+            ("settings", "ytdlp_extractor_args", "TEXT"),
             ("settings", "dialup_connection_name", "TEXT"),
             ("settings", "dialup_auto_dial", "INTEGER NOT NULL DEFAULT 0"),
             (
@@ -860,11 +1017,7 @@ impl Store {
             ("settings", "quota_mb", "INTEGER"),
             ("settings", "quota_hours", "INTEGER"),
             ("downloads", "speed_limit_kbps", "INTEGER"),
-            (
-                "downloads",
-                "quota_paused",
-                "INTEGER NOT NULL DEFAULT 0",
-            ),
+            ("downloads", "quota_paused", "INTEGER NOT NULL DEFAULT 0"),
         ] {
             let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
             let cols: Vec<String> = stmt
@@ -883,7 +1036,11 @@ impl Store {
         // result columns on downloads. Fresh databases get them
         // from schema.sql; older databases gain them here.
         for (table, column, ddl) in [
-            ("settings", "antivirus_enabled", "INTEGER NOT NULL DEFAULT 1"),
+            (
+                "settings",
+                "antivirus_enabled",
+                "INTEGER NOT NULL DEFAULT 1",
+            ),
             (
                 "settings",
                 "antivirus_timeout_secs",
@@ -1008,8 +1165,8 @@ impl Store {
         // transport since the S09 finish); anything else is a
         // caller error, not a row. The check uses the URL as parsed,
         // so "HTTP://…" and trailing spaces are handled, not rejected.
-        let parsed = reqwest::Url::parse(url)
-            .map_err(|e| EngineError::InvalidUrl(e.to_string()))?;
+        let parsed =
+            reqwest::Url::parse(url).map_err(|e| EngineError::InvalidUrl(e.to_string()))?;
         if !matches!(parsed.scheme(), "http" | "https" | "ftp") {
             return Err(EngineError::InvalidUrl(format!(
                 "Only http://, https:// and ftp:// links can be downloaded, not {}://",
@@ -1029,7 +1186,9 @@ impl Store {
             )));
         }
         if !matches!(source, "browser" | "download_all" | "video") {
-            return Err(EngineError::InvalidState(format!("Unknown pending-link source: {source}")));
+            return Err(EngineError::InvalidState(format!(
+                "Unknown pending-link source: {source}"
+            )));
         }
         let id = Self::new_id();
         let referrer = referrer.map(str::trim).filter(|r| !r.is_empty());
@@ -1045,23 +1204,61 @@ impl Store {
             .ok_or_else(|| EngineError::NotFound(id.clone()))?)
     }
 
+    /// Enqueue a resolved platform video (Round 78): the chosen
+    /// quality's direct URL goes in `url` and the resolver's
+    /// metadata in `resolved`. The row is `source = 'video'` and
+    /// carries the filename (sanitized video title), headers,
+    /// source page URL, format id, DASH audio URL and the
+    /// fragmented flag — `confirm_pending_link` reads them back.
+    /// `cookies` (browser cookies for the stream host) ride along
+    /// like any other hand-off and are wiped on decision, like
+    /// every other pending row.
+    pub fn enqueue_pending_link_resolved(
+        &self,
+        url: &str,
+        referrer: Option<&str>,
+        cookies: Option<&str>,
+        resolved: &ResolvedLink,
+    ) -> Result<PendingLinkRow> {
+        let row = self.enqueue_pending_link_with_cookies(url, referrer, "video", cookies)?;
+        let conn = self.lock_conn();
+        conn.execute(
+            "UPDATE pending_links SET filename = ?1, headers = ?2, source_url = ?3, \
+             format_id = ?4, audio_url = ?5, fragmented = ?6 WHERE id = ?7",
+            params![
+                resolved.filename,
+                resolved.headers,
+                resolved.source_url,
+                resolved.format_id,
+                resolved.audio_url,
+                if resolved.fragmented { 1 } else { 0 },
+                row.id,
+            ],
+        )?;
+        drop(conn);
+        Ok(self
+            .get_pending_link(&row.id)?
+            .ok_or_else(|| EngineError::NotFound(row.id.clone()))?)
+    }
+
     /// Pending links, oldest first (the drain works in arrival
     /// order). `status` filters, or `None` for every row.
     pub fn list_pending_links(&self, status: Option<&str>) -> Result<Vec<PendingLinkRow>> {
         let conn = self.lock_conn();
         let mut stmt = conn.prepare(
-            "SELECT id, url, referrer, source, status, download_id, error, cookies, created_at \
+            "SELECT id, url, referrer, source, status, download_id, error, cookies, created_at, filename, headers, source_url, format_id, audio_url, fragmented \
              FROM pending_links WHERE (?1 IS NULL OR status = ?1) \
              ORDER BY created_at ASC, rowid ASC",
         )?;
         let rows = stmt.query_map(params![status], row_to_pending_link)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(EngineError::from)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(EngineError::from)
     }
 
     pub fn get_pending_link(&self, id: &str) -> Result<Option<PendingLinkRow>> {
         let conn = self.lock_conn();
         let mut stmt = conn.prepare(
-            "SELECT id, url, referrer, source, status, download_id, error, cookies, created_at \
+            "SELECT id, url, referrer, source, status, download_id, error, cookies, created_at, filename, headers, source_url, format_id, audio_url, fragmented \
              FROM pending_links WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![id], row_to_pending_link)?;
@@ -1108,7 +1305,9 @@ impl Store {
         error: Option<&str>,
     ) -> Result<()> {
         if !matches!(status, "accepted" | "rejected") {
-            return Err(EngineError::InvalidState(format!("Unknown pending-link status: {status}")));
+            return Err(EngineError::InvalidState(format!(
+                "Unknown pending-link status: {status}"
+            )));
         }
         let conn = self.lock_conn();
         let changed = conn.execute(
@@ -1198,7 +1397,8 @@ impl Store {
              FROM grabber_projects ORDER BY created_at DESC, rowid DESC",
         )?;
         let rows = stmt.query_map([], row_to_grabber_project)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(EngineError::from)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(EngineError::from)
     }
 
     /// Write a project's status and live progress in one go. The
@@ -1272,14 +1472,19 @@ impl Store {
                 is_builtin: r.get::<_, i64>(4)? != 0,
             })
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(EngineError::from)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(EngineError::from)
     }
 
     /// Pick a category for a file extension, falling back to Documents.
     pub fn category_for_extension(&self, ext: &str) -> Result<String> {
         let ext = ext.to_ascii_lowercase();
         for cat in self.list_categories()? {
-            if cat.file_extensions.iter().any(|e| e.eq_ignore_ascii_case(&ext)) {
+            if cat
+                .file_extensions
+                .iter()
+                .any(|e| e.eq_ignore_ascii_case(&ext))
+            {
                 return Ok(cat.id);
             }
         }
@@ -1291,11 +1496,13 @@ impl Store {
     /// every extension is auto-assigned; a non-empty list restricts
     /// auto-assign to the listed extensions, and anything else falls
     /// back to Documents — the same fallback as an unknown extension.
-    pub fn category_for_extension_filtered(&self, ext: &str, auto_list: &[String]) -> Result<String> {
+    pub fn category_for_extension_filtered(
+        &self,
+        ext: &str,
+        auto_list: &[String],
+    ) -> Result<String> {
         let ext = ext.to_ascii_lowercase();
-        if !auto_list.is_empty()
-            && !auto_list.iter().any(|e| e.eq_ignore_ascii_case(&ext))
-        {
+        if !auto_list.is_empty() && !auto_list.iter().any(|e| e.eq_ignore_ascii_case(&ext)) {
             return Ok("cat-documents".to_string());
         }
         self.category_for_extension(&ext)
@@ -1311,11 +1518,15 @@ impl Store {
     ) -> Result<CategoryRow> {
         let name = name.trim();
         if name.is_empty() {
-            return Err(EngineError::InvalidState("Give the category a name".to_string()));
+            return Err(EngineError::InvalidState(
+                "Give the category a name".to_string(),
+            ));
         }
         let folder = folder.trim();
         if folder.is_empty() {
-            return Err(EngineError::InvalidState("Give the category a folder".to_string()));
+            return Err(EngineError::InvalidState(
+                "Give the category a folder".to_string(),
+            ));
         }
         let clean: Vec<String> = extensions
             .iter()
@@ -1372,7 +1583,7 @@ impl Store {
             )));
         }
         let in_use: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM downloads WHERE category_id = ?1 AND status != 'deleted'",
+            "SELECT COUNT(*) FROM downloads WHERE category_id = ?1 AND status != 'deleted' AND parent_id IS NULL",
             params![id],
             |r| r.get(0),
         )?;
@@ -1484,7 +1695,8 @@ impl Store {
              quota_enabled, quota_mb, quota_hours, \
              antivirus_enabled, antivirus_timeout_secs, show_progress_window, \
              clipboard_monitoring, show_download_complete_dialog, sounds_enabled, \
-             tail_zero_progress_cap_minutes \
+             tail_zero_progress_cap_minutes, platform_downloads_enabled, \
+             ytdlp_extractor_args \
              FROM settings WHERE id = 1",
             [],
             |r| {
@@ -1527,9 +1739,9 @@ impl Store {
                     quota_mb: r.get(24)?,
                     quota_hours: r.get(25)?,
                     antivirus_enabled: r.get::<_, i64>(26)? != 0,
-                    antivirus_timeout_secs: r.get::<_, Option<i64>>(27)?.unwrap_or(
-                        crate::antivirus::DEFAULT_SCAN_TIMEOUT_SECS,
-                    ),
+                    antivirus_timeout_secs: r
+                        .get::<_, Option<i64>>(27)?
+                        .unwrap_or(crate::antivirus::DEFAULT_SCAN_TIMEOUT_SECS),
                     show_progress_window: r.get::<_, i64>(28)? != 0,
                     clipboard_monitoring: r.get::<_, i64>(29)? != 0,
                     show_download_complete_dialog: r.get::<_, i64>(30)? != 0,
@@ -1537,6 +1749,14 @@ impl Store {
                     tail_zero_progress_cap_minutes: r
                         .get::<_, Option<i64>>(32)?
                         .unwrap_or(DEFAULT_TAIL_ZERO_PROGRESS_CAP_MINUTES),
+                    platform_downloads_enabled: r
+                        .get::<_, Option<i64>>(33)?
+                        .map(|v| v != 0)
+                        .unwrap_or(true),
+                    ytdlp_extractor_args: r
+                        .get::<_, Option<String>>(34)?
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty()),
                 })
             },
         );
@@ -1569,7 +1789,10 @@ impl Store {
             }
         }
         if !matches!(s.theme.as_str(), "light" | "dark") {
-            return Err(EngineError::InvalidState(format!("Unknown theme: {}", s.theme)));
+            return Err(EngineError::InvalidState(format!(
+                "Unknown theme: {}",
+                s.theme
+            )));
         }
         if !matches!(s.default_action.as_str(), "start_now" | "save_for_later") {
             return Err(EngineError::InvalidState(format!(
@@ -1615,7 +1838,10 @@ impl Store {
             let url = s.update_url.trim();
             let parsed = reqwest::Url::parse(url).ok();
             if url.is_empty()
-                || !matches!(parsed.map(|u| u.scheme().to_string()).as_deref(), Some("http") | Some("https"))
+                || !matches!(
+                    parsed.map(|u| u.scheme().to_string()).as_deref(),
+                    Some("http") | Some("https")
+                )
             {
                 return Err(EngineError::InvalidState(
                     "The update server address must be an http:// or https:// URL".to_string(),
@@ -1677,7 +1903,8 @@ impl Store {
              antivirus_enabled = ?27, antivirus_timeout_secs = ?28, \
              show_progress_window = ?29, clipboard_monitoring = ?30, \
              show_download_complete_dialog = ?31, sounds_enabled = ?32, \
-             tail_zero_progress_cap_minutes = ?33, \
+             tail_zero_progress_cap_minutes = ?33, platform_downloads_enabled = ?34, \
+             ytdlp_extractor_args = ?35, \
              updated_at = datetime('now') WHERE id = 1",
             params![
                 s.default_download_folder.trim(),
@@ -1716,6 +1943,11 @@ impl Store {
                 if s.show_download_complete_dialog { 1 } else { 0 },
                 if s.sounds_enabled { 1 } else { 0 },
                 s.tail_zero_progress_cap_minutes,
+                if s.platform_downloads_enabled { 1 } else { 0 },
+                s.ytdlp_extractor_args
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty()),
             ],
         )?;
         drop(conn);
@@ -1806,7 +2038,8 @@ impl Store {
              ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(EngineError::from)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(EngineError::from)
     }
 
     /// Mark (or unmark) a download as paused-by-quota. Only the
@@ -1833,7 +2066,8 @@ impl Store {
             Some(k) => {
                 if k < 0 {
                     return Err(EngineError::InvalidState(
-                        "The per-download speed limit cannot be negative — use 0 for no cap".to_string(),
+                        "The per-download speed limit cannot be negative — use 0 for no cap"
+                            .to_string(),
                     ));
                 }
                 if k > MAX_SPEED_LIMIT_KBPS {
@@ -1875,7 +2109,8 @@ impl Store {
                 has_password: r.get::<_, i64>(4)? != 0,
             })
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(EngineError::from)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(EngineError::from)
     }
 
     /// The saved credential for one host, decrypted, for the engine
@@ -1909,9 +2144,9 @@ impl Store {
     /// row carries only `has_password`.
     pub fn save_site_login(&self, input: &SiteLoginInput) -> Result<SiteLoginRow> {
         let existing = self.list_site_logins()?;
-        let by_host = existing.iter().find(|r| {
-            r.host == clean_site_host(&input.host).unwrap_or_default()
-        });
+        let by_host = existing
+            .iter()
+            .find(|r| r.host == clean_site_host(&input.host).unwrap_or_default());
         let has_password = by_host.map(|r| r.has_password).unwrap_or(false);
         let host = validate_site_login_input(input, has_password)?;
         let password_enc = match &input.password {
@@ -1973,9 +2208,7 @@ impl Store {
     /// All three events' sound settings, in UI order.
     pub fn get_sound_settings(&self) -> Result<Vec<SoundSetting>> {
         let conn = self.lock_conn();
-        let mut stmt = conn.prepare(
-            "SELECT event, enabled, file_path FROM sound_settings",
-        )?;
+        let mut stmt = conn.prepare("SELECT event, enabled, file_path FROM sound_settings")?;
         let rows = stmt.query_map([], |r| {
             Ok(SoundSetting {
                 event: r.get(0)?,
@@ -1983,12 +2216,18 @@ impl Store {
                 file: r.get(2)?,
             })
         })?;
-        let mut out: Vec<SoundSetting> =
-            rows.collect::<std::result::Result<Vec<_>, _>>().map_err(EngineError::from)?;
+        let mut out: Vec<SoundSetting> = rows
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(EngineError::from)?;
         // The seeded rows are the whole vocabulary; order them the
         // way the UI lists them, and never surface an unknown event.
         out.retain(|s| SOUND_EVENTS.contains(&s.event.as_str()));
-        out.sort_by_key(|s| SOUND_EVENTS.iter().position(|e| e == &s.event).unwrap_or(99));
+        out.sort_by_key(|s| {
+            SOUND_EVENTS
+                .iter()
+                .position(|e| e == &s.event)
+                .unwrap_or(99)
+        });
         Ok(out)
     }
 
@@ -2178,7 +2417,7 @@ impl Store {
              q.sync_interval_minutes, q.last_sync_at, q.last_sync_changed, \
              q.last_sync_unchanged, q.last_sync_removed, q.last_sync_failed, \
              q.last_sync_skipped, \
-             (SELECT COUNT(*) FROM downloads d WHERE d.queue_id = q.id AND d.status != 'deleted') \
+             (SELECT COUNT(*) FROM downloads d WHERE d.queue_id = q.id AND d.status != 'deleted' AND d.parent_id IS NULL) \
              FROM queues q ORDER BY q.is_main DESC, q.name",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -2204,7 +2443,8 @@ impl Store {
                 file_count: r.get(17)?,
             })
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(EngineError::from)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(EngineError::from)
     }
 
     pub fn get_queue(&self, id: &str) -> Result<Option<QueueRow>> {
@@ -2532,7 +2772,8 @@ impl Store {
             None | Some("deleted") => return Err(EngineError::NotFound(download_id.to_string())),
             Some("complete") if queue_type.as_deref() != Some("periodic") => {
                 return Err(EngineError::InvalidState(
-                    "This download is already finished, so it cannot be added to a queue".to_string(),
+                    "This download is already finished, so it cannot be added to a queue"
+                        .to_string(),
                 ))
             }
             _ => {}
@@ -2583,12 +2824,13 @@ impl Store {
             "SELECT id, url, final_url, filename, save_path, category_id, queue_id, \
              queue_position, size_bytes, downloaded_bytes, status, speed_bps, eta_seconds, \
              etag, last_modified, error_message, created_at, completed_at, \
-             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges, updated_at, grabber_project_id, description, active_connections, segment_count \
-             FROM downloads WHERE queue_id = ?1 AND status != 'deleted' \
+             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges, updated_at, grabber_project_id, description, active_connections, segment_count, parent_id, child_kind, merge_status, source_url, format_id, direct_ytdlp \
+             FROM downloads WHERE queue_id = ?1 AND status != 'deleted' AND parent_id IS NULL \
              ORDER BY queue_position ASC, created_at ASC",
         )?;
         let rows = stmt.query_map(params![queue_id], row_to_download)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(EngineError::from)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(EngineError::from)
     }
 
     /// Move one file to a new position inside its queue (0-based).
@@ -2673,7 +2915,7 @@ impl Store {
             "SELECT id, url, final_url, filename, save_path, category_id, queue_id, \
              queue_position, size_bytes, downloaded_bytes, status, speed_bps, eta_seconds, \
              etag, last_modified, error_message, created_at, completed_at, \
-             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges, updated_at, grabber_project_id, description, active_connections, segment_count \
+             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges, updated_at, grabber_project_id, description, active_connections, segment_count, parent_id, child_kind, merge_status, source_url, format_id, direct_ytdlp \
              FROM downloads WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![id], row_to_download)?;
@@ -2693,8 +2935,8 @@ impl Store {
             "SELECT id, url, final_url, filename, save_path, category_id, queue_id, \
              queue_position, size_bytes, downloaded_bytes, status, speed_bps, eta_seconds, \
              etag, last_modified, error_message, created_at, completed_at, \
-             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges, updated_at, grabber_project_id, description, active_connections, segment_count \
-             FROM downloads WHERE status != 'deleted' ORDER BY created_at DESC",
+             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges, updated_at, grabber_project_id, description, active_connections, segment_count, parent_id, child_kind, merge_status, source_url, format_id, direct_ytdlp \
+             FROM downloads WHERE status != 'deleted' AND parent_id IS NULL ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], row_to_download)?;
         let mut rows = rows
@@ -2728,6 +2970,92 @@ impl Store {
             params![description, id],
         )?;
         Ok(())
+    }
+
+    // -- Round 78: yt-dlp platform downloads -------------------------
+
+    /// Point a download row at a new URL (and final URL) — the
+    /// 403/410 re-resolve path: the resolver found a fresh direct
+    /// URL for the same video, so the row keeps its progress and
+    /// segments and the run retries against the new address.
+    /// Unlike `refresh_download_address` this takes no status
+    /// requirement (the caller just failed the run) and does no
+    /// probe — the resolver already proved the URL works.
+    pub fn set_download_url(&self, id: &str, url: &str, final_url: Option<&str>) -> Result<()> {
+        let conn = self.lock_conn();
+        conn.execute(
+            "UPDATE downloads SET url = ?1, final_url = ?2, updated_at = datetime('now') WHERE id = ?3",
+            params![url, final_url, id],
+        )?;
+        Ok(())
+    }
+
+    /// Write the yt-dlp metadata of a download row: the page URL
+    /// it was resolved from and the yt-dlp format id (both needed
+    /// for a later re-resolve), and the (B)-fallback flag.
+    pub fn set_download_ytdlp_meta(
+        &self,
+        id: &str,
+        source_url: Option<&str>,
+        format_id: Option<&str>,
+        direct_ytdlp: bool,
+    ) -> Result<()> {
+        let conn = self.lock_conn();
+        conn.execute(
+            "UPDATE downloads SET source_url = ?1, format_id = ?2, direct_ytdlp = ?3, updated_at = datetime('now') WHERE id = ?4",
+            params![source_url, format_id, if direct_ytdlp { 1 } else { 0 }, id],
+        )?;
+        Ok(())
+    }
+
+    /// Attach a child row to its DASH parent: `child_kind` is
+    /// 'video' or 'audio'. The parent's merge state starts at
+    /// 'pending' when the first child links (the merge only runs
+    /// once both children are complete).
+    pub fn link_child_to_parent(
+        &self,
+        child_id: &str,
+        parent_id: &str,
+        child_kind: &str,
+    ) -> Result<()> {
+        let conn = self.lock_conn();
+        conn.execute(
+            "UPDATE downloads SET parent_id = ?1, child_kind = ?2, updated_at = datetime('now') WHERE id = ?3",
+            params![parent_id, child_kind, child_id],
+        )?;
+        conn.execute(
+            "UPDATE downloads SET merge_status = COALESCE(merge_status, 'pending'), updated_at = datetime('now') WHERE id = ?1 AND parent_id IS NULL",
+            params![parent_id],
+        )?;
+        Ok(())
+    }
+
+    /// Set a DASH parent's ffmpeg merge state ('pending' |
+    /// 'merging' | 'done' | 'failed'). Only a parent row (no
+    /// parent_id of its own) can hold one.
+    pub fn set_merge_status(&self, id: &str, status: &str) -> Result<()> {
+        let conn = self.lock_conn();
+        conn.execute(
+            "UPDATE downloads SET merge_status = ?1, updated_at = datetime('now') WHERE id = ?2 AND parent_id IS NULL",
+            params![status, id],
+        )?;
+        Ok(())
+    }
+
+    /// The child rows of a DASH parent, video first.
+    pub fn list_child_downloads(&self, parent_id: &str) -> Result<Vec<DownloadRow>> {
+        let conn = self.lock_conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, url, final_url, filename, save_path, category_id, queue_id, \
+             queue_position, size_bytes, downloaded_bytes, status, speed_bps, eta_seconds, \
+             etag, last_modified, error_message, created_at, completed_at, \
+             speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges, updated_at, grabber_project_id, description, active_connections, segment_count, parent_id, child_kind, merge_status, source_url, format_id, direct_ytdlp \
+             FROM downloads WHERE parent_id = ?1 \
+             ORDER BY CASE child_kind WHEN 'video' THEN 0 ELSE 1 END, created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![parent_id], row_to_download)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(EngineError::from)
     }
 
     /// Round 55 (defect 1/4): startup reconciliation. A row left
@@ -2768,7 +3096,7 @@ impl Store {
                 "SELECT id, url, final_url, filename, save_path, category_id, queue_id, \
                  queue_position, size_bytes, downloaded_bytes, status, speed_bps, eta_seconds, \
                  etag, last_modified, error_message, created_at, completed_at, \
-                 speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges, updated_at, grabber_project_id, description, active_connections, segment_count \
+                 speed_limit_kbps, quota_paused, scan_status, scan_detail, scan_scanned_at, accept_ranges, updated_at, grabber_project_id, description, active_connections, segment_count, parent_id, child_kind, merge_status, source_url, format_id, direct_ytdlp \
                  FROM downloads WHERE id = ?1",
                 params![id],
                 row_to_download,
@@ -2777,6 +3105,20 @@ impl Store {
         if let Some(row) = row {
             Self::record_history_locked(&conn, &row)?;
         }
+        Ok(())
+    }
+
+    /// Round 78 — mark a DASH child row complete: status +
+    /// completed_at, WITHOUT the download-history record
+    /// `mark_complete` writes (the history row belongs to the
+    /// merged parent file, not to the child's intermediate file).
+    pub fn mark_child_complete(&self, id: &str) -> Result<()> {
+        let conn = self.lock_conn();
+        conn.execute(
+            "UPDATE downloads SET status = 'complete', completed_at = datetime('now'), \
+             updated_at = datetime('now') WHERE id = ?1",
+            params![id],
+        )?;
         Ok(())
     }
 
@@ -2823,7 +3165,10 @@ impl Store {
     /// match literally, never as LIKE wildcards.
     pub fn list_history(&self, query: &str) -> Result<Vec<HistoryRow>> {
         let conn = self.lock_conn();
-        let escaped = query.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let escaped = query
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
         let pattern = format!("%{escaped}%");
         let mut stmt = conn.prepare(
             "SELECT id, download_id, filename, url, final_url, size_bytes, folder, category_id, completed_at \
@@ -2832,7 +3177,8 @@ impl Store {
              ORDER BY completed_at DESC, id DESC",
         )?;
         let rows = stmt.query_map(params![query, pattern], row_to_history)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(EngineError::from)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(EngineError::from)
     }
 
     /// One history row by its history id, or `None`.
@@ -2928,7 +3274,11 @@ impl Store {
 
     // -- segments ---------------------------------------------------------
 
-    pub fn create_segments(&self, download_id: &str, ranges: &[(i64, Option<i64>)]) -> Result<Vec<SegmentRow>> {
+    pub fn create_segments(
+        &self,
+        download_id: &str,
+        ranges: &[(i64, Option<i64>)],
+    ) -> Result<Vec<SegmentRow>> {
         let conn = self.lock_conn();
         let mut out = Vec::with_capacity(ranges.len());
         for (index, (start, end)) in ranges.iter().enumerate() {
@@ -2968,7 +3318,8 @@ impl Store {
                 status: r.get(6)?,
             })
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(EngineError::from)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(EngineError::from)
     }
 
     /// Update one segment's progress (and, when it finishes, its status).
@@ -2987,11 +3338,7 @@ impl Store {
     /// The existing segment is shortened first (`end_byte = mid - 1`) and
     /// only then is the new segment inserted — the schema's no-overlap
     /// trigger aborts the insert otherwise.
-    pub fn split_segment(
-        &self,
-        segment: &SegmentRow,
-        mid: i64,
-    ) -> Result<SegmentRow> {
+    pub fn split_segment(&self, segment: &SegmentRow, mid: i64) -> Result<SegmentRow> {
         let conn = self.lock_conn();
         conn.execute(
             "UPDATE segments SET end_byte = ?1 WHERE id = ?2",
@@ -3025,7 +3372,10 @@ impl Store {
     /// remote file changed and the download must restart from zero).
     pub fn delete_segments(&self, download_id: &str) -> Result<()> {
         let conn = self.lock_conn();
-        conn.execute("DELETE FROM segments WHERE download_id = ?1", params![download_id])?;
+        conn.execute(
+            "DELETE FROM segments WHERE download_id = ?1",
+            params![download_id],
+        )?;
         Ok(())
     }
 
@@ -3065,7 +3415,13 @@ impl Store {
     /// Round 72 (D): the live connection/part counts reset too —
     /// a reset row is not downloading, so both read 0 until its
     /// next run's checkpoint writes them.
-    pub fn reset_download(&self, id: &str, size: Option<i64>, etag: Option<&str>, last_modified: Option<&str>) -> Result<()> {
+    pub fn reset_download(
+        &self,
+        id: &str,
+        size: Option<i64>,
+        etag: Option<&str>,
+        last_modified: Option<&str>,
+    ) -> Result<()> {
         let conn = self.lock_conn();
         conn.execute(
             "UPDATE downloads SET downloaded_bytes = 0, speed_bps = 0, eta_seconds = NULL, \
@@ -3123,7 +3479,15 @@ impl Store {
             "UPDATE downloads SET url = ?1, final_url = ?2, size_bytes = ?3, \
              etag = ?4, last_modified = ?5, accept_ranges = ?6, error_message = NULL, \
              updated_at = datetime('now') WHERE id = ?7",
-            params![url, final_url, size, etag, last_modified, accept_ranges as i64, id],
+            params![
+                url,
+                final_url,
+                size,
+                etag,
+                last_modified,
+                accept_ranges as i64,
+                id
+            ],
         )?;
         if changed == 0 {
             return Err(EngineError::NotFound(id.to_string()));
@@ -3151,7 +3515,15 @@ impl Store {
              last_sync_unchanged = ?3, last_sync_removed = ?4, \
              last_sync_failed = ?5, last_sync_skipped = ?6, \
              updated_at = datetime('now') WHERE id = ?7",
-            params![last_sync_at, changed, unchanged, removed, failed, skipped, queue_id],
+            params![
+                last_sync_at,
+                changed,
+                unchanged,
+                removed,
+                failed,
+                skipped,
+                queue_id
+            ],
         )?;
         if changed_rows == 0 {
             return Err(EngineError::NotFound(queue_id.to_string()));
@@ -3162,16 +3534,18 @@ impl Store {
 
 fn row_to_grabber_project(r: &rusqlite::Row<'_>) -> rusqlite::Result<GrabberProjectRow> {
     let filters_json: String = r.get(3)?;
-    let filters: GrabberFilters =
-        serde_json::from_str(&filters_json).unwrap_or_default();
+    let filters: GrabberFilters = serde_json::from_str(&filters_json).unwrap_or_default();
     let schedule_json: Option<String> = r.get(5)?;
     let schedule_start_at = schedule_json
         .as_deref()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-        .and_then(|v| v.get("start_at").and_then(|s| s.as_str()).map(str::to_string));
+        .and_then(|v| {
+            v.get("start_at")
+                .and_then(|s| s.as_str())
+                .map(str::to_string)
+        });
     let matched_json: String = r.get(12)?;
-    let matched_files: Vec<MatchedFile> =
-        serde_json::from_str(&matched_json).unwrap_or_default();
+    let matched_files: Vec<MatchedFile> = serde_json::from_str(&matched_json).unwrap_or_default();
     // Pre-Milestone-4 rows have no queue/action columns (the
     // migration adds them with defaults, but read defensively):
     // a missing queue reads back as the main queue, a missing
@@ -3212,6 +3586,12 @@ fn row_to_pending_link(r: &rusqlite::Row<'_>) -> rusqlite::Result<PendingLinkRow
         error: r.get(6)?,
         cookies: r.get(7)?,
         created_at: r.get(8)?,
+        filename: r.get(9)?,
+        headers: r.get(10)?,
+        source_url: r.get(11)?,
+        format_id: r.get(12)?,
+        audio_url: r.get(13)?,
+        fragmented: r.get::<_, i64>(14)? != 0,
     })
 }
 
@@ -3260,6 +3640,12 @@ fn row_to_download(r: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadRow> {
         description: r.get(26)?,
         active_connections: r.get(27)?,
         segment_count: r.get(28)?,
+        parent_id: r.get(29)?,
+        child_kind: r.get(30)?,
+        merge_status: r.get(31)?,
+        source_url: r.get(32)?,
+        format_id: r.get(33)?,
+        direct_ytdlp: r.get::<_, i64>(34)? != 0,
         // Round 71 (D4) — not a column; `mark_missing` sets it
         // after the read (it needs a filesystem check, and the
         // row mapper must stay a pure DB read).

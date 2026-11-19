@@ -60,16 +60,14 @@ const MD5_S: [u32; 64] = [
 ];
 
 const MD5_K: [u32; 64] = [
-    0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613,
-    0xfd469501, 0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193,
-    0xa679438e, 0x49b40821, 0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d,
-    0x02441453, 0xd8a1e681, 0xe7d3fbc8, 0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
-    0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a, 0xfffa3942, 0x8771f681, 0x6d9d6122,
-    0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70, 0x289b7ec6, 0xeaa127fa,
-    0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665, 0xf4292244,
-    0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
-    0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb,
-    0xeb86d391,
+    0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
+    0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821,
+    0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
+    0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed, 0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a,
+    0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70,
+    0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
+    0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+    0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391,
 ];
 
 /// MD5 digest of `data`.
@@ -103,10 +101,7 @@ pub fn md5(data: &[u8]) -> [u8; 16] {
                 2 => (b ^ c ^ d, (3 * i + 5) % 16),
                 _ => (c ^ (b | !d), (7 * i) % 16),
             };
-            f = f
-                .wrapping_add(a)
-                .wrapping_add(MD5_K[i])
-                .wrapping_add(m[g]);
+            f = f.wrapping_add(a).wrapping_add(MD5_K[i]).wrapping_add(m[g]);
             a = d;
             d = c;
             c = b;
@@ -380,8 +375,9 @@ pub struct NtlmChallenge {
 /// Parse a base64 Type 2 token (with or without the `NTLM ` prefix).
 pub fn parse_type2(token: &str) -> Result<NtlmChallenge> {
     let token = token.strip_prefix("NTLM ").unwrap_or(token).trim();
-    let bytes = base64_decode(token)
-        .ok_or_else(|| EngineError::InvalidState("The proxy sent a bad NTLM challenge".to_string()))?;
+    let bytes = base64_decode(token).ok_or_else(|| {
+        EngineError::InvalidState("The proxy sent a bad NTLM challenge".to_string())
+    })?;
     if bytes.len() < 48
         || &bytes[0..8] != b"NTLMSSP\0"
         || u32::from_le_bytes(bytes[8..12].try_into().unwrap()) != 2
@@ -459,7 +455,9 @@ pub fn client_challenge() -> [u8; 8] {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
-    let mut mixed = now.as_nanos() as u64 ^ ((std::process::id() as u64) << 32) ^ n.wrapping_mul(0x9e3779b97f4a7c15);
+    let mut mixed = now.as_nanos() as u64
+        ^ ((std::process::id() as u64) << 32)
+        ^ n.wrapping_mul(0x9e3779b97f4a7c15);
     let mut out = [0u8; 8];
     for b in out.iter_mut() {
         mixed ^= mixed >> 33;
@@ -528,7 +526,13 @@ pub fn build_type3(
 ) -> Vec<u8> {
     let nt_hash = ntlm_hash(password);
     let v2_hash = ntlmv2_hash(&nt_hash, user, domain);
-    let nt_resp = ntlmv2_response(&v2_hash, &challenge.server_challenge, client_chal, timestamp, &challenge.target_info);
+    let nt_resp = ntlmv2_response(
+        &v2_hash,
+        &challenge.server_challenge,
+        client_chal,
+        timestamp,
+        &challenge.target_info,
+    );
     let lm_resp = lmv2_response(&v2_hash, &challenge.server_challenge, client_chal);
     let domain_b = utf16le(domain);
     let user_b = utf16le(user);
@@ -572,7 +576,15 @@ pub fn build_type3_now(
     challenge: &NtlmChallenge,
 ) -> Vec<u8> {
     let timestamp = challenge.target_timestamp.unwrap_or_else(filetime_now);
-    build_type3(user, domain, workstation, password, challenge, &client_challenge(), timestamp)
+    build_type3(
+        user,
+        domain,
+        workstation,
+        password,
+        challenge,
+        &client_challenge(),
+        timestamp,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -630,7 +642,10 @@ pub(crate) fn header_value<'a>(headers: &'a [RawHeader], name: &str) -> Option<&
 /// Discard a response body (Content-Length only — a 407 body is
 /// never chunked in practice) so the next request on the same
 /// connection starts clean. Shared with `kerberos.rs`.
-pub(crate) async fn drain_body(reader: &mut BufReader<TcpStream>, headers: &[RawHeader]) -> Result<()> {
+pub(crate) async fn drain_body(
+    reader: &mut BufReader<TcpStream>,
+    headers: &[RawHeader],
+) -> Result<()> {
     if let Some(len) = header_value(headers, "content-length").and_then(|v| v.parse::<u64>().ok()) {
         let mut left = len;
         let mut buf = [0u8; 4096];
@@ -656,7 +671,8 @@ fn proxy_authenticate_ntlm(headers: &[RawHeader]) -> Option<String> {
     })
 }
 
-fn proxy_authenticate_negotiate_only(headers: &[RawHeader]) -> bool {    let mut saw_negotiate = false;
+fn proxy_authenticate_negotiate_only(headers: &[RawHeader]) -> bool {
+    let mut saw_negotiate = false;
     let mut saw_ntlm = false;
     for (n, v) in headers {
         if n == "proxy-authenticate" {
@@ -800,7 +816,8 @@ pub async fn ntlm_request(
         (Some(u), Some(p)) if !u.trim().is_empty() => (u.clone(), p.clone()),
         _ => {
             return Err(EngineError::InvalidState(
-                "The proxy needs NTLM authentication — set the proxy username and password".to_string(),
+                "The proxy needs NTLM authentication — set the proxy username and password"
+                    .to_string(),
             ))
         }
     };
@@ -815,7 +832,11 @@ pub async fn ntlm_request(
         }
         t
     });
-    let host_header = if port == 80 { host.clone() } else { format!("{host}:{port}") };
+    let host_header = if port == 80 {
+        host.clone()
+    } else {
+        format!("{host}:{port}")
+    };
     let range_header = range.map(|(start, end)| match end {
         Some(e) => format!("bytes={start}-{e}"),
         None => format!("bytes={start}-"),
@@ -855,7 +876,8 @@ pub async fn ntlm_request(
             // or a proxy that changed its mind mid-handshake).
             return Err(EngineError::InvalidState(
                 "This proxy needs Kerberos (Negotiate) authentication, not NTLM — \
-                 set the proxy authentication to Kerberos or Negotiate (auto)".to_string(),
+                 set the proxy authentication to Kerberos or Negotiate (auto)"
+                    .to_string(),
             ));
         }
         // Drain the 407 body (if any) before sending the next
@@ -864,7 +886,8 @@ pub async fn ntlm_request(
         drain_body(&mut reader, &headers).await?;
         let challenge_token = proxy_authenticate_ntlm(&headers).ok_or_else(|| {
             EngineError::InvalidState(
-                "Proxy authentication failed (407) — check the proxy username and password".to_string(),
+                "Proxy authentication failed (407) — check the proxy username and password"
+                    .to_string(),
             )
         })?;
         // The Type 2 token is the base64 after "NTLM ".
@@ -875,7 +898,13 @@ pub async fn ntlm_request(
             .to_string();
         let challenge = parse_type2(&token)?;
         // Type 3 + the real request, same connection.
-        let type3 = base64_encode(&build_type3_now(&user, &domain, "FETCHLINE", &password, &challenge));
+        let type3 = base64_encode(&build_type3_now(
+            &user,
+            &domain,
+            "FETCHLINE",
+            &password,
+            &challenge,
+        ));
         reader
             .write_all(request_line(&format!("NTLM {type3}")).as_bytes())
             .await?;
@@ -887,7 +916,9 @@ pub async fn ntlm_request(
     tokio::time::timeout(NTLM_TIMEOUT, work)
         .await
         .map_err(|_| {
-            EngineError::InvalidState("The proxy did not answer the NTLM handshake in time".to_string())
+            EngineError::InvalidState(
+                "The proxy did not answer the NTLM handshake in time".to_string(),
+            )
         })?
 }
 
@@ -917,10 +948,14 @@ pub async fn probe_connect_auth(proxy: &ProxyConfig, url: &str) -> Option<Connec
     let host = parsed.host_str()?.to_string();
     let port = parsed.port_or_known_default().unwrap_or(443);
     let work = async {
-        let stream = TcpStream::connect((proxy.host.as_str(), proxy.port as u16)).await.ok()?;
+        let stream = TcpStream::connect((proxy.host.as_str(), proxy.port as u16))
+            .await
+            .ok()?;
         let mut reader = BufReader::new(stream);
         reader
-            .write_all(format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n").as_bytes())
+            .write_all(
+                format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n").as_bytes(),
+            )
             .await
             .ok()?;
         reader.flush().await.ok()?;
@@ -939,7 +974,10 @@ pub async fn probe_connect_auth(proxy: &ProxyConfig, url: &str) -> Option<Connec
         }
         Some(ConnectAuthKind::Basic)
     };
-    tokio::time::timeout(NTLM_TIMEOUT, work).await.ok().flatten()
+    tokio::time::timeout(NTLM_TIMEOUT, work)
+        .await
+        .ok()
+        .flatten()
 }
 
 /// HEAD a URL through an NTLM proxy and return `(status, headers)`.
@@ -968,7 +1006,10 @@ mod tests {
             "9e107d9d372bb6826bd81d3542a419d6"
         );
         // Multi-block (56+ bytes) + a 1,000,000-byte input.
-        assert_eq!(hex(&md5(&vec![b'a'; 1_000_000])), "7707d6ae4e027c70eea2a935c2296f21");
+        assert_eq!(
+            hex(&md5(&vec![b'a'; 1_000_000])),
+            "7707d6ae4e027c70eea2a935c2296f21"
+        );
     }
 
     #[test]
@@ -976,7 +1017,10 @@ mod tests {
         assert_eq!(hex(&md4(b"")), "31d6cfe0d16ae931b73c59d7e0c089c0");
         assert_eq!(hex(&md4(b"a")), "bde52cb31de33e46245e05fbdbd6fb24");
         assert_eq!(hex(&md4(b"abc")), "a448017aaf21d8525fc10ae87aa6729d");
-        assert_eq!(hex(&md4(b"The quick brown fox jumps over the lazy dog")), "1bee69a46ba811185c194762abaeae90");
+        assert_eq!(
+            hex(&md4(b"The quick brown fox jumps over the lazy dog")),
+            "1bee69a46ba811185c194762abaeae90"
+        );
     }
 
     #[test]
@@ -990,7 +1034,10 @@ mod tests {
 
     #[test]
     fn ntlm_hash_of_password_matches_published_value() {
-        assert_eq!(hex(&ntlm_hash("Password")), "a4f49c406510bdcab6824ee7c30fd852");
+        assert_eq!(
+            hex(&ntlm_hash("Password")),
+            "a4f49c406510bdcab6824ee7c30fd852"
+        );
     }
 
     #[test]
@@ -1072,14 +1119,27 @@ mod tests {
         let v2 = ntlmv2_hash(&nt, "User", "Domain");
         assert_eq!(
             nt_resp,
-            ntlmv2_response(&v2, &hex8("0123456789abcdef"), &hex8("aaaaaaaaaaaaaaaa"), 132223104000000000, &[]).as_slice()
+            ntlmv2_response(
+                &v2,
+                &hex8("0123456789abcdef"),
+                &hex8("aaaaaaaaaaaaaaaa"),
+                132223104000000000,
+                &[]
+            )
+            .as_slice()
         );
     }
 
     #[test]
     fn split_user_handles_domain_forms() {
-        assert_eq!(split_user("DOMAIN\\alice"), ("DOMAIN".to_string(), "alice".to_string()));
-        assert_eq!(split_user("alice@domain.example"), ("domain.example".to_string(), "alice".to_string()));
+        assert_eq!(
+            split_user("DOMAIN\\alice"),
+            ("DOMAIN".to_string(), "alice".to_string())
+        );
+        assert_eq!(
+            split_user("alice@domain.example"),
+            ("domain.example".to_string(), "alice".to_string())
+        );
         assert_eq!(split_user("alice"), (String::new(), "alice".to_string()));
     }
 

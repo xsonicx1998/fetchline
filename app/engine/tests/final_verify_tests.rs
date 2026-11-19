@@ -21,8 +21,7 @@ use std::time::Duration;
 
 use fetchline_engine::timeutil::{now_unix, unix_to_iso};
 use fetchline_engine::video::{
-    detect_videos_in_html, parse_m3u8, validate_video_variants, VideoVariantInput,
-    UNKNOWN_QUALITY,
+    detect_videos_in_html, parse_m3u8, validate_video_variants, VideoVariantInput, UNKNOWN_QUALITY,
 };
 use fetchline_engine::{DownloadManager, ProgressEvent, RetryInfo, Store};
 use tokio::sync::broadcast;
@@ -63,7 +62,11 @@ fn all_types() -> Vec<String> {
         .collect()
 }
 
-async fn wait_grabber(mgr: &DownloadManager, id: &str, secs: u64) -> fetchline_engine::GrabberProjectRow {
+async fn wait_grabber(
+    mgr: &DownloadManager,
+    id: &str,
+    secs: u64,
+) -> fetchline_engine::GrabberProjectRow {
     let mut last: Option<fetchline_engine::GrabberProjectRow> = None;
     for _ in 0..secs * 10 {
         if let Ok(Some(p)) = mgr.get_grabber_project(id) {
@@ -178,9 +181,18 @@ impl Drop for MiniVideoServer {
 
 async fn make_periodic(mgr: &Arc<DownloadManager>, name: &str, interval: i64) -> String {
     let queue = mgr.create_queue(name).unwrap();
-    mgr.update_queue(&queue.id, "periodic", None, None, false, "none", None, Some(interval))
-        .await
-        .unwrap();
+    mgr.update_queue(
+        &queue.id,
+        "periodic",
+        None,
+        None,
+        false,
+        "none",
+        None,
+        Some(interval),
+    )
+    .await
+    .unwrap();
     queue.id
 }
 
@@ -219,15 +231,27 @@ async fn final_sync_changed_redownloaded_unchanged_skipped() {
     let gets_before = server.get_requests();
     let r = mgr.run_sync_queue(&queue).await.unwrap();
     assert_eq!((r.unchanged, r.changed, r.removed, r.failed), (1, 0, 0, 0));
-    assert_eq!(server.get_requests(), gets_before, "unchanged file must not be re-downloaded");
+    assert_eq!(
+        server.get_requests(),
+        gets_before,
+        "unchanged file must not be re-downloaded"
+    );
 
     // Changed (new size + ETag): re-downloaded byte-identical.
     server.bump_version();
     let r = mgr.run_sync_queue(&queue).await.unwrap();
-    assert_eq!((r.changed, r.unchanged), (1, 0), "changed file must be re-downloaded");
+    assert_eq!(
+        (r.changed, r.unchanged),
+        (1, 0),
+        "changed file must be re-downloaded"
+    );
     let row = mgr.get_download(&id).unwrap().unwrap();
     let after = std::fs::read(&row.save_path).unwrap();
-    assert_eq!(after, payload(512 * 1024 + 1024), "re-downloaded bytes must match the new version");
+    assert_eq!(
+        after,
+        payload(512 * 1024 + 1024),
+        "re-downloaded bytes must match the new version"
+    );
     assert_ne!(after, before_bytes);
     assert_eq!(row.status, "complete");
 }
@@ -243,9 +267,16 @@ async fn final_sync_remote_deleted_reported_and_local_kept() {
 
     server.set_gone(true);
     let r = mgr.run_sync_queue(&queue).await.unwrap();
-    assert_eq!((r.removed, r.changed, r.failed), (1, 0, 0), "remote-deleted must be reported");
+    assert_eq!(
+        (r.removed, r.changed, r.failed),
+        (1, 0, 0),
+        "remote-deleted must be reported"
+    );
     assert_eq!(r.files[0].status, "removed");
-    assert!(std::path::Path::new(&save_path).exists(), "the local copy must be kept");
+    assert!(
+        std::path::Path::new(&save_path).exists(),
+        "the local copy must be kept"
+    );
 }
 
 #[tokio::test]
@@ -255,7 +286,16 @@ async fn final_sync_interval_below_5_minutes_rejected() {
     let queue = mgr.create_queue("Sync").unwrap();
     for bad in [0, 1, 4] {
         let err = mgr
-            .update_queue(&queue.id, "periodic", None, None, false, "none", None, Some(bad))
+            .update_queue(
+                &queue.id,
+                "periodic",
+                None,
+                None,
+                false,
+                "none",
+                None,
+                Some(bad),
+            )
             .await
             .unwrap_err();
         assert!(err.to_string().contains("5"), "interval {bad}: {err}");
@@ -267,9 +307,18 @@ async fn final_sync_interval_below_5_minutes_rejected() {
         .unwrap_err();
     assert!(err.to_string().contains("5"), "{err}");
     // The 5-minute floor itself is accepted.
-    mgr.update_queue(&queue.id, "periodic", None, None, false, "none", None, Some(5))
-        .await
-        .unwrap();
+    mgr.update_queue(
+        &queue.id,
+        "periodic",
+        None,
+        None,
+        false,
+        "none",
+        None,
+        Some(5),
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -280,13 +329,28 @@ async fn final_sync_one_time_and_periodic_are_exclusive() {
     let queue = mgr.create_queue("Q").unwrap();
     // A one-time queue cannot carry a sync interval.
     let err = mgr
-        .update_queue(&queue.id, "one_time", Some(&iso_in(60)), None, false, "none", None, Some(30))
+        .update_queue(
+            &queue.id,
+            "one_time",
+            Some(&iso_in(60)),
+            None,
+            false,
+            "none",
+            None,
+            Some(30),
+        )
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("only applies to periodic"), "{err}");
+    assert!(
+        err.to_string().contains("only applies to periodic"),
+        "{err}"
+    );
     // A periodic queue cannot be drained as a one-time queue…
     let pq = make_periodic(&mgr, "Sync", 30).await;
-    assert!(mgr.start_queue(&pq).await.is_err(), "start_queue must refuse a periodic queue");
+    assert!(
+        mgr.start_queue(&pq).await.is_err(),
+        "start_queue must refuse a periodic queue"
+    );
     // …and a one-time queue cannot be synced.
     assert!(
         mgr.run_sync_queue(&queue.id).await.is_err(),
@@ -312,9 +376,15 @@ async fn final_drain_starts_download_not_just_queued() {
     assert_eq!(summary.accepted.len(), 1);
     assert_eq!(summary.accepted[0].0, row.id);
     assert!(summary.rejected.is_empty());
-    assert!(summary.start_failed.is_empty(), "a drained link must start, not sit queued");
+    assert!(
+        summary.start_failed.is_empty(),
+        "a drained link must start, not sit queued"
+    );
     let (_, download_id) = &summary.accepted[0];
-    assert!(wait_for_status(&mgr, download_id, "complete", 30).await, "drained link must finish");
+    assert!(
+        wait_for_status(&mgr, download_id, "complete", 30).await,
+        "drained link must finish"
+    );
     let dl = mgr.get_download(download_id).unwrap().unwrap();
     assert_eq!(std::fs::read(&dl.save_path).unwrap(), payload(512 * 1024));
 }
@@ -325,14 +395,23 @@ async fn final_drain_refuses_excluded_site() {
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
     let store = mgr.store();
-    store.enqueue_pending_link(&server.url, None, "browser").unwrap();
+    store
+        .enqueue_pending_link(&server.url, None, "browser")
+        .unwrap();
     // Excluded AFTER the link was queued: the drain must still refuse it.
     set_excluded(store, &["127.0.0.1"]);
     let summary = mgr.drain_pending_links().await.unwrap();
     assert!(summary.accepted.is_empty());
     assert_eq!(summary.rejected.len(), 1);
-    assert!(summary.rejected[0].1.contains("excluded"), "reason: {}", summary.rejected[0].1);
-    assert!(mgr.list_downloads().unwrap().is_empty(), "nothing must be downloaded from an excluded site");
+    assert!(
+        summary.rejected[0].1.contains("excluded"),
+        "reason: {}",
+        summary.rejected[0].1
+    );
+    assert!(
+        mgr.list_downloads().unwrap().is_empty(),
+        "nothing must be downloaded from an excluded site"
+    );
 }
 
 #[tokio::test]
@@ -343,14 +422,25 @@ async fn final_drain_duplicate_links_get_different_paths() {
     let store = mgr.store();
     // Round 67: 'download_all' rows — a browser capture waits
     // for the Add URL dialog and is never drained.
-    store.enqueue_pending_link(&server.url, None, "download_all").unwrap();
-    store.enqueue_pending_link(&server.url, None, "download_all").unwrap();
+    store
+        .enqueue_pending_link(&server.url, None, "download_all")
+        .unwrap();
+    store
+        .enqueue_pending_link(&server.url, None, "download_all")
+        .unwrap();
     let summary = mgr.drain_pending_links().await.unwrap();
-    assert_eq!(summary.accepted.len(), 2, "both copies are accepted (the guard renames, not rejects)");
+    assert_eq!(
+        summary.accepted.len(),
+        2,
+        "both copies are accepted (the guard renames, not rejects)"
+    );
     let ids: Vec<&String> = summary.accepted.iter().map(|(_, d)| d).collect();
     let p0 = mgr.get_download(ids[0]).unwrap().unwrap().save_path;
     let p1 = mgr.get_download(ids[1]).unwrap().unwrap().save_path;
-    assert_ne!(p0, p1, "the duplicate guard must give the second copy a different file");
+    assert_ne!(
+        p0, p1,
+        "the duplicate guard must give the second copy a different file"
+    );
     assert!(wait_for_status(&mgr, ids[0], "complete", 30).await);
     assert!(wait_for_status(&mgr, ids[1], "complete", 30).await);
     assert_eq!(std::fs::read(&p0).unwrap(), payload(512 * 1024));
@@ -363,15 +453,28 @@ async fn final_drain_duplicate_links_get_different_paths() {
 async fn final_video_encrypted_playlist_not_offered_as_downloadable() {
     // Parser level: the shared fixture is flagged encrypted.
     let enc = parse_m3u8(&fixture("encrypted.m3u8")).expect("encrypted fixture parses");
-    assert!(enc.encrypted, "an AES-128 playlist must be flagged encrypted");
+    assert!(
+        enc.encrypted,
+        "an AES-128 playlist must be flagged encrypted"
+    );
     // Scan level: a page linking that playlist lists it as not downloadable.
     let server = MiniVideoServer::start("enc.m3u8", fixture("encrypted.m3u8"));
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
-    let found = mgr.detect_page_videos(&format!("{}/page.html", server.base)).await.unwrap();
+    let found = mgr
+        .detect_page_videos(&format!("{}/page.html", server.base))
+        .await
+        .unwrap();
     assert_eq!(found.len(), 1, "found: {found:?}");
-    assert!(!found[0].downloadable, "an encrypted playlist alone will not play");
-    assert!(found[0].error.as_deref().unwrap().contains("encrypted"), "error: {:?}", found[0].error);
+    assert!(
+        !found[0].downloadable,
+        "an encrypted playlist alone will not play"
+    );
+    assert!(
+        found[0].error.as_deref().unwrap().contains("encrypted"),
+        "error: {:?}",
+        found[0].error
+    );
 }
 
 #[tokio::test]
@@ -380,13 +483,26 @@ async fn final_video_m3u8_downloaded_as_is_bytes_exact() {
     let server = MiniVideoServer::start("vod.m3u8", playlist.clone());
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
-    let found = mgr.detect_page_videos(&format!("{}/page.html", server.base)).await.unwrap();
+    let found = mgr
+        .detect_page_videos(&format!("{}/page.html", server.base))
+        .await
+        .unwrap();
     assert_eq!(found.len(), 1);
     assert!(found[0].downloadable);
-    assert!(found[0].note.as_deref().unwrap().contains("not merged"), "note: {:?}", found[0].note);
+    assert!(
+        found[0].note.as_deref().unwrap().contains("not merged"),
+        "note: {:?}",
+        found[0].note
+    );
     let url = found[0].url.clone();
     let (id, _) = mgr
-        .add_download(&url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -399,7 +515,10 @@ async fn final_video_m3u8_downloaded_as_is_bytes_exact() {
 
 #[test]
 fn final_video_quality_never_invented() {
-    let settings = Store::open(&tmpdir().join("s.db")).unwrap().get_settings().unwrap();
+    let settings = Store::open(&tmpdir().join("s.db"))
+        .unwrap()
+        .get_settings()
+        .unwrap();
     // An invented marketing claim is replaced by the honest derivation.
     let (kept, skipped) = validate_video_variants(
         "http://127.0.0.1/watch",
@@ -410,6 +529,7 @@ fn final_video_quality_never_invented() {
             live: false,
             drm: false,
             note: None,
+            ..Default::default()
         }],
         &settings,
     )
@@ -426,6 +546,7 @@ fn final_video_quality_never_invented() {
             live: false,
             drm: false,
             note: None,
+            ..Default::default()
         }],
         &settings,
     )
@@ -490,7 +611,10 @@ async fn final_grabber_queue_choice_respected() {
     assert_eq!(done.status, "done");
     assert!(done.files_downloaded >= 1);
     let in_queue = mgr.list_queue_files(&queue.id).unwrap();
-    assert!(!in_queue.is_empty(), "grabbed files must be filed into the chosen queue");
+    assert!(
+        !in_queue.is_empty(),
+        "grabbed files must be filed into the chosen queue"
+    );
     assert!(in_queue.iter().all(|d| d.status == "complete"));
 }
 
@@ -520,7 +644,10 @@ async fn final_grabber_completion_action_not_armed_without_downloads() {
     let done = wait_grabber(&mgr, &p1.id, 30).await;
     assert_eq!(done.status, "done");
     assert_eq!(done.files_downloaded, 0);
-    assert!(mgr.pending_action(&q1.id).await.is_none(), "explore-only must not arm an action");
+    assert!(
+        mgr.pending_action(&q1.id).await.is_none(),
+        "explore-only must not arm an action"
+    );
 
     // (ii) Download run where every matched file is dead: 0 downloads, no action.
     let q2 = mgr.create_queue("DeadQ").unwrap();
@@ -542,7 +669,10 @@ async fn final_grabber_completion_action_not_armed_without_downloads() {
     let done = wait_grabber(&mgr, &p2.id, 30).await;
     assert_eq!(done.status, "done");
     assert_eq!(done.files_downloaded, 0, "the only matched file is dead");
-    assert!(mgr.pending_action(&q2.id).await.is_none(), "0 downloads must not arm an action");
+    assert!(
+        mgr.pending_action(&q2.id).await.is_none(),
+        "0 downloads must not arm an action"
+    );
 
     // (iii) Positive control: a run that DID download arms the action (then dismiss it).
     let q3 = mgr.create_queue("RealQ").unwrap();
@@ -564,7 +694,10 @@ async fn final_grabber_completion_action_not_armed_without_downloads() {
     let done = wait_grabber(&mgr, &p3.id, 30).await;
     assert_eq!(done.status, "done");
     assert!(done.files_downloaded >= 1);
-    assert!(mgr.pending_action(&q3.id).await.is_some(), ">=1 download must arm the action");
+    assert!(
+        mgr.pending_action(&q3.id).await.is_some(),
+        ">=1 download must arm the action"
+    );
     mgr.dismiss_queue_action(&q3.id).await.unwrap();
 }
 
@@ -585,7 +718,13 @@ async fn final_retry_countdown_on_dropped_connection_then_retry_now_recovers() {
     mgr.update_settings(&s).unwrap();
     server.set_drop_get(true);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     let mut rx = mgr.subscribe();
@@ -595,7 +734,11 @@ async fn final_retry_countdown_on_dropped_connection_then_retry_now_recovers() {
         .expect("a dropped connection must surface a retry countdown");
     assert!(retry.attempt >= 1, "attempt: {}", retry.attempt);
     assert_eq!(retry.max_attempts, 3);
-    assert!((1..=16).contains(&retry.retry_in_secs), "countdown: {}", retry.retry_in_secs);
+    assert!(
+        (1..=16).contains(&retry.retry_in_secs),
+        "countdown: {}",
+        retry.retry_in_secs
+    );
     assert!(!retry.error.is_empty());
     assert!(mgr.get_retry_state(&id).await.is_some());
     // Server recovers; Retry now skips the backoff and the file finishes.
@@ -613,15 +756,29 @@ async fn final_cancel_during_retry_wait_works() {
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     server.set_fail_get(true);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     let mut rx = mgr.subscribe();
     mgr.start_download(&id).await.unwrap();
-    wait_for_retry_event(&mut rx, 15).await.expect("a retry wait to cancel during");
+    wait_for_retry_event(&mut rx, 15)
+        .await
+        .expect("a retry wait to cancel during");
     mgr.cancel_download(&id).await.unwrap();
-    assert!(wait_for_status(&mgr, &id, "deleted", 5).await, "cancel during the wait must delete at once");
-    assert!(mgr.get_retry_state(&id).await.is_none(), "no retry wait may survive the cancel");
+    assert!(
+        wait_for_status(&mgr, &id, "deleted", 5).await,
+        "cancel during the wait must delete at once"
+    );
+    assert!(
+        mgr.get_retry_state(&id).await.is_none(),
+        "no retry wait may survive the cancel"
+    );
 }
 
 #[tokio::test]
@@ -632,7 +789,13 @@ async fn final_open_folder_rejects_deleted_folder() {
     std::fs::create_dir_all(&sub).unwrap();
     let mgr = test_mgr(&dir);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(sub.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(sub.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();

@@ -18,9 +18,7 @@ use std::time::{Duration, Instant};
 
 use mock::*;
 
-use fetchline_engine::proxy::{
-    build_client_with_total_timeout, CLIENT_TOTAL_TIMEOUT,
-};
+use fetchline_engine::proxy::{build_client_with_total_timeout, CLIENT_TOTAL_TIMEOUT};
 use fetchline_engine::{DownloadManager, Store};
 
 async fn set_max_retries(mgr: &DownloadManager, n: i64) {
@@ -54,8 +52,7 @@ async fn total_timeout_fails_a_stalling_server() {
             std::thread::sleep(Duration::from_secs(30));
         }
     });
-    let client =
-        build_client_with_total_timeout(None, 30, Duration::from_secs(1)).unwrap();
+    let client = build_client_with_total_timeout(None, 30, Duration::from_secs(1)).unwrap();
     let start = Instant::now();
     let err = client
         .get(format!("http://127.0.0.1:{port}/file"))
@@ -84,7 +81,13 @@ async fn stall_watchdog_fails_a_wedged_download() {
     set_max_retries(&mgr, 1).await;
     server.set_stall_get(true);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -116,7 +119,13 @@ async fn checkpoint_reports_progress_within_the_first_second() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -125,7 +134,10 @@ async fn checkpoint_reports_progress_within_the_first_second() {
     // 2 s interval the row still read 0 at this point.)
     tokio::time::sleep(Duration::from_millis(1400)).await;
     let row = mgr.get_download(&id).unwrap().unwrap();
-    assert_eq!(row.status, "downloading", "the download must still be running");
+    assert_eq!(
+        row.status, "downloading",
+        "the download must still be running"
+    );
     assert!(
         row.downloaded_bytes > 0,
         "the store must already show bytes ~1.4 s in, got {}",
@@ -150,7 +162,13 @@ async fn try_split_never_splits_an_open_ended_segment() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -221,11 +239,19 @@ fn startup_reconciliation_resets_zombie_rows() {
     let row = store.get_download(&zombie).unwrap().unwrap();
     assert_eq!(row.status, "paused");
     assert!(
-        row.error_message.unwrap_or_default().contains("Interrupted"),
+        row.error_message
+            .unwrap_or_default()
+            .contains("Interrupted"),
         "the reset row must say why it is paused"
     );
-    assert_eq!(store.get_download(&paused).unwrap().unwrap().status, "paused");
-    assert_eq!(store.get_download(&done).unwrap().unwrap().status, "complete");
+    assert_eq!(
+        store.get_download(&paused).unwrap().unwrap().status,
+        "paused"
+    );
+    assert_eq!(
+        store.get_download(&done).unwrap().unwrap().status,
+        "complete"
+    );
     assert_eq!(store.reconcile_stuck_downloads().unwrap(), 0);
 }
 
@@ -240,7 +266,13 @@ async fn resume_recovers_a_stale_downloading_row() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     // Fake the zombie: the row says downloading, but no run exists.
@@ -266,13 +298,22 @@ async fn resume_still_refuses_a_running_download() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
     let row = mgr.get_download(&id).unwrap().unwrap();
-    assert_eq!(row.status, "downloading", "the download must still be running");
+    assert_eq!(
+        row.status, "downloading",
+        "the download must still be running"
+    );
     let err = mgr.resume_download(&id).await.unwrap_err();
     assert!(
         err.to_string().contains("already running"),

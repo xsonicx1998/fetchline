@@ -127,10 +127,7 @@ fn handle_gated(mut stream: TcpStream, expected: &str) {
                 .and_then(|s| if s.is_empty() { None } else { s.parse().ok() })
                 .unwrap_or(size - 1)
                 .min(size - 1);
-            (
-                "206 Partial Content",
-                payload(size)[start..=end].to_vec(),
-            )
+            ("206 Partial Content", payload(size)[start..=end].to_vec())
         }
         _ => ("200 OK", payload(size)),
     };
@@ -160,11 +157,7 @@ fn set_sound(mgr: &Arc<DownloadManager>, event: &str, file: &str) {
     .unwrap();
 }
 
-async fn wait_for_pending_action(
-    mgr: &Arc<DownloadManager>,
-    queue_id: &str,
-    secs: u64,
-) -> bool {
+async fn wait_for_pending_action(mgr: &Arc<DownloadManager>, queue_id: &str, secs: u64) -> bool {
     for _ in 0..secs * 10 {
         if mgr.pending_action(queue_id).await.is_some() {
             return true;
@@ -181,7 +174,11 @@ fn site_login_round_trip_and_row_hides_password() {
     let dir = tmpdir();
     let store = Store::open(&dir.join("app.db")).unwrap();
     let row = store
-        .save_site_login(&login_input("Example.COM", "test-user", Some("test-pass-123")))
+        .save_site_login(&login_input(
+            "Example.COM",
+            "test-user",
+            Some("test-pass-123"),
+        ))
         .unwrap();
     assert_eq!(row.host, "example.com", "host is normalised on save");
     assert_eq!(row.username, "test-user");
@@ -189,14 +186,26 @@ fn site_login_round_trip_and_row_hides_password() {
     assert!(row.has_password);
     // The serialised row must not contain the password anywhere.
     let json = serde_json::to_string(&row).unwrap();
-    assert!(!json.contains("test-pass-123"), "password leaked into the UI row: {json}");
+    assert!(
+        !json.contains("test-pass-123"),
+        "password leaked into the UI row: {json}"
+    );
     assert!(!json.contains("test-user") || json.contains("test-user")); // username is shown
     let rows = store.list_site_logins().unwrap();
     assert_eq!(rows.len(), 1);
     // The engine can read the credential back, decrypted.
-    let creds = store.get_site_login_credentials("example.com").unwrap().unwrap();
-    assert_eq!(creds, ("test-user".to_string(), "test-pass-123".to_string()));
-    assert!(store.get_site_login_credentials("other.com").unwrap().is_none());
+    let creds = store
+        .get_site_login_credentials("example.com")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        creds,
+        ("test-user".to_string(), "test-pass-123".to_string())
+    );
+    assert!(store
+        .get_site_login_credentials("other.com")
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -204,19 +213,34 @@ fn site_login_validation_rejects_bad_input() {
     let dir = tmpdir();
     let store = Store::open(&dir.join("app.db")).unwrap();
     // Empty host.
-    assert!(store.save_site_login(&login_input("", "u", Some("p"))).is_err());
+    assert!(store
+        .save_site_login(&login_input("", "u", Some("p")))
+        .is_err());
     // Host with a space / userinfo.
-    assert!(store.save_site_login(&login_input("exa mple.com", "u", Some("p"))).is_err());
-    assert!(store.save_site_login(&login_input("user@example.com", "u", Some("p"))).is_err());
+    assert!(store
+        .save_site_login(&login_input("exa mple.com", "u", Some("p")))
+        .is_err());
+    assert!(store
+        .save_site_login(&login_input("user@example.com", "u", Some("p")))
+        .is_err());
     // Empty username, missing password on create, empty password.
-    assert!(store.save_site_login(&login_input("example.com", "  ", Some("p"))).is_err());
-    assert!(store.save_site_login(&login_input("example.com", "u", None)).is_err());
-    assert!(store.save_site_login(&login_input("example.com", "u", Some(""))).is_err());
+    assert!(store
+        .save_site_login(&login_input("example.com", "  ", Some("p")))
+        .is_err());
+    assert!(store
+        .save_site_login(&login_input("example.com", "u", None))
+        .is_err());
+    assert!(store
+        .save_site_login(&login_input("example.com", "u", Some("")))
+        .is_err());
     // Only Basic auth is applied: another type is refused, not stored.
     let mut ntlm = login_input("example.com", "u", Some("p"));
     ntlm.auth_type = "ntlm".to_string();
     assert!(store.save_site_login(&ntlm).is_err());
-    assert!(store.list_site_logins().unwrap().is_empty(), "nothing was stored");
+    assert!(
+        store.list_site_logins().unwrap().is_empty(),
+        "nothing was stored"
+    );
 }
 
 #[test]
@@ -238,7 +262,11 @@ fn site_login_edit_keeps_password_and_delete_works() {
     let dir = tmpdir();
     let store = Store::open(&dir.join("app.db")).unwrap();
     let row = store
-        .save_site_login(&login_input("example.com", "old-user", Some("test-pass-123")))
+        .save_site_login(&login_input(
+            "example.com",
+            "old-user",
+            Some("test-pass-123"),
+        ))
         .unwrap();
     // Edit the username without touching the password.
     let mut edit = login_input("example.com", "new-user", None);
@@ -246,21 +274,36 @@ fn site_login_edit_keeps_password_and_delete_works() {
     let updated = store.save_site_login(&edit).unwrap();
     assert_eq!(updated.username, "new-user");
     assert_eq!(
-        store.get_site_login_credentials("example.com").unwrap().unwrap().1,
+        store
+            .get_site_login_credentials("example.com")
+            .unwrap()
+            .unwrap()
+            .1,
         "test-pass-123"
     );
     // Change the password.
     let changed = store
-        .save_site_login(&login_input("example.com", "new-user", Some("new-pass-456")))
+        .save_site_login(&login_input(
+            "example.com",
+            "new-user",
+            Some("new-pass-456"),
+        ))
         .unwrap();
     assert_eq!(changed.id, row.id, "same host keeps its row");
     assert_eq!(
-        store.get_site_login_credentials("example.com").unwrap().unwrap().1,
+        store
+            .get_site_login_credentials("example.com")
+            .unwrap()
+            .unwrap()
+            .1,
         "new-pass-456"
     );
     store.delete_site_login(&row.id).unwrap();
     assert!(store.list_site_logins().unwrap().is_empty());
-    assert!(store.delete_site_login(&row.id).is_err(), "unknown id errors");
+    assert!(
+        store.delete_site_login(&row.id).is_err(),
+        "unknown id errors"
+    );
 }
 
 // -- site logins: end to end against the gated fixture --------------------
@@ -272,16 +315,35 @@ async fn site_login_gated_download_succeeds_with_login_and_fails_without() {
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
     let err = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("401"), "expected a 401, got: {err}");
+    assert!(
+        err.to_string().contains("401"),
+        "expected a 401, got: {err}"
+    );
 
     // With the saved credential the same URL probes and downloads.
-    mgr.save_site_login(&login_input("127.0.0.1", "test-user", Some("test-pass-123")))
-        .unwrap();
+    mgr.save_site_login(&login_input(
+        "127.0.0.1",
+        "test-user",
+        Some("test-pass-123"),
+    ))
+    .unwrap();
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -299,23 +361,45 @@ async fn site_login_wrong_password_fails_and_is_not_sent_to_another_host() {
     mgr.save_site_login(&login_input("127.0.0.1", "test-user", Some("wrong-pass")))
         .unwrap();
     let err = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("401"), "expected a 401, got: {err}");
+    assert!(
+        err.to_string().contains("401"),
+        "expected a 401, got: {err}"
+    );
 
     // A login saved for "localhost" is not sent to "127.0.0.1":
     // the hosts differ, so the probe is anonymous and fails 401.
     // (Both names reach the same fixture server on this VM.)
     let dir2 = tmpdir();
     let mgr2 = test_mgr(&dir2);
-    mgr2.save_site_login(&login_input("localhost", "test-user", Some("test-pass-123")))
-        .unwrap();
+    mgr2.save_site_login(&login_input(
+        "localhost",
+        "test-user",
+        Some("test-pass-123"),
+    ))
+    .unwrap();
     let err = mgr2
-        .add_download(&server.url, None, Some(dir2.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir2.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("401"), "expected a 401, got: {err}");
+    assert!(
+        err.to_string().contains("401"),
+        "expected a 401, got: {err}"
+    );
 }
 
 // -- dial-up: settings persist + validation -------------------------------
@@ -334,21 +418,35 @@ fn dialup_settings_persist_and_validate() {
     s.dialup_hangup_after_completion = true;
     s.dialup_redial_attempts = 3;
     let saved = store.update_settings(&s).unwrap();
-    assert_eq!(saved.dialup_connection_name.as_deref(), Some("My Connection"));
+    assert_eq!(
+        saved.dialup_connection_name.as_deref(),
+        Some("My Connection")
+    );
     assert!(saved.dialup_auto_dial);
     assert!(saved.dialup_hangup_after_completion);
     assert_eq!(saved.dialup_redial_attempts, 3);
     // An empty name clears the connection.
     let mut s2 = saved.clone();
     s2.dialup_connection_name = Some("   ".to_string());
-    assert!(store.update_settings(&s2).unwrap().dialup_connection_name.is_none());
+    assert!(store
+        .update_settings(&s2)
+        .unwrap()
+        .dialup_connection_name
+        .is_none());
     // Redial attempts are 0–10, rejected not clamped.
     for bad in [-1, 11] {
         let mut b = saved.clone();
         b.dialup_redial_attempts = bad;
-        assert!(store.update_settings(&b).is_err(), "redial {bad} must be rejected");
+        assert!(
+            store.update_settings(&b).is_err(),
+            "redial {bad} must be rejected"
+        );
     }
-    assert_eq!(store.get_settings().unwrap().dialup_redial_attempts, 3, "nothing was stored");
+    assert_eq!(
+        store.get_settings().unwrap().dialup_redial_attempts,
+        3,
+        "nothing was stored"
+    );
 }
 
 #[test]
@@ -435,7 +533,10 @@ async fn dialup_hangup_arms_action_only_when_queue_has_no_action() {
     {
         mgr.execute_queue_action(&queue.id).await.unwrap();
     }
-    assert!(mgr.pending_action(&queue.id).await.is_none(), "the action is consumed");
+    assert!(
+        mgr.pending_action(&queue.id).await.is_none(),
+        "the action is consumed"
+    );
 }
 
 #[tokio::test]
@@ -451,9 +552,11 @@ async fn dialup_hangup_loses_to_a_queue_action_and_needs_a_download() {
     // A queue with its own action keeps it: hang-up does not arm a
     // second action (one pending action per queue id).
     let queue = mgr.create_queue("Shutdown queue").unwrap();
-    mgr.update_queue(&queue.id, "one_time", None, None, false, "shutdown", None, None)
-        .await
-        .unwrap();
+    mgr.update_queue(
+        &queue.id, "one_time", None, None, false, "shutdown", None, None,
+    )
+    .await
+    .unwrap();
     let (id, _) = mgr
         .add_download(
             &server.url,
@@ -467,7 +570,10 @@ async fn dialup_hangup_loses_to_a_queue_action_and_needs_a_download() {
     mgr.start_queue(&queue.id).await.unwrap();
     assert!(wait_for_status(&mgr, &id, "complete", 30).await);
     assert!(wait_for_pending_action(&mgr, &queue.id, 10).await);
-    assert_eq!(mgr.pending_action(&queue.id).await.unwrap().action, "shutdown");
+    assert_eq!(
+        mgr.pending_action(&queue.id).await.unwrap().action,
+        "shutdown"
+    );
     mgr.dismiss_queue_action(&queue.id).await.unwrap();
 
     // A queue whose file fails downloads nothing: no hang-up is
@@ -515,7 +621,13 @@ fn sound_settings_round_trip_and_validation() {
         .unwrap();
     assert!(saved.enabled);
     assert_eq!(saved.file.as_deref(), Some(wav.as_str()));
-    assert_eq!(store.get_sound_file("download_complete").unwrap().as_deref(), Some(wav.as_str()));
+    assert_eq!(
+        store
+            .get_sound_file("download_complete")
+            .unwrap()
+            .as_deref(),
+        Some(wav.as_str())
+    );
     // A disabled event resolves to no sound, even with a file set.
     store
         .save_sound_setting(&SoundSettingInput {
@@ -564,7 +676,13 @@ async fn sound_events_fire_on_complete_and_failure_with_resolved_files() {
 
     // A completed download fires download_complete with its file.
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -621,14 +739,20 @@ async fn sound_queue_finished_fires_only_when_something_downloaded() {
     assert!(wait_for_status(&mgr, &id, "complete", 30).await);
     // The queue drains a moment after its file completes.
     for _ in 0..50 {
-        if mgr.sound_events().iter().any(|e| e.event == "queue_finished") {
+        if mgr
+            .sound_events()
+            .iter()
+            .any(|e| e.event == "queue_finished")
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     let events = mgr.sound_events();
     assert!(
-        events.iter().any(|e| e.event == "queue_finished" && e.file.as_deref() == Some(queue_wav.as_str())),
+        events
+            .iter()
+            .any(|e| e.event == "queue_finished" && e.file.as_deref() == Some(queue_wav.as_str())),
         "queue_finished with its file, got: {events:?}"
     );
 }
@@ -640,7 +764,13 @@ async fn sound_disabled_event_records_nothing_and_playback_is_windows_only() {
     let mgr = test_mgr(&dir);
     // Nothing configured: a completed download records no event.
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -649,10 +779,16 @@ async fn sound_disabled_event_records_nothing_and_playback_is_windows_only() {
 
     // Test-button validation: no file, a non-WAV file, a missing
     // file are all clear errors before any playback is attempted.
-    assert!(mgr.play_sound("download_complete").unwrap_err().to_string().contains("No sound is set"));
+    assert!(mgr
+        .play_sound("download_complete")
+        .unwrap_err()
+        .to_string()
+        .contains("No sound is set"));
     assert!(mgr.test_sound_file("").is_err());
     assert!(mgr.test_sound_file("ding.mp3").is_err());
-    assert!(mgr.test_sound_file("/tmp/fetchline-test-no-such-file.wav").is_err());
+    assert!(mgr
+        .test_sound_file("/tmp/fetchline-test-no-such-file.wav")
+        .is_err());
     // A real WAV file exists, so validation passes — and on this
     // Linux VM the honest answer is that playback is Windows-only.
     // On Windows the file really plays (PowerShell SoundPlayer),
@@ -661,10 +797,16 @@ async fn sound_disabled_event_records_nothing_and_playback_is_windows_only() {
     #[cfg(not(target_os = "windows"))]
     {
         let err = mgr.test_sound_file(&wav).unwrap_err();
-        assert!(err.to_string().contains("only available on Windows"), "got: {err}");
+        assert!(
+            err.to_string().contains("only available on Windows"),
+            "got: {err}"
+        );
         set_sound(&mgr, "download_complete", &wav);
         let err = mgr.play_sound("download_complete").unwrap_err();
-        assert!(err.to_string().contains("only available on Windows"), "got: {err}");
+        assert!(
+            err.to_string().contains("only available on Windows"),
+            "got: {err}"
+        );
     }
     #[cfg(target_os = "windows")]
     {

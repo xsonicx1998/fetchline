@@ -32,6 +32,8 @@ import type {
   SoundSettingInput,
   SyncResult,
   UpdateCheckResult,
+  YtdlpResolveResult,
+  YtdlpStatus,
 } from './types'
 
 /** Reject when an invoke does not settle in time (Round 56,
@@ -141,9 +143,37 @@ export async function resolvePendingLink(args: {  id: string
 
 /** Round 67 — probe a URL for the Add URL dialog (file size and
  *  name). `cookies` is a browser capture's stored cookies JSON,
- *  or null — a cookie-gated link probes 401 without them. */
-export async function probeUrl(url: string, cookies?: string | null): Promise<ProbeInfo> {
-  return invoke<ProbeInfo>('probe_url', { url, cookies: cookies ?? null })
+ *  or null — a cookie-gated link probes 401 without them.
+ *  `headers` is a resolved video's headers JSON (User-Agent /
+ *  Referer from yt-dlp's `http_headers`), or null — a stream
+ *  host that expects them answers the global "Fetchline/0.1"
+ *  UA with 403. */
+export async function probeUrl(
+  url: string,
+  cookies?: string | null,
+  headers?: string | null,
+): Promise<ProbeInfo> {
+  return invoke<ProbeInfo>('probe_url', { url, cookies: cookies ?? null, headers: headers ?? null })
+}
+
+/** Round 78 — the installed yt-dlp's version and sidecar
+ *  presence, for the Settings "Video downloads" section. */
+export async function ytdlpVersion(): Promise<YtdlpStatus> {
+  return invoke<YtdlpStatus>('ytdlp_version')
+}
+
+/** Round 78 — resolve a platform video page from the app
+ *  itself (a YouTube URL pasted into Add URL): title + trimmed
+ *  quality list. No cookies — the app has no browser session. */
+export async function ytdlpResolve(url: string): Promise<YtdlpResolveResult> {
+  return invoke<YtdlpResolveResult>('ytdlp_resolve', { url })
+}
+
+/** Round 78 — download the newest yt-dlp.exe from its GitHub
+ *  release (SHA-256 verified against the release's published
+ *  checksums) and return the fresh status. */
+export async function ytdlpUpdate(): Promise<YtdlpStatus> {
+  return invoke<YtdlpStatus>('ytdlp_update')
 }
 
 /** Round 67 — confirm one pending browser/video capture through

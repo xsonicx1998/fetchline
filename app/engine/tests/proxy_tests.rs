@@ -406,7 +406,13 @@ impl NtlmProxyServer {
                 }
             }
         });
-        Self { port, saw_type1, saw_type3, forwarded, stop }
+        Self {
+            port,
+            saw_type1,
+            saw_type3,
+            forwarded,
+            stop,
+        }
     }
 }
 
@@ -471,7 +477,10 @@ fn verify_type3(bytes: &[u8], password: &str) -> bool {
     let dom_off = rd32(32);
     let user_len = rd16(36);
     let user_off = rd32(40);
-    if nt_off + nt_len > bytes.len() || dom_off + dom_len > bytes.len() || user_off + user_len > bytes.len() {
+    if nt_off + nt_len > bytes.len()
+        || dom_off + dom_len > bytes.len()
+        || user_off + user_len > bytes.len()
+    {
         return false;
     }
     let domain = String::from_utf16_lossy(
@@ -499,7 +508,13 @@ fn verify_type3(bytes: &[u8], password: &str) -> bool {
     let target_info = &blob[28..blob.len() - 4];
     let nt = ntlm_hash(password);
     let v2 = ntlmv2_hash(&nt, &user, &domain);
-    let expected = ntlmv2_response(&v2, &NTLM_SERVER_CHALLENGE, &client_chal, timestamp, target_info);
+    let expected = ntlmv2_response(
+        &v2,
+        &NTLM_SERVER_CHALLENGE,
+        &client_chal,
+        timestamp,
+        target_info,
+    );
     expected.as_slice() == nt_resp
 }
 
@@ -586,18 +601,20 @@ fn handle_ntlm_proxy(
                     let token = value.split_whitespace().nth(1).unwrap_or("");
                     let bytes = base64_decode(token);
                     match bytes.as_deref() {
-                        Some(b) if b.len() >= 12
-                            && &b[0..8] == b"NTLMSSP\0"
-                            && u32::from_le_bytes(b[8..12].try_into().unwrap()) == 1 =>
+                        Some(b)
+                            if b.len() >= 12
+                                && &b[0..8] == b"NTLMSSP\0"
+                                && u32::from_le_bytes(b[8..12].try_into().unwrap()) == 1 =>
                         {
                             saw_type1.store(true, Ordering::SeqCst);
                             let type2 = build_type2_b64();
                             send_407(&mut writer, &format!("NTLM {type2}"));
                             continue;
                         }
-                        Some(b) if b.len() >= 12
-                            && &b[0..8] == b"NTLMSSP\0"
-                            && u32::from_le_bytes(b[8..12].try_into().unwrap()) == 3 =>
+                        Some(b)
+                            if b.len() >= 12
+                                && &b[0..8] == b"NTLMSSP\0"
+                                && u32::from_le_bytes(b[8..12].try_into().unwrap()) == 3 =>
                         {
                             saw_type3.store(true, Ordering::SeqCst);
                             // Test-only dummy password for the stub.
@@ -627,7 +644,9 @@ fn handle_ntlm_proxy(
             None => (rest, "/"),
         };
         let Ok(mut upstream) = TcpStream::connect(authority) else {
-            let _ = writer.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let _ = writer.write_all(
+                b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
             return;
         };
         let mut out = format!("{method} {path} HTTP/1.1\r\n");
@@ -656,7 +675,13 @@ async fn ftp_probe_and_download_direct() {
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
     let (id, info) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(info.size, Some(256 * 1024));
@@ -666,7 +691,10 @@ async fn ftp_probe_and_download_direct() {
     let row = mgr.get_download(&id).unwrap().unwrap();
     assert_eq!(row.size_bytes, Some(256 * 1024));
     assert_eq!(std::fs::read(&row.save_path).unwrap(), payload(256 * 1024));
-    assert!(server.retrs.load(Ordering::SeqCst) >= 1, "no RETR was served");
+    assert!(
+        server.retrs.load(Ordering::SeqCst) >= 1,
+        "no RETR was served"
+    );
 }
 
 #[tokio::test]
@@ -752,7 +780,13 @@ async fn ftp_pause_then_resume_completes_byte_exact() {
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -781,11 +815,17 @@ async fn ftp_pause_then_resume_completes_byte_exact() {
     assert!(wait_for_status(&mgr, &id, "paused", 10).await);
     let paused = mgr.get_download(&id).unwrap().unwrap();
     assert!(paused.downloaded_bytes > 0, "pause landed before any bytes");
-    assert!(paused.downloaded_bytes < 2 * 1024 * 1024, "file finished before the pause");
+    assert!(
+        paused.downloaded_bytes < 2 * 1024 * 1024,
+        "file finished before the pause"
+    );
     mgr.resume_download(&id).await.unwrap();
     assert!(wait_for_status(&mgr, &id, "complete", 30).await);
     let row = mgr.get_download(&id).unwrap().unwrap();
-    assert_eq!(std::fs::read(&row.save_path).unwrap(), payload(2 * 1024 * 1024));
+    assert_eq!(
+        std::fs::read(&row.save_path).unwrap(),
+        payload(2 * 1024 * 1024)
+    );
 }
 
 #[tokio::test]
@@ -799,15 +839,30 @@ async fn ftp_server_requiring_login_accepts_right_credentials_and_refuses_wrong_
     // Wrong password: the probe fails, nothing is created.
     let bad_url = server.url.replace("ftp://", "ftp://alice:wrongpass@");
     let err = mgr
-        .add_download(&bad_url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &bad_url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("530") || err.to_string().contains("refused"), "{err}");
+    assert!(
+        err.to_string().contains("530") || err.to_string().contains("refused"),
+        "{err}"
+    );
     assert!(mgr.list_downloads().unwrap().is_empty());
     // Right credentials: probe + download succeed.
     let good_url = server.url.replace("ftp://", "ftp://alice:hunter2@");
     let (id, info) = mgr
-        .add_download(&good_url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &good_url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(info.size, Some(256 * 1024));
@@ -826,10 +881,19 @@ async fn ftp_download_without_size_is_open_ended_and_byte_exact() {
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
     let (id, info) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
-    assert_eq!(info.size, None, "SIZE is unsupported, so the probe must not invent a size");
+    assert_eq!(
+        info.size, None,
+        "SIZE is unsupported, so the probe must not invent a size"
+    );
     assert!(!info.accept_ranges);
     mgr.start_download(&id).await.unwrap();
     assert!(wait_for_status(&mgr, &id, "complete", 30).await);
@@ -852,7 +916,13 @@ async fn ftp_proxy_routes_and_authenticates_in_order() {
     // The FTP URL points at the origin host (127.0.0.1); the engine
     // must connect to the proxy port instead and log in user@host.
     let (id, _) = mgr
-        .add_download(&origin.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &origin.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -868,7 +938,11 @@ async fn ftp_proxy_routes_and_authenticates_in_order() {
         users.iter().any(|u| u == "anonymous@127.0.0.1"),
         "origin login was not in user@host form: {users:?}"
     );
-    assert_eq!(users.first().map(|s| s.as_str()), Some("proxyuser"), "proxy auth must come first: {users:?}");
+    assert_eq!(
+        users.first().map(|s| s.as_str()),
+        Some("proxyuser"),
+        "proxy auth must come first: {users:?}"
+    );
 }
 
 #[tokio::test]
@@ -884,7 +958,13 @@ async fn ftp_proxy_wrong_credentials_are_rejected() {
     input.password = Some("wrongpass".to_string());
     mgr.save_proxy_config(&input).unwrap();
     let err = mgr
-        .add_download(&origin.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &origin.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap_err();
     assert!(
@@ -911,12 +991,22 @@ async fn ftp_proxy_bypass_list_goes_direct() {
     input.bypass = vec!["127.0.0.1".to_string()];
     mgr.save_proxy_config(&input).unwrap();
     let (id, _) = mgr
-        .add_download(&direct.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &direct.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
     assert!(wait_for_status(&mgr, &id, "complete", 30).await);
-    assert_eq!(proxy.connections.load(Ordering::SeqCst), 0, "bypassed host went through the FTP proxy");
+    assert_eq!(
+        proxy.connections.load(Ordering::SeqCst),
+        0,
+        "bypassed host went through the FTP proxy"
+    );
     let row = mgr.get_download(&id).unwrap().unwrap();
     assert_eq!(std::fs::read(&row.save_path).unwrap(), payload(256 * 1024));
 }
@@ -929,14 +1019,25 @@ async fn ftp_download_goes_direct_when_only_an_http_proxy_is_configured() {
     let ftp = FtpServer::start(FtpConfig::default());
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
-    mgr.save_proxy_config(&proxy_input("http", "127.0.0.1", http_proxy.port as i64)).unwrap();
+    mgr.save_proxy_config(&proxy_input("http", "127.0.0.1", http_proxy.port as i64))
+        .unwrap();
     let (id, _) = mgr
-        .add_download(&ftp.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &ftp.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
     assert!(wait_for_status(&mgr, &id, "complete", 30).await);
-    assert_eq!(http_proxy.hits.load(Ordering::SeqCst), 0, "FTP went through the HTTP proxy");
+    assert_eq!(
+        http_proxy.hits.load(Ordering::SeqCst),
+        0,
+        "FTP went through the HTTP proxy"
+    );
     let row = mgr.get_download(&id).unwrap().unwrap();
     assert_eq!(std::fs::read(&row.save_path).unwrap(), payload(256 * 1024));
 }
@@ -981,9 +1082,16 @@ async fn ntlm_proxy_authenticates_http_download() {
     let proxy = NtlmProxyServer::start(false);
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
-    mgr.save_proxy_config(&ntlm_proxy_input(proxy.port as i64, "hunter2")).unwrap();
+    mgr.save_proxy_config(&ntlm_proxy_input(proxy.port as i64, "hunter2"))
+        .unwrap();
     let (id, info) = mgr
-        .add_download(&origin.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &origin.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(info.size, Some(512 * 1024));
@@ -991,9 +1099,18 @@ async fn ntlm_proxy_authenticates_http_download() {
     assert!(wait_for_status(&mgr, &id, "complete", 30).await);
     let row = mgr.get_download(&id).unwrap().unwrap();
     assert_eq!(std::fs::read(&row.save_path).unwrap(), payload(512 * 1024));
-    assert!(proxy.saw_type1.load(Ordering::SeqCst), "no NTLM Type 1 was sent");
-    assert!(proxy.saw_type3.load(Ordering::SeqCst), "no NTLM Type 3 was sent");
-    assert!(proxy.forwarded.load(Ordering::SeqCst) > 0, "nothing was forwarded after auth");
+    assert!(
+        proxy.saw_type1.load(Ordering::SeqCst),
+        "no NTLM Type 1 was sent"
+    );
+    assert!(
+        proxy.saw_type3.load(Ordering::SeqCst),
+        "no NTLM Type 3 was sent"
+    );
+    assert!(
+        proxy.forwarded.load(Ordering::SeqCst) > 0,
+        "nothing was forwarded after auth"
+    );
 }
 
 #[tokio::test]
@@ -1002,14 +1119,24 @@ async fn ntlm_proxy_wrong_password_is_rejected() {
     let proxy = NtlmProxyServer::start(false);
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
-    mgr.save_proxy_config(&ntlm_proxy_input(proxy.port as i64, "wrongpass")).unwrap();
+    mgr.save_proxy_config(&ntlm_proxy_input(proxy.port as i64, "wrongpass"))
+        .unwrap();
     let err = mgr
-        .add_download(&origin.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &origin.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap_err();
     assert!(err.to_string().contains("407"), "{err}");
     assert!(mgr.list_downloads().unwrap().is_empty());
-    assert!(proxy.saw_type3.load(Ordering::SeqCst), "the engine never sent a Type 3 to be refused");
+    assert!(
+        proxy.saw_type3.load(Ordering::SeqCst),
+        "the engine never sent a Type 3 to be refused"
+    );
 }
 
 #[tokio::test]
@@ -1020,8 +1147,14 @@ async fn ntlm_proxy_test_button_succeeds_and_wrong_password_fails() {
     let mgr = test_mgr(&dir);
     let good = ntlm_proxy_input(proxy.port as i64, "hunter2");
     assert_eq!(mgr.test_proxy(&good, &origin.url).await.unwrap(), 200);
-    assert!(proxy.saw_type1.load(Ordering::SeqCst), "test never did the NTLM handshake");
-    assert!(proxy.forwarded.load(Ordering::SeqCst) > 0, "test never reached the origin");
+    assert!(
+        proxy.saw_type1.load(Ordering::SeqCst),
+        "test never did the NTLM handshake"
+    );
+    assert!(
+        proxy.forwarded.load(Ordering::SeqCst) > 0,
+        "test never reached the origin"
+    );
     let bad = ntlm_proxy_input(proxy.port as i64, "wrongpass");
     let err = mgr.test_proxy(&bad, &origin.url).await.unwrap_err();
     assert!(err.to_string().contains("407"), "{err}");
@@ -1033,9 +1166,16 @@ async fn kerberos_only_proxy_is_refused_clearly() {
     let proxy = NtlmProxyServer::start(true);
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
-    mgr.save_proxy_config(&ntlm_proxy_input(proxy.port as i64, "hunter2")).unwrap();
+    mgr.save_proxy_config(&ntlm_proxy_input(proxy.port as i64, "hunter2"))
+        .unwrap();
     let err = mgr
-        .add_download(&origin.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &origin.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap_err();
     assert!(err.to_string().contains("Kerberos"), "{err}");

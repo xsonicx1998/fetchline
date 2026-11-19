@@ -17,7 +17,12 @@ use fetchline_engine::{probe, DownloadManager, RefreshAddressResult, Store};
 
 #[tokio::test]
 async fn probe_returns_size_ranges_and_etag() {
-    let server = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: false, ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: false,
+        ..Default::default()
+    });
     let client = reqwest::Client::new();
     let info = probe(&client, &server.url).await.unwrap();
     assert_eq!(info.size, Some(512 * 1024));
@@ -27,7 +32,12 @@ async fn probe_returns_size_ranges_and_etag() {
 
 #[tokio::test]
 async fn probe_falls_back_when_head_hides_length() {
-    let server = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: true, ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: true,
+        ..Default::default()
+    });
     let client = reqwest::Client::new();
     // HEAD without Content-Length: size is None, download still works as one segment.
     let info = probe(&client, &server.url).await.unwrap();
@@ -36,7 +46,12 @@ async fn probe_falls_back_when_head_hides_length() {
 
 #[tokio::test]
 async fn full_download_multi_segment_matches_bytes() {
-    let server = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: false, ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: false,
+        ..Default::default()
+    });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
@@ -71,7 +86,12 @@ async fn full_download_multi_segment_matches_bytes() {
 /// carried once the download is tagged to a project.
 #[tokio::test]
 async fn list_downloads_carries_updated_at_and_grabber_project() {
-    let server = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: false, ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: false,
+        ..Default::default()
+    });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
@@ -91,9 +111,19 @@ async fn list_downloads_carries_updated_at_and_grabber_project() {
     // `grabber_project_id` is a foreign key, so the project row
     // has to exist first.
     let project = mgr
-        .create_grabber_project("p", "http://127.0.0.1/", &["image".to_string()], 2, 200, "download", None)
+        .create_grabber_project(
+            "p",
+            "http://127.0.0.1/",
+            &["image".to_string()],
+            2,
+            200,
+            "download",
+            None,
+        )
         .unwrap();
-    store.set_download_grabber_project(&id, &project.id).unwrap();
+    store
+        .set_download_grabber_project(&id, &project.id)
+        .unwrap();
     let row = mgr.get_download(&id).unwrap().unwrap();
     assert_eq!(row.grabber_project_id.as_deref(), Some(project.id.as_str()));
     // The queue-files path uses the same row mapping (BUG-026
@@ -101,7 +131,10 @@ async fn list_downloads_carries_updated_at_and_grabber_project() {
     let listed = store.list_downloads().unwrap();
     assert_eq!(listed.len(), 1);
     assert!(!listed[0].updated_at.is_empty());
-    assert_eq!(listed[0].grabber_project_id.as_deref(), Some(project.id.as_str()));
+    assert_eq!(
+        listed[0].grabber_project_id.as_deref(),
+        Some(project.id.as_str())
+    );
 }
 
 #[tokio::test]
@@ -110,7 +143,7 @@ async fn pause_then_resume_completes_with_correct_bytes() {
         chunk: 8192,
         delay: Duration::from_millis(100),
         hide_length: false,
-    ..Default::default()
+        ..Default::default()
     });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
@@ -146,7 +179,7 @@ async fn resume_restarts_when_remote_file_changes() {
         chunk: 8192,
         delay: Duration::from_millis(100),
         hide_length: false,
-    ..Default::default()
+        ..Default::default()
     });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
@@ -189,9 +222,19 @@ fn throttled() -> MockConfig {
     }
 }
 
-async fn paused_midway(mgr: &Arc<DownloadManager>, url: &str, dir: &std::path::Path) -> (String, i64) {
+async fn paused_midway(
+    mgr: &Arc<DownloadManager>,
+    url: &str,
+    dir: &std::path::Path,
+) -> (String, i64) {
     let (id, _) = mgr
-        .add_download(url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -218,7 +261,10 @@ async fn refresh_address_same_file_resumes_from_downloaded_bytes() {
         .await
         .unwrap();
     match result {
-        RefreshAddressResult::Switched { kept_bytes, size_bytes } => {
+        RefreshAddressResult::Switched {
+            kept_bytes,
+            size_bytes,
+        } => {
             assert_eq!(kept_bytes, mid_bytes, "progress is carried over");
             assert_eq!(size_bytes, Some(512 * 1024));
         }
@@ -275,7 +321,9 @@ async fn refresh_address_changed_file_reports_mismatch_without_switching() {
         .await
         .unwrap();
     match result {
-        RefreshAddressResult::Mismatch { size_bytes, etag, .. } => {
+        RefreshAddressResult::Mismatch {
+            size_bytes, etag, ..
+        } => {
             assert_eq!(size_bytes, Some(513 * 1024));
             assert_eq!(etag.as_deref(), Some("\"v2\""));
         }
@@ -302,7 +350,10 @@ async fn refresh_address_confirmed_mismatch_restarts_from_zero() {
         .await
         .unwrap();
     match result {
-        RefreshAddressResult::Switched { kept_bytes, size_bytes } => {
+        RefreshAddressResult::Switched {
+            kept_bytes,
+            size_bytes,
+        } => {
             assert_eq!(kept_bytes, 0, "confirmed switch restarts from zero");
             assert_eq!(size_bytes, Some(513 * 1024));
         }
@@ -367,7 +418,10 @@ async fn schema_loads_and_seeds_categories() {
     assert_eq!(cats.len(), 5);
     assert!(cats.iter().any(|c| c.id == "cat-video"));
     assert_eq!(store.category_for_extension("mp4").unwrap(), "cat-video");
-    assert_eq!(store.category_for_extension("zip").unwrap(), "cat-compressed");
+    assert_eq!(
+        store.category_for_extension("zip").unwrap(),
+        "cat-compressed"
+    );
 }
 
 // -- milestone 2: queues, scheduler, categories ---------------------------
@@ -390,7 +444,12 @@ async fn wait_for_queue_drained(mgr: &DownloadManager, queue_id: &str, secs: u64
     false
 }
 
-async fn wait_for_queue_running(mgr: &DownloadManager, queue_id: &str, want: bool, secs: u64) -> bool {
+async fn wait_for_queue_running(
+    mgr: &DownloadManager,
+    queue_id: &str,
+    want: bool,
+    secs: u64,
+) -> bool {
     for _ in 0..secs * 10 {
         if let Ok(queues) = mgr.list_queues().await {
             if let Some(q) = queues.iter().find(|q| q.id == queue_id) {
@@ -405,7 +464,13 @@ async fn wait_for_queue_running(mgr: &DownloadManager, queue_id: &str, want: boo
 }
 
 /// Add one download (same mock file, distinct name) to a queue.
-async fn add_queued(mgr: &Arc<DownloadManager>, server_url: &str, dir: &std::path::Path, name: &str, queue_id: &str) -> String {
+async fn add_queued(
+    mgr: &Arc<DownloadManager>,
+    server_url: &str,
+    dir: &std::path::Path,
+    name: &str,
+    queue_id: &str,
+) -> String {
     let (id, _) = mgr
         .add_download(
             server_url,
@@ -421,7 +486,12 @@ async fn add_queued(mgr: &Arc<DownloadManager>, server_url: &str, dir: &std::pat
 
 #[tokio::test]
 async fn queue_drains_in_order_and_clears_queue_id() {
-    let server = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: false, ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: false,
+        ..Default::default()
+    });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
@@ -442,10 +512,18 @@ async fn queue_drains_in_order_and_clears_queue_id() {
             _ => {}
         }
     }
-    assert_eq!(completed, vec![first.clone(), second.clone(), third.clone()], "queue must drain in insertion order");
+    assert_eq!(
+        completed,
+        vec![first.clone(), second.clone(), third.clone()],
+        "queue must drain in insertion order"
+    );
     assert!(wait_for_queue_drained(&mgr, &queue.id, 10).await);
     // Finished files leave the queue and land on disk, byte-exact.
-    for (id, _) in [(first, "one.bin"), (second, "two.bin"), (third, "three.bin")] {
+    for (id, _) in [
+        (first, "one.bin"),
+        (second, "two.bin"),
+        (third, "three.bin"),
+    ] {
         let row = mgr.get_download(&id).unwrap().unwrap();
         assert_eq!(row.status, "complete");
         assert_eq!(row.queue_id, None);
@@ -459,7 +537,7 @@ async fn queue_stop_leaves_remaining_files_queued() {
         chunk: 8192,
         delay: Duration::from_millis(100),
         hide_length: false,
-    ..Default::default()
+        ..Default::default()
     });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
@@ -485,35 +563,67 @@ async fn queue_stop_leaves_remaining_files_queued() {
     // Starting again resumes the paused file and drains the rest.
     mgr.start_queue(&queue.id).await.unwrap();
     assert!(wait_for_queue_drained(&mgr, &queue.id, 60).await);
-    assert_eq!(std::fs::read(&mgr.get_download(&first).unwrap().unwrap().save_path).unwrap(), payload(512 * 1024));
+    assert_eq!(
+        std::fs::read(&mgr.get_download(&first).unwrap().unwrap().save_path).unwrap(),
+        payload(512 * 1024)
+    );
 }
 
 #[tokio::test]
 async fn scheduler_starts_queue_at_start_time() {
-    let server = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: false, ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: false,
+        ..Default::default()
+    });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     // Start time in the past: the tick starts it.
     let due = mgr.create_queue("Due").unwrap();
     add_queued(&mgr, &server.url, &dir, "due.bin", &due.id).await;
-    mgr.update_queue(&due.id, "one_time", Some(&iso_in(-60)), None, false, "none", None, None)
-        .await
-        .unwrap();
+    mgr.update_queue(
+        &due.id,
+        "one_time",
+        Some(&iso_in(-60)),
+        None,
+        false,
+        "none",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     mgr.scheduler_tick_at(now_unix()).await.unwrap();
     assert!(wait_for_queue_running(&mgr, &due.id, true, 5).await);
     assert!(wait_for_queue_drained(&mgr, &due.id, 30).await);
     // Start time in the future: the tick leaves it alone.
     let later = mgr.create_queue("Later").unwrap();
     add_queued(&mgr, &server.url, &dir, "later.bin", &later.id).await;
-    mgr.update_queue(&later.id, "one_time", Some(&iso_in(3600)), None, false, "none", None, None)
-        .await
-        .unwrap();
+    mgr.update_queue(
+        &later.id,
+        "one_time",
+        Some(&iso_in(3600)),
+        None,
+        false,
+        "none",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     mgr.scheduler_tick_at(now_unix()).await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     let row = mgr.get_queue(&later.id).await.unwrap().unwrap();
     assert!(!row.running);
-    assert_eq!(mgr.get_download(&mgr.list_queue_files(&later.id).unwrap()[0].id).unwrap().unwrap().status, "queued");
+    assert_eq!(
+        mgr.get_download(&mgr.list_queue_files(&later.id).unwrap()[0].id)
+            .unwrap()
+            .unwrap()
+            .status,
+        "queued"
+    );
 }
 
 #[tokio::test]
@@ -522,7 +632,7 @@ async fn scheduler_respects_stop_time() {
         chunk: 8192,
         delay: Duration::from_millis(100),
         hide_length: false,
-    ..Default::default()
+        ..Default::default()
     });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
@@ -530,9 +640,18 @@ async fn scheduler_respects_stop_time() {
     // Stop time already passed: never starts.
     let stale = mgr.create_queue("Stale").unwrap();
     add_queued(&mgr, &server.url, &dir, "stale.bin", &stale.id).await;
-    mgr.update_queue(&stale.id, "one_time", Some(&iso_in(-3600)), Some(&iso_in(-60)), false, "none", None, None)
-        .await
-        .unwrap();
+    mgr.update_queue(
+        &stale.id,
+        "one_time",
+        Some(&iso_in(-3600)),
+        Some(&iso_in(-60)),
+        false,
+        "none",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     mgr.scheduler_tick_at(now_unix()).await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(!mgr.get_queue(&stale.id).await.unwrap().unwrap().running);
@@ -541,16 +660,28 @@ async fn scheduler_respects_stop_time() {
     let timed = mgr.create_queue("Timed").unwrap();
     let first = add_queued(&mgr, &server.url, &dir, "one.bin", &timed.id).await;
     let second = add_queued(&mgr, &server.url, &dir, "two.bin", &timed.id).await;
-    mgr.update_queue(&timed.id, "one_time", Some(&iso_in(-60)), Some(&iso_in(1)), false, "none", None, None)
-        .await
-        .unwrap();
+    mgr.update_queue(
+        &timed.id,
+        "one_time",
+        Some(&iso_in(-60)),
+        Some(&iso_in(1)),
+        false,
+        "none",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     mgr.start_queue(&timed.id).await.unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
     mgr.scheduler_tick_at(now_unix() + 2).await.unwrap();
     assert!(wait_for_queue_running(&mgr, &timed.id, false, 10).await);
     let first_row = mgr.get_download(&first).unwrap().unwrap();
     assert_eq!(first_row.status, "paused");
-    assert!(first_row.downloaded_bytes > 0, "the file must have made progress before stopping");
+    assert!(
+        first_row.downloaded_bytes > 0,
+        "the file must have made progress before stopping"
+    );
     let row = mgr.get_download(&second).unwrap().unwrap();
     assert_eq!(row.status, "queued");
     assert_eq!(row.queue_id.as_deref(), Some(timed.id.as_str()));
@@ -558,15 +689,29 @@ async fn scheduler_respects_stop_time() {
 
 #[tokio::test]
 async fn scheduler_one_time_queue_does_not_restart() {
-    let server = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: false, ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: false,
+        ..Default::default()
+    });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let queue = mgr.create_queue("Once").unwrap();
     add_queued(&mgr, &server.url, &dir, "one.bin", &queue.id).await;
-    mgr.update_queue(&queue.id, "one_time", Some(&iso_in(-60)), None, false, "none", None, None)
-        .await
-        .unwrap();
+    mgr.update_queue(
+        &queue.id,
+        "one_time",
+        Some(&iso_in(-60)),
+        None,
+        false,
+        "none",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     mgr.scheduler_tick_at(now_unix()).await.unwrap();
     assert!(wait_for_queue_drained(&mgr, &queue.id, 30).await);
     // A file added afterwards must not be auto-started by later ticks.
@@ -579,7 +724,12 @@ async fn scheduler_one_time_queue_does_not_restart() {
 
 #[tokio::test]
 async fn queue_reorder_changes_order() {
-    let server = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: false, ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: false,
+        ..Default::default()
+    });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
@@ -607,15 +757,30 @@ async fn queue_reorder_changes_order() {
 
 #[tokio::test]
 async fn category_auto_assign_uses_custom_category() {
-    let server = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: false, ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: false,
+        ..Default::default()
+    });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let clips = mgr
-        .create_category("Clips", dir.to_string_lossy().as_ref(), &["xyz".to_string()])
+        .create_category(
+            "Clips",
+            dir.to_string_lossy().as_ref(),
+            &["xyz".to_string()],
+        )
         .unwrap();
     let (id, _) = mgr
-        .add_download(&server.url, Some("clip.xyz".to_string()), Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            Some("clip.xyz".to_string()),
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     let row = mgr.get_download(&id).unwrap().unwrap();
@@ -624,25 +789,51 @@ async fn category_auto_assign_uses_custom_category() {
 
 #[tokio::test]
 async fn category_delete_blocked_with_downloads_then_allowed() {
-    let server = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: false, ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: false,
+        ..Default::default()
+    });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let clips = mgr
-        .create_category("Clips", dir.to_string_lossy().as_ref(), &["xyz".to_string()])
+        .create_category(
+            "Clips",
+            dir.to_string_lossy().as_ref(),
+            &["xyz".to_string()],
+        )
         .unwrap();
     let (id, _) = mgr
-        .add_download(&server.url, Some("clip.xyz".to_string()), Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            Some("clip.xyz".to_string()),
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     let err = mgr.delete_category(&clips.id).unwrap_err();
-    assert!(err.to_string().contains("move them"), "blocked delete must say why: {err}");
+    assert!(
+        err.to_string().contains("move them"),
+        "blocked delete must say why: {err}"
+    );
     mgr.move_to_category(&id, "cat-documents").unwrap();
     mgr.delete_category(&clips.id).unwrap();
-    assert!(!mgr.store().list_categories().unwrap().iter().any(|c| c.id == clips.id));
+    assert!(!mgr
+        .store()
+        .list_categories()
+        .unwrap()
+        .iter()
+        .any(|c| c.id == clips.id));
     // Built-in categories cannot be deleted at all.
     let err = mgr.delete_category("cat-video").unwrap_err();
-    assert!(err.to_string().contains("built-in"), "builtin delete must say why: {err}");
+    assert!(
+        err.to_string().contains("built-in"),
+        "builtin delete must say why: {err}"
+    );
 }
 
 /// S05/F04: periodic synchronisation is built now — a periodic
@@ -655,7 +846,16 @@ async fn update_queue_accepts_periodic_sync_with_valid_interval() {
     let mgr = DownloadManager::new(Arc::new(store), 4);
     let queue = mgr.create_queue("Sync").unwrap();
     let saved = mgr
-        .update_queue(&queue.id, "periodic", None, None, false, "none", None, Some(30))
+        .update_queue(
+            &queue.id,
+            "periodic",
+            None,
+            None,
+            false,
+            "none",
+            None,
+            Some(30),
+        )
         .await
         .unwrap();
     assert_eq!(saved.schedule_type, "periodic");
@@ -677,7 +877,16 @@ async fn update_queue_rejects_periodic_sync_without_interval_or_too_often() {
     assert!(err.to_string().contains("how often"), "{err}");
     for bad in [0, 1, 4, -30] {
         let err = mgr
-            .update_queue(&queue.id, "periodic", None, None, false, "none", None, Some(bad))
+            .update_queue(
+                &queue.id,
+                "periodic",
+                None,
+                None,
+                false,
+                "none",
+                None,
+                Some(bad),
+            )
             .await
             .unwrap_err();
         assert!(
@@ -690,9 +899,18 @@ async fn update_queue_rejects_periodic_sync_without_interval_or_too_often() {
     assert_eq!(row.schedule_type, "one_time");
     assert_eq!(row.sync_interval_minutes, None);
     // The 5-minute minimum itself is accepted.
-    mgr.update_queue(&queue.id, "periodic", None, None, false, "none", None, Some(5))
-        .await
-        .unwrap();
+    mgr.update_queue(
+        &queue.id,
+        "periodic",
+        None,
+        None,
+        false,
+        "none",
+        None,
+        Some(5),
+    )
+    .await
+    .unwrap();
 }
 
 /// S05/F04: exclusivity — a one-time queue must not carry a check
@@ -704,15 +922,45 @@ async fn update_queue_rejects_interval_on_one_time_queue() {
     let mgr = DownloadManager::new(Arc::new(store), 4);
     let queue = mgr.create_queue("Sync").unwrap();
     let err = mgr
-        .update_queue(&queue.id, "one_time", None, None, false, "none", None, Some(30))
+        .update_queue(
+            &queue.id,
+            "one_time",
+            None,
+            None,
+            false,
+            "none",
+            None,
+            Some(30),
+        )
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("only applies to periodic"), "{err}");
-    mgr.update_queue(&queue.id, "periodic", None, None, false, "none", None, Some(30))
-        .await
-        .unwrap();
+    assert!(
+        err.to_string().contains("only applies to periodic"),
+        "{err}"
+    );
+    mgr.update_queue(
+        &queue.id,
+        "periodic",
+        None,
+        None,
+        false,
+        "none",
+        None,
+        Some(30),
+    )
+    .await
+    .unwrap();
     let back = mgr
-        .update_queue(&queue.id, "one_time", Some(&iso_in(-60)), None, false, "none", None, None)
+        .update_queue(
+            &queue.id,
+            "one_time",
+            Some(&iso_in(-60)),
+            None,
+            false,
+            "none",
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(back.schedule_type, "one_time");
@@ -721,7 +969,12 @@ async fn update_queue_rejects_interval_on_one_time_queue() {
 
 #[tokio::test]
 async fn queue_action_run_program_executes_and_dismiss_clears() {
-    let server = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: false, ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: false,
+        ..Default::default()
+    });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
@@ -736,7 +989,11 @@ async fn queue_action_run_program_executes_and_dismiss_clears() {
     #[cfg(windows)]
     std::fs::write(&script, format!("@echo done > \"{}\"\n", marker.display())).unwrap();
     #[cfg(not(windows))]
-    std::fs::write(&script, format!("#!/bin/sh\necho done > {}\n", marker.display())).unwrap();
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\necho done > {}\n", marker.display()),
+    )
+    .unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -750,13 +1007,18 @@ async fn queue_action_run_program_executes_and_dismiss_clears() {
         None,
         false,
         "run_program",
-        Some(script.to_string_lossy().as_ref()), None)
+        Some(script.to_string_lossy().as_ref()),
+        None,
+    )
     .await
     .unwrap();
     add_queued(&mgr, &server.url, &dir, "one.bin", &queue.id).await;
     mgr.start_queue(&queue.id).await.unwrap();
     assert!(wait_for_queue_drained(&mgr, &queue.id, 30).await);
-    let pending = mgr.pending_action(&queue.id).await.expect("action must be pending");
+    let pending = mgr
+        .pending_action(&queue.id)
+        .await
+        .expect("action must be pending");
     assert_eq!(pending.action, "run_program");
     mgr.execute_queue_action(&queue.id).await.unwrap();
     for _ in 0..50 {
@@ -769,9 +1031,11 @@ async fn queue_action_run_program_executes_and_dismiss_clears() {
     assert!(mgr.pending_action(&queue.id).await.is_none());
     // A second queue, dismissed instead of run: nothing happens.
     let quiet = mgr.create_queue("Quiet").unwrap();
-    mgr.update_queue(&quiet.id, "one_time", None, None, false, "shutdown", None, None)
-        .await
-        .unwrap();
+    mgr.update_queue(
+        &quiet.id, "one_time", None, None, false, "shutdown", None, None,
+    )
+    .await
+    .unwrap();
     add_queued(&mgr, &server.url, &dir, "two.bin", &quiet.id).await;
     mgr.start_queue(&quiet.id).await.unwrap();
     assert!(wait_for_queue_drained(&mgr, &quiet.id, 30).await);
@@ -788,25 +1052,32 @@ async fn queue_action_run_program_executes_and_dismiss_clears() {
 #[tokio::test]
 #[cfg(not(target_os = "windows"))]
 async fn queue_action_shutdown_errors_off_windows() {
-    let server = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: false, ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: false,
+        ..Default::default()
+    });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let queue = mgr.create_queue("Power").unwrap();
-    mgr.update_queue(&queue.id, "one_time", None, None, false, "shutdown", None, None)
-        .await
-        .unwrap();
+    mgr.update_queue(
+        &queue.id, "one_time", None, None, false, "shutdown", None, None,
+    )
+    .await
+    .unwrap();
     add_queued(&mgr, &server.url, &dir, "one.bin", &queue.id).await;
     mgr.start_queue(&queue.id).await.unwrap();
     assert!(wait_for_queue_drained(&mgr, &queue.id, 30).await);
     assert!(mgr.pending_action(&queue.id).await.is_some());
     // On this Linux VM the shutdown action must refuse, never run.
     let err = mgr.execute_queue_action(&queue.id).await.unwrap_err();
-    assert!(err.to_string().contains("only available on Windows"), "{err}");
+    assert!(
+        err.to_string().contains("only available on Windows"),
+        "{err}"
+    );
 }
-
-
-
 
 // -- replica-test: edge cases (failing-test-first) ------------------------
 // Areas: F02 add URL, F03 pause/resume, F10 categories, F04 queues,
@@ -819,9 +1090,20 @@ fn closed_port() -> u16 {
     port
 }
 
-async fn complete_one(mgr: &Arc<DownloadManager>, server_url: &str, dir: &std::path::Path, name: &str) -> String {
+async fn complete_one(
+    mgr: &Arc<DownloadManager>,
+    server_url: &str,
+    dir: &std::path::Path,
+    name: &str,
+) -> String {
     let (id, _) = mgr
-        .add_download(server_url, Some(name.to_string()), Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            server_url,
+            Some(name.to_string()),
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -837,7 +1119,13 @@ async fn add_download_rejects_empty_url() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let err = mgr
-        .add_download("", None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            "",
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap_err();
     assert!(err.to_string().contains("Invalid address"), "{err}");
@@ -852,7 +1140,13 @@ async fn add_download_rejects_unsupported_scheme() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let err = mgr
-        .add_download("gopher://example.com/file.zip", None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            "gopher://example.com/file.zip",
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap_err();
     assert!(err.to_string().contains("Only http"), "{err}");
@@ -864,7 +1158,13 @@ async fn add_download_rejects_unparsable_url() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let err = mgr
-        .add_download("not a url", None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            "not a url",
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap_err();
     assert!(err.to_string().contains("Invalid address"), "{err}");
@@ -872,7 +1172,10 @@ async fn add_download_rejects_unparsable_url() {
 
 #[tokio::test]
 async fn add_download_rejects_404() {
-    let server = MockServer::start(MockConfig { fail_status: Some(404), ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        fail_status: Some(404),
+        ..Default::default()
+    });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
@@ -896,7 +1199,13 @@ async fn add_download_unreachable_host_errors() {
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let url = format!("http://127.0.0.1:{}/file.bin", closed_port());
     let err = mgr
-        .add_download(&url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap_err();
     assert!(err.to_string().contains("Network error"), "{err}");
@@ -904,7 +1213,12 @@ async fn add_download_unreachable_host_errors() {
 
 #[tokio::test]
 async fn duplicate_add_gets_different_save_path() {
-    let server = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: false, ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: false,
+        ..Default::default()
+    });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
@@ -930,13 +1244,25 @@ async fn duplicate_add_gets_different_save_path() {
         .unwrap();
     let a = mgr.get_download(&first).unwrap().unwrap();
     let b = mgr.get_download(&second).unwrap().unwrap();
-    assert_ne!(a.save_path, b.save_path, "two adds of the same link must not share one file");
-    assert!(b.save_path.ends_with(" (2).bin"), "second add should be suffixed: {}", b.save_path);
+    assert_ne!(
+        a.save_path, b.save_path,
+        "two adds of the same link must not share one file"
+    );
+    assert!(
+        b.save_path.ends_with(" (2).bin"),
+        "second add should be suffixed: {}",
+        b.save_path
+    );
 }
 
 #[tokio::test]
 async fn second_add_after_first_completes_gets_suffixed_path() {
-    let server = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: false, ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: false,
+        ..Default::default()
+    });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
@@ -952,23 +1278,47 @@ async fn second_add_after_first_completes_gets_suffixed_path() {
         .await
         .unwrap();
     let b = mgr.get_download(&second).unwrap().unwrap();
-    assert!(b.save_path.ends_with(" (2).bin"), "second add should be suffixed: {}", b.save_path);
+    assert!(
+        b.save_path.ends_with(" (2).bin"),
+        "second add should be suffixed: {}",
+        b.save_path
+    );
 }
 
 #[tokio::test]
 async fn start_and_resume_on_complete_error() {
-    let server = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: false, ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: false,
+        ..Default::default()
+    });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let id = complete_one(&mgr, &server.url, &dir, "file.bin").await;
-    assert!(mgr.start_download(&id).await.unwrap_err().to_string().contains("already complete"));
-    assert!(mgr.resume_download(&id).await.unwrap_err().to_string().contains("already complete"));
+    assert!(mgr
+        .start_download(&id)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("already complete"));
+    assert!(mgr
+        .resume_download(&id)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("already complete"));
 }
 
 #[tokio::test]
 async fn pause_download_when_not_running_errors() {
-    let server = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: false, ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: false,
+        ..Default::default()
+    });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
@@ -982,7 +1332,12 @@ async fn pause_download_when_not_running_errors() {
         )
         .await
         .unwrap();
-    assert!(mgr.pause_download(&id).await.unwrap_err().to_string().contains("not running"));
+    assert!(mgr
+        .pause_download(&id)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("not running"));
 }
 
 // -- F03: pause / resume ----------------------------------------------------
@@ -1018,7 +1373,11 @@ async fn resume_restarts_when_only_etag_changes() {
     assert!(wait_for_status(&mgr, &id, "complete", 30).await);
     let row = mgr.get_download(&id).unwrap().unwrap();
     assert_eq!(row.size_bytes, Some(512 * 1024));
-    assert_eq!(row.etag.as_deref(), Some("\"v2\""), "resume must have re-probed and stored the new validator");
+    assert_eq!(
+        row.etag.as_deref(),
+        Some("\"v2\""),
+        "resume must have re-probed and stored the new validator"
+    );
     assert_eq!(std::fs::read(&row.save_path).unwrap(), payload(512 * 1024));
 }
 
@@ -1060,40 +1419,80 @@ async fn start_download_on_paused_download_resumes() {
 
 #[tokio::test]
 async fn category_auto_assign_unknown_extension_falls_back_to_documents() {
-    let server = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: false, ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: false,
+        ..Default::default()
+    });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let (id, _) = mgr
-        .add_download(&server.url, Some("notes.qqq".to_string()), Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            Some("notes.qqq".to_string()),
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
-    assert_eq!(mgr.get_download(&id).unwrap().unwrap().category_id, "cat-documents");
+    assert_eq!(
+        mgr.get_download(&id).unwrap().unwrap().category_id,
+        "cat-documents"
+    );
 }
 
 #[tokio::test]
 async fn category_auto_assign_is_case_insensitive() {
-    let server = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: false, ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: false,
+        ..Default::default()
+    });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let (id, _) = mgr
-        .add_download(&server.url, Some("TRAILER.MP4".to_string()), Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            Some("TRAILER.MP4".to_string()),
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
-    assert_eq!(mgr.get_download(&id).unwrap().unwrap().category_id, "cat-video");
+    assert_eq!(
+        mgr.get_download(&id).unwrap().unwrap().category_id,
+        "cat-video"
+    );
 }
 
 #[tokio::test]
 async fn create_category_validation_errors() {
     let store = Store::open_in_memory().unwrap();
-    assert!(store.create_category("", "/tmp", &["xyz".to_string()]).is_err());
-    assert!(store.create_category("   ", "/tmp", &["xyz".to_string()]).is_err());
-    assert!(store.create_category("Clips", "", &["xyz".to_string()]).is_err());
+    assert!(store
+        .create_category("", "/tmp", &["xyz".to_string()])
+        .is_err());
+    assert!(store
+        .create_category("   ", "/tmp", &["xyz".to_string()])
+        .is_err());
+    assert!(store
+        .create_category("Clips", "", &["xyz".to_string()])
+        .is_err());
     assert!(store.create_category("Clips", "/tmp", &[]).is_err());
-    assert!(store.create_category("Clips", "/tmp", &["  ".to_string(), ".".to_string()]).is_err());
-    store.create_category("Clips", "/tmp", &["xyz".to_string()]).unwrap();
-    let err = store.create_category("Clips", "/tmp", &["abc".to_string()]).unwrap_err();
+    assert!(store
+        .create_category("Clips", "/tmp", &["  ".to_string(), ".".to_string()])
+        .is_err());
+    store
+        .create_category("Clips", "/tmp", &["xyz".to_string()])
+        .unwrap();
+    let err = store
+        .create_category("Clips", "/tmp", &["abc".to_string()])
+        .unwrap_err();
     assert!(err.to_string().contains("already exists"), "{err}");
 }
 
@@ -1101,9 +1500,21 @@ async fn create_category_validation_errors() {
 async fn move_to_category_unknown_ids_error() {
     let store = Store::open_in_memory().unwrap();
     let id = store
-        .create_download("http://127.0.0.1/x.bin", None, "x.bin", "/tmp/x.bin", "cat-video", None, None, None, None)
+        .create_download(
+            "http://127.0.0.1/x.bin",
+            None,
+            "x.bin",
+            "/tmp/x.bin",
+            "cat-video",
+            None,
+            None,
+            None,
+            None,
+        )
         .unwrap();
-    assert!(store.move_to_category("no-such-download", "cat-video").is_err());
+    assert!(store
+        .move_to_category("no-such-download", "cat-video")
+        .is_err());
     let err = store.move_to_category(&id, "no-such-category").unwrap_err();
     assert!(err.to_string().contains("not found"), "{err}");
 }
@@ -1116,15 +1527,30 @@ async fn delete_category_unknown_id_errors() {
 
 #[tokio::test]
 async fn delete_category_allowed_when_downloads_deleted() {
-    let server = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: false, ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: false,
+        ..Default::default()
+    });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let clips = mgr
-        .create_category("Clips", dir.to_string_lossy().as_ref(), &["xyz".to_string()])
+        .create_category(
+            "Clips",
+            dir.to_string_lossy().as_ref(),
+            &["xyz".to_string()],
+        )
         .unwrap();
     let (id, _) = mgr
-        .add_download(&server.url, Some("clip.xyz".to_string()), Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            Some("clip.xyz".to_string()),
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert!(mgr.delete_category(&clips.id).is_err());
@@ -1139,10 +1565,22 @@ async fn queue_state_errors() {
     let store = Store::open_in_memory().unwrap();
     let mgr = DownloadManager::new(Arc::new(store), 4);
     let queue = mgr.create_queue("Q").unwrap();
-    assert!(mgr.start_queue(&queue.id).await.unwrap_err().to_string().contains("no files"));
-    assert!(mgr.stop_queue(&queue.id).await.unwrap_err().to_string().contains("not running"));
+    assert!(mgr
+        .start_queue(&queue.id)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("no files"));
+    assert!(mgr
+        .stop_queue(&queue.id)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("not running"));
     assert!(mgr.add_to_queue("no-such-download", &queue.id).is_err());
-    assert!(mgr.add_to_queue("no-such-download", "no-such-queue").is_err());
+    assert!(mgr
+        .add_to_queue("no-such-download", "no-such-queue")
+        .is_err());
     assert!(mgr.reorder_queue(&queue.id, "no-such-download", 0).is_err());
     assert!(mgr.remove_from_queue("no-such-download").is_err());
     // Empty and whitespace-only queue names are refused; duplicates too.
@@ -1174,25 +1612,45 @@ async fn start_queue_twice_errors() {
 
 #[tokio::test]
 async fn reorder_single_item_and_out_of_range_clamps() {
-    let server = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: false, ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: false,
+        ..Default::default()
+    });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let queue = mgr.create_queue("Order").unwrap();
     let a = add_queued(&mgr, &server.url, &dir, "a.bin", &queue.id).await;
     mgr.reorder_queue(&queue.id, &a, 99).unwrap();
-    let ids: Vec<String> = mgr.list_queue_files(&queue.id).unwrap().iter().map(|d| d.id.clone()).collect();
+    let ids: Vec<String> = mgr
+        .list_queue_files(&queue.id)
+        .unwrap()
+        .iter()
+        .map(|d| d.id.clone())
+        .collect();
     assert_eq!(ids, vec![a.clone()]);
     let b = add_queued(&mgr, &server.url, &dir, "b.bin", &queue.id).await;
     let c = add_queued(&mgr, &server.url, &dir, "c.bin", &queue.id).await;
     mgr.reorder_queue(&queue.id, &a, 99).unwrap();
-    let ids: Vec<String> = mgr.list_queue_files(&queue.id).unwrap().iter().map(|d| d.id.clone()).collect();
+    let ids: Vec<String> = mgr
+        .list_queue_files(&queue.id)
+        .unwrap()
+        .iter()
+        .map(|d| d.id.clone())
+        .collect();
     assert_eq!(ids, vec![b, c, a]);
 }
 
 #[tokio::test]
 async fn add_to_queue_rejects_completed_download() {
-    let server = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: false, ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: false,
+        ..Default::default()
+    });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
@@ -1204,14 +1662,21 @@ async fn add_to_queue_rejects_completed_download() {
 
 #[tokio::test]
 async fn queue_with_only_completed_files_registers_no_action_and_drops_them() {
-    let server = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: false, ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: false,
+        ..Default::default()
+    });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let queue = mgr.create_queue("Done").unwrap();
-    mgr.update_queue(&queue.id, "one_time", None, None, false, "shutdown", None, None)
-        .await
-        .unwrap();
+    mgr.update_queue(
+        &queue.id, "one_time", None, None, false, "shutdown", None, None,
+    )
+    .await
+    .unwrap();
     // The file is queued first, then finished by a direct start: the
     // finished file stays filed in the queue (only the queue runner
     // unqueues files) — the state a finished row dragged onto a queue
@@ -1230,7 +1695,10 @@ async fn queue_with_only_completed_files_registers_no_action_and_drops_them() {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert!(drained, "a finished file must leave the queue when the queue runs");
+    assert!(
+        drained,
+        "a finished file must leave the queue when the queue runs"
+    );
     assert!(
         mgr.pending_action(&queue.id).await.is_none(),
         "a queue that downloaded nothing must not arm its completion action"
@@ -1242,15 +1710,29 @@ async fn queue_with_only_completed_files_registers_no_action_and_drops_them() {
 
 #[tokio::test]
 async fn update_queue_accepts_none_and_clears_schedule() {
-    let server = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: false, ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: false,
+        ..Default::default()
+    });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let queue = mgr.create_queue("Evening").unwrap();
     add_queued(&mgr, &server.url, &dir, "one.bin", &queue.id).await;
-    mgr.update_queue(&queue.id, "one_time", Some(&iso_in(-60)), Some(&iso_in(3600)), false, "none", None, None)
-        .await
-        .unwrap();
+    mgr.update_queue(
+        &queue.id,
+        "one_time",
+        Some(&iso_in(-60)),
+        Some(&iso_in(3600)),
+        false,
+        "none",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     // "No schedule" must save: it clears the times, it is not an error.
     let row = mgr
         .update_queue(&queue.id, "none", None, None, false, "none", None, None)
@@ -1263,7 +1745,13 @@ async fn update_queue_accepts_none_and_clears_schedule() {
     mgr.scheduler_tick_at(now_unix()).await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(!mgr.get_queue(&queue.id).await.unwrap().unwrap().running);
-    assert_eq!(mgr.get_download(&mgr.list_queue_files(&queue.id).unwrap()[0].id).unwrap().unwrap().status, "queued");
+    assert_eq!(
+        mgr.get_download(&mgr.list_queue_files(&queue.id).unwrap()[0].id)
+            .unwrap()
+            .unwrap()
+            .status,
+        "queued"
+    );
 }
 
 #[tokio::test]
@@ -1307,10 +1795,22 @@ async fn update_queue_rejects_malformed_start_time() {
     let mgr = DownloadManager::new(Arc::new(store), 4);
     let queue = mgr.create_queue("Broken").unwrap();
     let err = mgr
-        .update_queue(&queue.id, "one_time", Some("tomorrow at noon"), None, false, "none", None, None)
+        .update_queue(
+            &queue.id,
+            "one_time",
+            Some("tomorrow at noon"),
+            None,
+            false,
+            "none",
+            None,
+            None,
+        )
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("start time"), "unexpected error: {err}");
+    assert!(
+        err.to_string().contains("start time"),
+        "unexpected error: {err}"
+    );
     // Nothing was stored: the queue is still unscheduled.
     let row = mgr.get_queue(&queue.id).await.unwrap().unwrap();
     assert_eq!(row.start_at, None);
@@ -1322,10 +1822,22 @@ async fn update_queue_rejects_malformed_stop_time() {
     let mgr = DownloadManager::new(Arc::new(store), 4);
     let queue = mgr.create_queue("Broken").unwrap();
     let err = mgr
-        .update_queue(&queue.id, "one_time", Some(&iso_in(3600)), Some("soon"), false, "none", None, None)
+        .update_queue(
+            &queue.id,
+            "one_time",
+            Some(&iso_in(3600)),
+            Some("soon"),
+            false,
+            "none",
+            None,
+            None,
+        )
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("stop time"), "unexpected error: {err}");
+    assert!(
+        err.to_string().contains("stop time"),
+        "unexpected error: {err}"
+    );
     let row = mgr.get_queue(&queue.id).await.unwrap().unwrap();
     assert_eq!(row.stop_at, None);
 }
@@ -1339,10 +1851,22 @@ async fn update_queue_rejects_stop_before_start() {
     let mgr = DownloadManager::new(Arc::new(store), 4);
     let queue = mgr.create_queue("Inverted").unwrap();
     let err = mgr
-        .update_queue(&queue.id, "one_time", Some(&iso_in(3600)), Some(&iso_in(60)), false, "none", None, None)
+        .update_queue(
+            &queue.id,
+            "one_time",
+            Some(&iso_in(3600)),
+            Some(&iso_in(60)),
+            false,
+            "none",
+            None,
+            None,
+        )
         .await
         .unwrap_err();
-    assert_eq!(err.to_string(), "The stop time must be after the start time.");
+    assert_eq!(
+        err.to_string(),
+        "The stop time must be after the start time."
+    );
     // Nothing was stored.
     let row = mgr.get_queue(&queue.id).await.unwrap().unwrap();
     assert_eq!(row.start_at, None);
@@ -1356,15 +1880,39 @@ async fn update_queue_rejects_stop_equal_to_start_and_stop_without_start() {
     let queue = mgr.create_queue("Edge").unwrap();
     let same = iso_in(3600);
     let err = mgr
-        .update_queue(&queue.id, "one_time", Some(&same), Some(&same), false, "none", None, None)
+        .update_queue(
+            &queue.id,
+            "one_time",
+            Some(&same),
+            Some(&same),
+            false,
+            "none",
+            None,
+            None,
+        )
         .await
         .unwrap_err();
-    assert_eq!(err.to_string(), "The stop time must be after the start time.");
+    assert_eq!(
+        err.to_string(),
+        "The stop time must be after the start time."
+    );
     let err = mgr
-        .update_queue(&queue.id, "one_time", None, Some(&iso_in(3600)), false, "none", None, None)
+        .update_queue(
+            &queue.id,
+            "one_time",
+            None,
+            Some(&iso_in(3600)),
+            false,
+            "none",
+            None,
+            None,
+        )
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("start time"), "unexpected error: {err}");
+    assert!(
+        err.to_string().contains("start time"),
+        "unexpected error: {err}"
+    );
 }
 
 #[tokio::test]
@@ -1373,7 +1921,12 @@ async fn scheduler_tick_reports_legacy_malformed_schedule_but_runs_valid_queues(
     // before validation existed (a pre-fix database) must be reported
     // by the tick, not silently skipped — and it must not block other
     // queues from running.
-    let server = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: false, ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: false,
+        ..Default::default()
+    });
     let dir = tmpdir();
     let db_path = dir.join("app.db");
     let store = Arc::new(Store::open(&db_path).unwrap());
@@ -1392,11 +1945,23 @@ async fn scheduler_tick_reports_legacy_malformed_schedule_but_runs_valid_queues(
         )
         .unwrap();
     }
-    mgr.update_queue(&good.id, "one_time", Some(&iso_in(-60)), None, false, "none", None, None)
-        .await
-        .unwrap();
+    mgr.update_queue(
+        &good.id,
+        "one_time",
+        Some(&iso_in(-60)),
+        None,
+        false,
+        "none",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     let err = mgr.scheduler_tick_at(now_unix()).await.unwrap_err();
-    assert!(err.to_string().contains("Broken"), "unexpected error: {err}");
+    assert!(
+        err.to_string().contains("Broken"),
+        "unexpected error: {err}"
+    );
     // The valid queue still ran and drained despite the bad one.
     assert!(wait_for_queue_drained(&mgr, &good.id, 30).await);
     assert_eq!(mgr.list_queue_files(&good.id).unwrap().len(), 0);
@@ -1406,7 +1971,10 @@ async fn scheduler_tick_reports_legacy_malformed_schedule_but_runs_valid_queues(
 
 #[tokio::test]
 async fn probe_falls_back_when_head_refused() {
-    let server = MockServer::start(MockConfig { head_405: true, ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        head_405: true,
+        ..Default::default()
+    });
     let client = reqwest::Client::new();
     // HEAD answers 405: the probe must fall back to a ranged GET and
     // still learn the size and range support.
@@ -1450,7 +2018,12 @@ async fn probe_with_cookies_falls_back_when_head_drops_connection() {
 
 #[tokio::test]
 async fn add_download_keeps_unicode_filename() {
-    let server = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: false, ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: false,
+        ..Default::default()
+    });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
@@ -1471,7 +2044,12 @@ async fn add_download_keeps_unicode_filename() {
 
 #[tokio::test]
 async fn add_download_with_queue_files_it_in_main_queue() {
-    let server = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: false, ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: false,
+        ..Default::default()
+    });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
@@ -1494,8 +2072,18 @@ async fn add_download_with_queue_files_it_in_main_queue() {
 
 #[tokio::test]
 async fn queue_stops_when_a_file_errors() {
-    let good = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: false, ..Default::default() });
-    let bad = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: false, ..Default::default() });
+    let good = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: false,
+        ..Default::default()
+    });
+    let bad = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: false,
+        ..Default::default()
+    });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
@@ -1513,7 +2101,11 @@ async fn queue_stops_when_a_file_errors() {
     assert_eq!(one.queue_id, None);
     let two = mgr.get_download(&second).unwrap().unwrap();
     assert_eq!(two.status, "error");
-    assert!(two.error_message.as_deref().unwrap_or("").contains("500"), "error must say why: {:?}", two.error_message);
+    assert!(
+        two.error_message.as_deref().unwrap_or("").contains("500"),
+        "error must say why: {:?}",
+        two.error_message
+    );
     assert_eq!(two.queue_id.as_deref(), Some(queue.id.as_str()));
 }
 
@@ -1549,8 +2141,18 @@ async fn resume_fails_when_server_ignores_range() {
     mgr.resume_download(&id).await.unwrap();
     assert!(wait_for_status(&mgr, &id, "error", 120).await);
     let row = mgr.get_download(&id).unwrap().unwrap();
-    assert!(row.error_message.as_deref().unwrap_or("").contains("ignored the range"), "error must say why: {:?}", row.error_message);
-    assert!(row.downloaded_bytes < row.size_bytes.unwrap(), "no wrong bytes may be stitched in");
+    assert!(
+        row.error_message
+            .as_deref()
+            .unwrap_or("")
+            .contains("ignored the range"),
+        "error must say why: {:?}",
+        row.error_message
+    );
+    assert!(
+        row.downloaded_bytes < row.size_bytes.unwrap(),
+        "no wrong bytes may be stitched in"
+    );
 }
 
 #[tokio::test]
@@ -1558,20 +2160,41 @@ async fn open_file_action_executes() {
     // xdg-open exists on this Linux VM; spawn must succeed (the child
     // may fail to find an opener for a .bin file, but the spawn itself
     // is the action). On Windows this runs `cmd /C start`.
-    let server = MockServer::start(MockConfig { chunk: 65536, delay: Duration::ZERO, hide_length: false, ..Default::default() });
+    let server = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: false,
+        ..Default::default()
+    });
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let queue = mgr.create_queue("Open").unwrap();
-    mgr.update_queue(&queue.id, "one_time", None, None, false, "open_file", None, None)
-        .await
-        .unwrap();
+    mgr.update_queue(
+        &queue.id,
+        "one_time",
+        None,
+        None,
+        false,
+        "open_file",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     add_queued(&mgr, &server.url, &dir, "one.bin", &queue.id).await;
     mgr.start_queue(&queue.id).await.unwrap();
     assert!(wait_for_queue_drained(&mgr, &queue.id, 30).await);
-    let pending = mgr.pending_action(&queue.id).await.expect("open_file action must be pending");
+    let pending = mgr
+        .pending_action(&queue.id)
+        .await
+        .expect("open_file action must be pending");
     assert_eq!(pending.action, "open_file");
-    assert!(pending.file_path.as_deref().unwrap_or("").ends_with("one.bin"));
+    assert!(pending
+        .file_path
+        .as_deref()
+        .unwrap_or("")
+        .ends_with("one.bin"));
     mgr.execute_queue_action(&queue.id).await.unwrap();
     assert!(mgr.pending_action(&queue.id).await.is_none());
 }
@@ -1580,7 +2203,7 @@ async fn open_file_action_executes() {
 
 #[tokio::test]
 async fn extract_links_finds_all_tag_types_and_resolves_relative() {
-    use fetchline_engine::{extract_links, LinkKind, classify_kind};
+    use fetchline_engine::{classify_kind, extract_links, LinkKind};
     let html = "<html><head><link href=\"style.css\"></head><body>\
         <a href=\"https://example.com/abs.mp4\">abs</a>\
         <a href=\"/root.png\">root</a>\
@@ -1626,8 +2249,18 @@ async fn fetch_page_links_probes_kinds_sizes_and_dead_links() {
     let links = mgr.fetch_page_links(&page.page_url).await.unwrap();
     // 9 unique links: style.css first (head), then body order; the
     // video appears 3 times (a x2, source x1) and the pic twice.
-    assert_eq!(links.len(), 9, "links: {:?}", links.iter().map(|l| &l.url).collect::<Vec<_>>());
-    let by_url = |u: &str| links.iter().find(|l| l.url == format!("{}{u}", page.base)).unwrap();
+    assert_eq!(
+        links.len(),
+        9,
+        "links: {:?}",
+        links.iter().map(|l| &l.url).collect::<Vec<_>>()
+    );
+    let by_url = |u: &str| {
+        links
+            .iter()
+            .find(|l| l.url == format!("{}{u}", page.base))
+            .unwrap()
+    };
     let video = by_url("/video.mp4");
     assert_eq!(video.kind, LinkKind::Video);
     assert_eq!(video.size, Some(100 * 1024));
@@ -1644,7 +2277,11 @@ async fn fetch_page_links_probes_kinds_sizes_and_dead_links() {
     let dead = by_url("/missing.mp4");
     assert_eq!(dead.kind, LinkKind::Video);
     assert_eq!(dead.size, None);
-    assert!(dead.error.as_deref().unwrap_or("").contains("404"), "dead link must carry its error: {:?}", dead.error);
+    assert!(
+        dead.error.as_deref().unwrap_or("").contains("404"),
+        "dead link must carry its error: {:?}",
+        dead.error
+    );
 }
 
 #[tokio::test]
@@ -1654,13 +2291,22 @@ async fn fetch_page_links_flags_already_downloaded() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let video = format!("{}/video.mp4", page.base);
-    mgr.add_download(&video, None, Some(dir.to_string_lossy().to_string()), None, None)
-        .await
-        .unwrap();
+    mgr.add_download(
+        &video,
+        None,
+        Some(dir.to_string_lossy().to_string()),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     let links = mgr.fetch_page_links(&page.page_url).await.unwrap();
     let flagged = links.iter().find(|l| l.url == video).unwrap();
     assert!(flagged.already_exists);
-    assert!(links.iter().filter(|l| l.url != video).all(|l| !l.already_exists));
+    assert!(links
+        .iter()
+        .filter(|l| l.url != video)
+        .all(|l| !l.already_exists));
 }
 
 #[tokio::test]
@@ -1692,16 +2338,30 @@ async fn batch_add_validates_lines_with_numbers() {
         format!("{}/missing.mp4", page.base),
     ];
     let result = mgr
-        .add_batch_downloads(&lines, Some(dir.to_string_lossy().to_string()), None, None, false)
+        .add_batch_downloads(
+            &lines,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+            false,
+        )
         .await
         .unwrap();
-    assert_eq!(result.created.len(), 2, "only the two good links are created");
+    assert_eq!(
+        result.created.len(),
+        2,
+        "only the two good links are created"
+    );
     // Blank lines are ignored, not errors; the bad lines are 4, 5, 7.
     assert_eq!(result.invalid.len(), 3);
     assert_eq!(result.invalid[0].line, 4);
     assert_eq!(result.invalid[1].line, 5);
     assert_eq!(result.invalid[2].line, 7);
-    assert!(result.invalid[2].error.contains("404"), "error: {}", result.invalid[2].error);
+    assert!(
+        result.invalid[2].error.contains("404"),
+        "error: {}",
+        result.invalid[2].error
+    );
     assert_eq!(mgr.list_downloads().unwrap().len(), 2);
 }
 
@@ -1725,7 +2385,11 @@ async fn batch_add_dedups_within_batch() {
     assert_eq!(result.created.len(), 2);
     assert_eq!(result.invalid.len(), 1);
     assert_eq!(result.invalid[0].line, 2);
-    assert!(result.invalid[0].error.contains("Duplicate"), "error: {}", result.invalid[0].error);
+    assert!(
+        result.invalid[0].error.contains("Duplicate"),
+        "error: {}",
+        result.invalid[0].error
+    );
 }
 
 #[tokio::test]
@@ -1813,7 +2477,9 @@ async fn download_all_adds_only_selected_links() {
     assert!(result.invalid.is_empty());
     let rows = mgr.list_downloads().unwrap();
     assert_eq!(rows.len(), 2);
-    assert!(rows.iter().any(|r| r.filename == "song.mp3" && r.category_id == "cat-music"));
+    assert!(rows
+        .iter()
+        .any(|r| r.filename == "song.mp3" && r.category_id == "cat-music"));
     assert!(rows.iter().any(|r| r.filename == "pic.png"));
 }
 
@@ -1835,7 +2501,10 @@ async fn batch_add_rejects_unknown_queue_and_category_up_front() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("no-such-queue"), "error: {err}");
-    assert!(mgr.list_downloads().unwrap().is_empty(), "nothing may be added before the queue check");
+    assert!(
+        mgr.list_downloads().unwrap().is_empty(),
+        "nothing may be added before the queue check"
+    );
     let err = mgr
         .add_batch_downloads(
             &[url],
@@ -1916,7 +2585,10 @@ async fn settings_defaults_and_round_trip() {
     // A speed limit of 0 means unlimited and is stored as NULL.
     let mut unlimited = saved.clone();
     unlimited.speed_limit_kbps = Some(0);
-    assert_eq!(store.update_settings(&unlimited).unwrap().speed_limit_kbps, None);
+    assert_eq!(
+        store.update_settings(&unlimited).unwrap().speed_limit_kbps,
+        None
+    );
 }
 
 #[tokio::test]
@@ -2165,7 +2837,10 @@ async fn save_to_folder_and_file_types_edit_change_downloads() {
         )
         .unwrap();
     assert_eq!(updated.default_folder, new_dir.to_string_lossy());
-    assert_eq!(updated.file_extensions, vec!["xyz".to_string(), "abc".to_string()]);
+    assert_eq!(
+        updated.file_extensions,
+        vec!["xyz".to_string(), "abc".to_string()]
+    );
     // A .abc file is auto-assigned to Books and lands in its folder.
     let (id, _) = mgr
         .add_download(&server.url, Some("book.abc".to_string()), None, None, None)
@@ -2173,7 +2848,11 @@ async fn save_to_folder_and_file_types_edit_change_downloads() {
         .unwrap();
     let row = mgr.get_download(&id).unwrap().unwrap();
     assert_eq!(row.category_id, cat.id);
-    assert!(std::path::Path::new(&row.save_path).starts_with(&new_dir), "save_path: {}", row.save_path);
+    assert!(
+        std::path::Path::new(&row.save_path).starts_with(&new_dir),
+        "save_path: {}",
+        row.save_path
+    );
     // Editing a built-in category's folder works the same way.
     let video_dir = dir.join("videos");
     mgr.update_category("cat-video", Some(&video_dir.to_string_lossy()), None)
@@ -2184,7 +2863,11 @@ async fn save_to_folder_and_file_types_edit_change_downloads() {
         .unwrap();
     let row2 = mgr.get_download(&id2).unwrap().unwrap();
     assert_eq!(row2.category_id, "cat-video");
-    assert!(std::path::Path::new(&row2.save_path).starts_with(&video_dir), "save_path: {}", row2.save_path);
+    assert!(
+        std::path::Path::new(&row2.save_path).starts_with(&video_dir),
+        "save_path: {}",
+        row2.save_path
+    );
     // Validation: an empty folder or no extensions is refused.
     assert!(mgr.update_category(&cat.id, Some("  "), None).is_err());
     assert!(mgr.update_category(&cat.id, None, Some(&[])).is_err());
@@ -2208,7 +2891,11 @@ async fn default_folder_from_settings_is_used() {
         .await
         .unwrap();
     let row = mgr.get_download(&id).unwrap().unwrap();
-    assert!(std::path::Path::new(&row.save_path).starts_with(&default_dir), "save_path: {}", row.save_path);
+    assert!(
+        std::path::Path::new(&row.save_path).starts_with(&default_dir),
+        "save_path: {}",
+        row.save_path
+    );
 }
 
 #[tokio::test]
@@ -2221,15 +2908,24 @@ async fn duplicate_overwrite_reuses_path() {
     s.duplicate_action = "overwrite".to_string();
     mgr.update_settings(&s).unwrap();
     let folder = dir.to_string_lossy().to_string();
-    let (id1, _) = mgr.add_download(&server.url, None, Some(folder.clone()), None, None).await.unwrap();
-    let (id2, _) = mgr.add_download(&server.url, None, Some(folder.clone()), None, None).await.unwrap();
+    let (id1, _) = mgr
+        .add_download(&server.url, None, Some(folder.clone()), None, None)
+        .await
+        .unwrap();
+    let (id2, _) = mgr
+        .add_download(&server.url, None, Some(folder.clone()), None, None)
+        .await
+        .unwrap();
     let p1 = mgr.get_download(&id1).unwrap().unwrap().save_path;
     let p2 = mgr.get_download(&id2).unwrap().unwrap().save_path;
     assert_eq!(p1, p2, "overwrite reuses the same path");
     // Back to rename: the third add gets a suffixed path.
     s.duplicate_action = "rename".to_string();
     mgr.update_settings(&s).unwrap();
-    let (id3, _) = mgr.add_download(&server.url, None, Some(folder), None, None).await.unwrap();
+    let (id3, _) = mgr
+        .add_download(&server.url, None, Some(folder), None, None)
+        .await
+        .unwrap();
     let p3 = mgr.get_download(&id3).unwrap().unwrap().save_path;
     assert_ne!(p3, p1);
     assert!(p3.contains(" (2)."), "save_path: {p3}");
@@ -2257,7 +2953,10 @@ async fn proxy_validation_rejects_bad_config() {
     bad = proxy_input("http", "127.0.0.1", 8080);
     bad.bypass = vec!["has space".to_string()];
     assert!(store.save_proxy_config(&bad).is_err());
-    assert!(store.get_proxy_config().unwrap().is_none(), "nothing was stored");
+    assert!(
+        store.get_proxy_config().unwrap().is_none(),
+        "nothing was stored"
+    );
 }
 
 #[tokio::test]
@@ -2282,13 +2981,26 @@ async fn proxy_password_is_stored_and_hidden_from_ui() {
     let row2 = store.save_proxy_config(&again).unwrap();
     assert!(row2.has_password);
     assert_eq!(row2.port, 9090);
-    assert_eq!(store.get_active_proxy().unwrap().unwrap().password.as_deref(), Some("hunter2"));
+    assert_eq!(
+        store
+            .get_active_proxy()
+            .unwrap()
+            .unwrap()
+            .password
+            .as_deref(),
+        Some("hunter2")
+    );
     // An empty password clears it.
     let mut clear = proxy_input("http", "127.0.0.1", 9090);
     clear.password = Some(String::new());
     let row3 = store.save_proxy_config(&clear).unwrap();
     assert!(!row3.has_password);
-    assert!(store.get_active_proxy().unwrap().unwrap().password.is_none());
+    assert!(store
+        .get_active_proxy()
+        .unwrap()
+        .unwrap()
+        .password
+        .is_none());
 }
 
 #[tokio::test]
@@ -2299,7 +3011,8 @@ async fn download_goes_through_http_proxy() {
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
-    mgr.save_proxy_config(&proxy_input("http", "127.0.0.1", proxy.port as i64)).unwrap();
+    mgr.save_proxy_config(&proxy_input("http", "127.0.0.1", proxy.port as i64))
+        .unwrap();
     let (id, _) = mgr
         .add_download(
             &server.url,
@@ -2314,7 +3027,10 @@ async fn download_goes_through_http_proxy() {
     assert!(wait_for_status(&mgr, &id, "complete", 30).await);
     let row = mgr.get_download(&id).unwrap().unwrap();
     assert_eq!(std::fs::read(&row.save_path).unwrap(), payload(512 * 1024));
-    assert!(proxy.hits.load(std::sync::atomic::Ordering::SeqCst) > 0, "the proxy was never used");
+    assert!(
+        proxy.hits.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        "the proxy was never used"
+    );
 }
 
 #[tokio::test]
@@ -2344,7 +3060,10 @@ async fn download_goes_through_http_proxy_with_auth() {
         .unwrap();
     mgr.start_download(&id).await.unwrap();
     assert!(wait_for_status(&mgr, &id, "complete", 30).await);
-    assert!(proxy.saw_auth.load(std::sync::atomic::Ordering::SeqCst), "no Proxy-Authorization was sent");
+    assert!(
+        proxy.saw_auth.load(std::sync::atomic::Ordering::SeqCst),
+        "no Proxy-Authorization was sent"
+    );
 }
 
 #[tokio::test]
@@ -2376,7 +3095,10 @@ async fn basic_auth_setting_sends_credentials_preemptively() {
         .unwrap();
     mgr.start_download(&id).await.unwrap();
     assert!(wait_for_status(&mgr, &id, "complete", 30).await);
-    assert!(proxy.saw_auth.load(std::sync::atomic::Ordering::SeqCst), "no Proxy-Authorization was sent preemptively");
+    assert!(
+        proxy.saw_auth.load(std::sync::atomic::Ordering::SeqCst),
+        "no Proxy-Authorization was sent preemptively"
+    );
 }
 
 #[tokio::test]
@@ -2401,7 +3123,11 @@ async fn proxy_disabled_download_goes_direct() {
         .unwrap();
     mgr.start_download(&id).await.unwrap();
     assert!(wait_for_status(&mgr, &id, "complete", 30).await);
-    assert_eq!(proxy.hits.load(std::sync::atomic::Ordering::SeqCst), 0, "disabled proxy was used");
+    assert_eq!(
+        proxy.hits.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "disabled proxy was used"
+    );
 }
 
 #[tokio::test]
@@ -2426,7 +3152,11 @@ async fn proxy_bypass_list_skips_proxy() {
         .unwrap();
     mgr.start_download(&id).await.unwrap();
     assert!(wait_for_status(&mgr, &id, "complete", 30).await);
-    assert_eq!(proxy.hits.load(std::sync::atomic::Ordering::SeqCst), 0, "bypassed host went through the proxy");
+    assert_eq!(
+        proxy.hits.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "bypassed host went through the proxy"
+    );
 }
 
 #[tokio::test]
@@ -2437,7 +3167,8 @@ async fn download_goes_through_socks5_proxy() {
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
-    mgr.save_proxy_config(&proxy_input("socks", "127.0.0.1", proxy.port as i64)).unwrap();
+    mgr.save_proxy_config(&proxy_input("socks", "127.0.0.1", proxy.port as i64))
+        .unwrap();
     let (id, _) = mgr
         .add_download(
             &server.url,
@@ -2452,7 +3183,10 @@ async fn download_goes_through_socks5_proxy() {
     assert!(wait_for_status(&mgr, &id, "complete", 30).await);
     let row = mgr.get_download(&id).unwrap().unwrap();
     assert_eq!(std::fs::read(&row.save_path).unwrap(), payload(512 * 1024));
-    assert!(proxy.hits.load(std::sync::atomic::Ordering::SeqCst) > 0, "the SOCKS5 proxy was never used");
+    assert!(
+        proxy.hits.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        "the SOCKS5 proxy was never used"
+    );
 }
 
 #[tokio::test]
@@ -2478,7 +3212,10 @@ async fn socks5_proxy_with_auth() {
         .unwrap();
     mgr.start_download(&id).await.unwrap();
     assert!(wait_for_status(&mgr, &id, "complete", 30).await);
-    assert!(proxy.saw_auth.load(std::sync::atomic::Ordering::SeqCst), "no SOCKS5 auth was sent");
+    assert!(
+        proxy.saw_auth.load(std::sync::atomic::Ordering::SeqCst),
+        "no SOCKS5 auth was sent"
+    );
     // Wrong password: the probe cannot reach the server at all.
     let dir2 = tmpdir();
     let store2 = Arc::new(Store::open(&dir2.join("app.db")).unwrap());
@@ -2488,7 +3225,13 @@ async fn socks5_proxy_with_auth() {
     wrong.password = Some("wrong".to_string());
     mgr2.save_proxy_config(&wrong).unwrap();
     let err = mgr2
-        .add_download(&server.url, None, Some(dir2.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir2.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap_err();
     assert!(!err.to_string().is_empty(), "expected a proxy auth error");
@@ -2570,8 +3313,14 @@ async fn speed_limit_caps_download() {
     let elapsed = start.elapsed();
     // 256 KiB at 32 KiB/s takes ~8 s (first 32 KiB are the free
     // burst); anything under 5 s means the cap did not hold.
-    assert!(elapsed >= Duration::from_secs(5), "finished too fast: {elapsed:?}");
-    assert!(elapsed < Duration::from_secs(25), "finished too slow: {elapsed:?}");
+    assert!(
+        elapsed >= Duration::from_secs(5),
+        "finished too fast: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(25),
+        "finished too slow: {elapsed:?}"
+    );
     let row = mgr.get_download(&id).unwrap().unwrap();
     assert_eq!(std::fs::read(&row.save_path).unwrap(), payload(256 * 1024));
 }
@@ -2600,7 +3349,11 @@ async fn speed_limit_unlimited_is_fast() {
     let start = Instant::now();
     mgr.start_download(&id).await.unwrap();
     assert!(wait_for_status(&mgr, &id, "complete", 30).await);
-    assert!(start.elapsed() < Duration::from_secs(5), "elapsed: {:?}", start.elapsed());
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "elapsed: {:?}",
+        start.elapsed()
+    );
 }
 
 #[tokio::test]
@@ -2636,7 +3389,10 @@ async fn speed_limit_change_mid_download_takes_effect() {
         if mid.downloaded_bytes > 0 {
             started = true;
             assert_eq!(mid.status, "downloading");
-            assert!(mid.downloaded_bytes < mid.size_bytes.unwrap(), "already done under the cap?");
+            assert!(
+                mid.downloaded_bytes < mid.size_bytes.unwrap(),
+                "already done under the cap?"
+            );
             break;
         }
     }
@@ -2645,11 +3401,14 @@ async fn speed_limit_change_mid_download_takes_effect() {
     mgr.set_speed_limit(None).unwrap();
     assert_eq!(mgr.speed_limit_bps(), 0);
     assert!(wait_for_status(&mgr, &id, "complete", 15).await);
-    assert!(start.elapsed() < Duration::from_secs(15), "elapsed: {:?}", start.elapsed());
+    assert!(
+        start.elapsed() < Duration::from_secs(15),
+        "elapsed: {:?}",
+        start.elapsed()
+    );
     let row = mgr.get_download(&id).unwrap().unwrap();
     assert_eq!(std::fs::read(&row.save_path).unwrap(), payload(512 * 1024));
 }
-
 
 // -- replica-test round 2: settings (S09), proxy, speed limiter (S12),
 //    and their integration with queues/categories/scheduler ----------
@@ -2664,7 +3423,11 @@ async fn speed_limit_rejects_negative_and_accepts_huge_sane_value() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     assert!(mgr.set_speed_limit(Some(-5)).is_err());
-    assert_eq!(mgr.get_speed_limit().unwrap(), None, "rejected save stored nothing");
+    assert_eq!(
+        mgr.get_speed_limit().unwrap(),
+        None,
+        "rejected save stored nothing"
+    );
     mgr.set_speed_limit(Some(10_000_000)).unwrap();
     assert_eq!(mgr.get_speed_limit().unwrap(), Some(10_000_000));
     assert_eq!(mgr.speed_limit_bps(), 10_000_000 * 1024);
@@ -2794,9 +3557,17 @@ async fn max_retries_zero_means_single_attempt_and_fast_error() {
     let start = Instant::now();
     mgr.start_download(&id).await.unwrap();
     assert!(wait_for_status(&mgr, &id, "error", 10).await);
-    assert!(start.elapsed() < Duration::from_secs(10), "elapsed: {:?}", start.elapsed());
+    assert!(
+        start.elapsed() < Duration::from_secs(10),
+        "elapsed: {:?}",
+        start.elapsed()
+    );
     let row = mgr.get_download(&id).unwrap().unwrap();
-    assert!(row.error_message.as_deref().unwrap_or("").contains("500"), "error: {:?}", row.error_message);
+    assert!(
+        row.error_message.as_deref().unwrap_or("").contains("500"),
+        "error: {:?}",
+        row.error_message
+    );
 }
 
 /// S09-N1: `test_proxy` validates its input before dialling anything.
@@ -2806,9 +3577,15 @@ async fn test_proxy_rejects_invalid_input() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let bad_port = proxy_input("http", "127.0.0.1", 0);
-    assert!(mgr.test_proxy(&bad_port, "http://127.0.0.1/").await.is_err());
+    assert!(mgr
+        .test_proxy(&bad_port, "http://127.0.0.1/")
+        .await
+        .is_err());
     let bad_type = proxy_input("ntlm", "127.0.0.1", 8080);
-    assert!(mgr.test_proxy(&bad_type, "http://127.0.0.1/").await.is_err());
+    assert!(mgr
+        .test_proxy(&bad_type, "http://127.0.0.1/")
+        .await
+        .is_err());
 }
 
 /// S09-N2: the proxy row the UI receives can never contain the
@@ -2823,8 +3600,14 @@ async fn proxy_row_serialised_contains_no_password() {
     let row = store.save_proxy_config(&input).unwrap();
     assert!(row.has_password);
     let json = serde_json::to_string(&row).unwrap();
-    assert!(!json.contains("hunter2"), "password leaked into the UI row: {json}");
-    assert!(!json.contains("\"password\":"), "row carries a password field: {json}");
+    assert!(
+        !json.contains("hunter2"),
+        "password leaked into the UI row: {json}"
+    );
+    assert!(
+        !json.contains("\"password\":"),
+        "row carries a password field: {json}"
+    );
     // And the type itself has no password field to leak (compile-time):
     let _: ProxyConfigRow = row;
 }
@@ -2843,15 +3626,36 @@ async fn speed_limit_is_global_across_concurrent_downloads() {
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     mgr.set_speed_limit(Some(32)).unwrap();
     let folder = dir.to_string_lossy().to_string();
-    let (id1, _) = mgr.add_download(&server.url, Some("one.bin".to_string()), Some(folder.clone()), None, None).await.unwrap();
-    let (id2, _) = mgr.add_download(&server.url, Some("two.bin".to_string()), Some(folder), None, None).await.unwrap();
+    let (id1, _) = mgr
+        .add_download(
+            &server.url,
+            Some("one.bin".to_string()),
+            Some(folder.clone()),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let (id2, _) = mgr
+        .add_download(
+            &server.url,
+            Some("two.bin".to_string()),
+            Some(folder),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
     let start = Instant::now();
     mgr.start_download(&id1).await.unwrap();
     mgr.start_download(&id2).await.unwrap();
     assert!(wait_for_status(&mgr, &id1, "complete", 40).await);
     assert!(wait_for_status(&mgr, &id2, "complete", 40).await);
     let elapsed = start.elapsed();
-    assert!(elapsed >= Duration::from_secs(12), "cap did not hold across both downloads: {elapsed:?}");
+    assert!(
+        elapsed >= Duration::from_secs(12),
+        "cap did not hold across both downloads: {elapsed:?}"
+    );
     assert!(elapsed < Duration::from_secs(30), "elapsed: {elapsed:?}");
     for id in [&id1, &id2] {
         let row = mgr.get_download(id).unwrap().unwrap();
@@ -2887,7 +3691,10 @@ async fn speed_limit_chunk_larger_than_rate_completes() {
     mgr.start_download(&id).await.unwrap();
     assert!(wait_for_status(&mgr, &id, "complete", 30).await);
     let elapsed = start.elapsed();
-    assert!(elapsed >= Duration::from_secs(5), "finished too fast for a 16 KiB/s cap: {elapsed:?}");
+    assert!(
+        elapsed >= Duration::from_secs(5),
+        "finished too fast for a 16 KiB/s cap: {elapsed:?}"
+    );
     assert!(elapsed < Duration::from_secs(20), "elapsed: {elapsed:?}");
     let row = mgr.get_download(&id).unwrap().unwrap();
     assert_eq!(std::fs::read(&row.save_path).unwrap(), payload(128 * 1024));
@@ -2929,10 +3736,19 @@ async fn http_proxy_wrong_credentials_are_rejected() {
     wrong.password = Some("wrong".to_string());
     mgr2.save_proxy_config(&wrong).unwrap();
     let err = mgr2
-        .add_download(&server.url, None, Some(dir2.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir2.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("407"), "expected a 407 error, got: {err}");
+    assert!(
+        err.to_string().contains("407"),
+        "expected a 407 error, got: {err}"
+    );
 }
 
 /// S09-P2 (DOC): `use_for = ["https"]` means an http:// download goes
@@ -2960,7 +3776,11 @@ async fn proxy_https_only_scope_skips_http_downloads() {
         .unwrap();
     mgr.start_download(&id).await.unwrap();
     assert!(wait_for_status(&mgr, &id, "complete", 30).await);
-    assert_eq!(proxy.hits.load(std::sync::atomic::Ordering::SeqCst), 0, "https-only proxy was used for http");
+    assert_eq!(
+        proxy.hits.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "https-only proxy was used for http"
+    );
 }
 
 /// S09-P3: `use_for = ["http"]` routes http:// downloads through the proxy.
@@ -2986,7 +3806,10 @@ async fn proxy_http_only_scope_uses_proxy_for_http() {
         .unwrap();
     mgr.start_download(&id).await.unwrap();
     assert!(wait_for_status(&mgr, &id, "complete", 30).await);
-    assert!(proxy.hits.load(std::sync::atomic::Ordering::SeqCst) > 0, "http-only proxy was not used");
+    assert!(
+        proxy.hits.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        "http-only proxy was not used"
+    );
 }
 
 /// S09-P4: Download All's page fetch goes through the configured proxy
@@ -2998,10 +3821,14 @@ async fn fetch_page_links_goes_through_proxy() {
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
-    mgr.save_proxy_config(&proxy_input("http", "127.0.0.1", proxy.port as i64)).unwrap();
+    mgr.save_proxy_config(&proxy_input("http", "127.0.0.1", proxy.port as i64))
+        .unwrap();
     let links = mgr.fetch_page_links(&page.page_url).await.unwrap();
     assert!(!links.is_empty(), "expected links from the test page");
-    assert!(proxy.hits.load(std::sync::atomic::Ordering::SeqCst) > 0, "page fetch bypassed the proxy");
+    assert!(
+        proxy.hits.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        "page fetch bypassed the proxy"
+    );
 }
 
 /// S09-P5: saving a new proxy applies to the next download — the old
@@ -3015,19 +3842,46 @@ async fn proxy_change_applies_to_next_download() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let folder = dir.to_string_lossy().to_string();
-    mgr.save_proxy_config(&proxy_input("http", "127.0.0.1", proxy_a.port as i64)).unwrap();
-    let (id1, _) = mgr.add_download(&server.url, Some("a.bin".to_string()), Some(folder.clone()), None, None).await.unwrap();
+    mgr.save_proxy_config(&proxy_input("http", "127.0.0.1", proxy_a.port as i64))
+        .unwrap();
+    let (id1, _) = mgr
+        .add_download(
+            &server.url,
+            Some("a.bin".to_string()),
+            Some(folder.clone()),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
     mgr.start_download(&id1).await.unwrap();
     assert!(wait_for_status(&mgr, &id1, "complete", 30).await);
     assert!(proxy_a.hits.load(std::sync::atomic::Ordering::SeqCst) > 0);
     assert_eq!(proxy_b.hits.load(std::sync::atomic::Ordering::SeqCst), 0);
     let a_hits = proxy_a.hits.load(std::sync::atomic::Ordering::SeqCst);
-    mgr.save_proxy_config(&proxy_input("http", "127.0.0.1", proxy_b.port as i64)).unwrap();
-    let (id2, _) = mgr.add_download(&server.url, Some("b.bin".to_string()), Some(folder), None, None).await.unwrap();
+    mgr.save_proxy_config(&proxy_input("http", "127.0.0.1", proxy_b.port as i64))
+        .unwrap();
+    let (id2, _) = mgr
+        .add_download(
+            &server.url,
+            Some("b.bin".to_string()),
+            Some(folder),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
     mgr.start_download(&id2).await.unwrap();
     assert!(wait_for_status(&mgr, &id2, "complete", 30).await);
-    assert!(proxy_b.hits.load(std::sync::atomic::Ordering::SeqCst) > 0, "new proxy was not used");
-    assert_eq!(proxy_a.hits.load(std::sync::atomic::Ordering::SeqCst), a_hits, "old proxy was still used");
+    assert!(
+        proxy_b.hits.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        "new proxy was not used"
+    );
+    assert_eq!(
+        proxy_a.hits.load(std::sync::atomic::Ordering::SeqCst),
+        a_hits,
+        "old proxy was still used"
+    );
 }
 
 /// BUG-010 (was S09-P6, DOC): `test_proxy` with an https-only proxy
@@ -3047,7 +3901,11 @@ async fn test_proxy_https_only_scope_rejects_http_test_url() {
         err.to_string().contains("only used for"),
         "expected a scope error, got: {err}"
     );
-    assert_eq!(proxy.hits.load(std::sync::atomic::Ordering::SeqCst), 0, "test went through the proxy after all");
+    assert_eq!(
+        proxy.hits.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "test went through the proxy after all"
+    );
 }
 
 /// BUG-010 positive case: a test URL whose scheme the proxy covers
@@ -3063,7 +3921,10 @@ async fn test_proxy_http_scope_uses_proxy_for_http_url() {
     input.use_for = vec!["http".to_string()];
     let status = mgr.test_proxy(&input, &server.url).await.unwrap();
     assert_eq!(status, 200);
-    assert!(proxy.hits.load(std::sync::atomic::Ordering::SeqCst) > 0, "test never reached the proxy");
+    assert!(
+        proxy.hits.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        "test never reached the proxy"
+    );
 }
 
 /// BUG-010: an FTP proxy cannot be tested with an HTTP(S) URL — the
@@ -3077,7 +3938,10 @@ async fn test_proxy_ftp_type_is_rejected() {
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let input = proxy_input("ftp", "127.0.0.1", 2121);
     let err = mgr.test_proxy(&input, &server.url).await.unwrap_err();
-    assert!(err.to_string().contains("FTP"), "expected an FTP error, got: {err}");
+    assert!(
+        err.to_string().contains("FTP"),
+        "expected an FTP error, got: {err}"
+    );
 }
 
 /// BUG-009 (was S09-P7, DOC): `test_proxy` with wrong proxy
@@ -3098,7 +3962,11 @@ async fn test_proxy_wrong_credentials_is_an_error() {
         err.to_string().contains("407") && err.to_string().contains("authentication"),
         "expected a 407 authentication error, got: {err}"
     );
-    assert_eq!(proxy.hits.load(std::sync::atomic::Ordering::SeqCst), 0, "refused request counted as a hit");
+    assert_eq!(
+        proxy.hits.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "refused request counted as a hit"
+    );
 }
 
 /// Serve one fixed HTML page once, on a local port, then stop.
@@ -3138,24 +4006,51 @@ async fn file_types_auto_limits_auto_assign() {
     let folder = dir.to_string_lossy().to_string();
     // Empty list: every extension auto-assigns to its category.
     let (id, _) = mgr
-        .add_download(&server.url, Some("pack.zip".to_string()), Some(folder.clone()), None, None)
+        .add_download(
+            &server.url,
+            Some("pack.zip".to_string()),
+            Some(folder.clone()),
+            None,
+            None,
+        )
         .await
         .unwrap();
-    assert_eq!(mgr.get_download(&id).unwrap().unwrap().category_id, "cat-compressed");
+    assert_eq!(
+        mgr.get_download(&id).unwrap().unwrap().category_id,
+        "cat-compressed"
+    );
     // Restricted list: only mp4 is auto-assigned; zip falls back.
     let mut settings = store.get_settings().unwrap();
     settings.file_types_auto = vec!["mp4".to_string()];
     mgr.update_settings(&settings).unwrap();
     let (id, _) = mgr
-        .add_download(&server.url, Some("clip.mp4".to_string()), Some(folder.clone()), None, None)
+        .add_download(
+            &server.url,
+            Some("clip.mp4".to_string()),
+            Some(folder.clone()),
+            None,
+            None,
+        )
         .await
         .unwrap();
-    assert_eq!(mgr.get_download(&id).unwrap().unwrap().category_id, "cat-video");
+    assert_eq!(
+        mgr.get_download(&id).unwrap().unwrap().category_id,
+        "cat-video"
+    );
     let (id, _) = mgr
-        .add_download(&server.url, Some("pack2.zip".to_string()), Some(folder), None, None)
+        .add_download(
+            &server.url,
+            Some("pack2.zip".to_string()),
+            Some(folder),
+            None,
+            None,
+        )
         .await
         .unwrap();
-    assert_eq!(mgr.get_download(&id).unwrap().unwrap().category_id, "cat-documents");
+    assert_eq!(
+        mgr.get_download(&id).unwrap().unwrap().category_id,
+        "cat-documents"
+    );
 }
 
 /// BUG-011: `excluded_sites` blocks downloads from the listed hosts
@@ -3174,16 +4069,28 @@ async fn excluded_sites_blocks_add_download() {
         .add_download(&server.url, None, Some(folder.clone()), None, None)
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("excluded"), "expected an excluded-site error, got: {err}");
+    assert!(
+        err.to_string().contains("excluded"),
+        "expected an excluded-site error, got: {err}"
+    );
     // Subdomain match, with no network attempt (the host does not
     // resolve here, so a probe would fail differently).
     settings.excluded_sites = vec!["example.com".to_string()];
     mgr.update_settings(&settings).unwrap();
     let err = mgr
-        .add_download("http://sub.example.com/file.bin", None, Some(folder.clone()), None, None)
+        .add_download(
+            "http://sub.example.com/file.bin",
+            None,
+            Some(folder.clone()),
+            None,
+            None,
+        )
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("excluded"), "expected an excluded-site error, got: {err}");
+    assert!(
+        err.to_string().contains("excluded"),
+        "expected an excluded-site error, got: {err}"
+    );
     // A host that is not excluded still works.
     let (id, _) = mgr
         .add_download(&server.url, None, Some(folder), None, None)
@@ -3204,7 +4111,10 @@ async fn fetch_page_links_flags_excluded_sites() {
     settings.excluded_sites = vec!["127.0.0.1".to_string()];
     mgr.update_settings(&settings).unwrap();
     let err = mgr.fetch_page_links(&page.page_url).await.unwrap_err();
-    assert!(err.to_string().contains("excluded"), "expected an excluded-site error, got: {err}");
+    assert!(
+        err.to_string().contains("excluded"),
+        "expected an excluded-site error, got: {err}"
+    );
     settings.excluded_sites = vec!["excluded.example".to_string()];
     mgr.update_settings(&settings).unwrap();
     let html = format!(
@@ -3214,13 +4124,22 @@ async fn fetch_page_links_flags_excluded_sites() {
     );
     let url = serve_one_page(&html);
     let links = mgr.fetch_page_links(&url).await.unwrap();
-    let bad = links.iter().find(|l| l.url.contains("excluded.example")).unwrap();
+    let bad = links
+        .iter()
+        .find(|l| l.url.contains("excluded.example"))
+        .unwrap();
     assert!(
         bad.error.as_deref().unwrap_or("").contains("excluded"),
         "excluded link should carry an error, got: {bad:?}"
     );
-    let good = links.iter().find(|l| l.url.ends_with("/video.mp4")).unwrap();
-    assert!(good.error.is_none(), "clean link should have no error, got: {good:?}");
+    let good = links
+        .iter()
+        .find(|l| l.url.ends_with("/video.mp4"))
+        .unwrap();
+    assert!(
+        good.error.is_none(),
+        "clean link should have no error, got: {good:?}"
+    );
 }
 
 /// BUG-011: a batch line pointing at an excluded site is reported
@@ -3237,7 +4156,10 @@ async fn batch_add_flags_excluded_site_lines() {
     let folder = dir.to_string_lossy().to_string();
     let result = mgr
         .add_batch_downloads(
-            &[server.url.clone(), "http://example.com/file.bin".to_string()],
+            &[
+                server.url.clone(),
+                "http://example.com/file.bin".to_string(),
+            ],
             Some(folder),
             None,
             None,
@@ -3248,7 +4170,11 @@ async fn batch_add_flags_excluded_site_lines() {
     assert_eq!(result.created.len(), 1);
     assert_eq!(result.invalid.len(), 1);
     assert_eq!(result.invalid[0].line, 2);
-    assert!(result.invalid[0].error.contains("excluded"), "error: {}", result.invalid[0].error);
+    assert!(
+        result.invalid[0].error.contains("excluded"),
+        "error: {}",
+        result.invalid[0].error
+    );
 }
 
 /// BUG-011: settings normalise the two lists on save — extensions
@@ -3271,8 +4197,14 @@ async fn update_settings_normalizes_file_types_and_excluded_sites() {
         "".to_string(),
     ];
     let saved = store.update_settings(&s).unwrap();
-    assert_eq!(saved.file_types_auto, vec!["mp4".to_string(), "mkv".to_string()]);
-    assert_eq!(saved.excluded_sites, vec!["example.com".to_string(), "foo.org".to_string()]);
+    assert_eq!(
+        saved.file_types_auto,
+        vec!["mp4".to_string(), "mkv".to_string()]
+    );
+    assert_eq!(
+        saved.excluded_sites,
+        vec!["example.com".to_string(), "foo.org".to_string()]
+    );
 }
 
 /// S09-I1: a queue drain honours the current settings — with
@@ -3301,7 +4233,10 @@ async fn queue_drain_honours_max_connections_and_speed_limit() {
     for id in [&id1, &id2] {
         let row = mgr.get_download(id).unwrap().unwrap();
         assert_eq!(row.status, "complete");
-        assert_eq!(std::fs::read(&row.save_path).unwrap(), payload(2 * 1024 * 1024));
+        assert_eq!(
+            std::fs::read(&row.save_path).unwrap(),
+            payload(2 * 1024 * 1024)
+        );
     }
     // Part 2: speed cap during a drain (2 x 128 KiB at 64 KiB/s ~= 4 s).
     let small = MockServer::start(MockConfig {
@@ -3318,7 +4253,11 @@ async fn queue_drain_honours_max_connections_and_speed_limit() {
     let start = Instant::now();
     mgr2.start_queue(&queue2.id).await.unwrap();
     assert!(wait_for_queue_drained(&mgr2, &queue2.id, 30).await);
-    assert!(start.elapsed() >= Duration::from_secs(3), "queue drained too fast under a 64 KiB/s cap: {:?}", start.elapsed());
+    assert!(
+        start.elapsed() >= Duration::from_secs(3),
+        "queue drained too fast under a 64 KiB/s cap: {:?}",
+        start.elapsed()
+    );
 }
 
 /// S09-I2: editing a category's folder does NOT move files that are
@@ -3330,7 +4269,9 @@ async fn category_folder_edit_does_not_move_completed_files() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let old_dir = dir.join("books-old");
-    let cat = mgr.create_category("Books", &old_dir.to_string_lossy(), &["xyz".to_string()]).unwrap();
+    let cat = mgr
+        .create_category("Books", &old_dir.to_string_lossy(), &["xyz".to_string()])
+        .unwrap();
     let (id, _) = mgr
         .add_download(&server.url, Some("book.xyz".to_string()), None, None, None)
         .await
@@ -3338,20 +4279,34 @@ async fn category_folder_edit_does_not_move_completed_files() {
     mgr.start_download(&id).await.unwrap();
     assert!(wait_for_status(&mgr, &id, "complete", 30).await);
     let old_path = mgr.get_download(&id).unwrap().unwrap().save_path;
-    assert!(std::path::Path::new(&old_path).starts_with(&old_dir), "save_path: {old_path}");
+    assert!(
+        std::path::Path::new(&old_path).starts_with(&old_dir),
+        "save_path: {old_path}"
+    );
     // Move the category's folder; the finished file stays put.
     let new_dir = dir.join("books-new");
-    mgr.update_category(&cat.id, Some(&new_dir.to_string_lossy()), None).unwrap();
+    mgr.update_category(&cat.id, Some(&new_dir.to_string_lossy()), None)
+        .unwrap();
     let row = mgr.get_download(&id).unwrap().unwrap();
-    assert_eq!(row.save_path, old_path, "completed file was moved by a category edit");
-    assert!(std::path::Path::new(&old_path).exists(), "completed file vanished from its folder");
+    assert_eq!(
+        row.save_path, old_path,
+        "completed file was moved by a category edit"
+    );
+    assert!(
+        std::path::Path::new(&old_path).exists(),
+        "completed file vanished from its folder"
+    );
     // A new download in the same category uses the new folder.
     let (id2, _) = mgr
         .add_download(&server.url, Some("book2.xyz".to_string()), None, None, None)
         .await
         .unwrap();
     let row2 = mgr.get_download(&id2).unwrap().unwrap();
-    assert!(std::path::Path::new(&row2.save_path).starts_with(&new_dir), "save_path: {}", row2.save_path);
+    assert!(
+        std::path::Path::new(&row2.save_path).starts_with(&new_dir),
+        "save_path: {}",
+        row2.save_path
+    );
 }
 
 /// S09-I3: the scheduler still drains a queue with the new settings
@@ -3372,11 +4327,25 @@ async fn scheduler_tick_drains_queue_with_settings_applied() {
     let queue = mgr.create_queue("scheduled").unwrap();
     add_queued(&mgr, &server.url, &dir, "sched1.bin", &queue.id).await;
     add_queued(&mgr, &server.url, &dir, "sched2.bin", &queue.id).await;
-    mgr.update_queue(&queue.id, "one_time", Some(&iso_in(-10)), None, false, "none", None, None).await.unwrap();
+    mgr.update_queue(
+        &queue.id,
+        "one_time",
+        Some(&iso_in(-10)),
+        None,
+        false,
+        "none",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     mgr.scheduler_tick_at(now_unix()).await.unwrap();
     assert!(wait_for_queue_drained(&mgr, &queue.id, 30).await);
     let files = mgr.list_queue_files(&queue.id).unwrap();
-    assert!(files.is_empty(), "queue did not drain under the new settings");
+    assert!(
+        files.is_empty(),
+        "queue did not drain under the new settings"
+    );
 }
 
 /// S03 progress window: the probe's range capability is stored on
@@ -3434,11 +4403,7 @@ fn accept_ranges_persisted_on_download_row() {
         Some(false)
     );
     assert_eq!(
-        store
-            .get_download(&unknown)
-            .unwrap()
-            .unwrap()
-            .accept_ranges,
+        store.get_download(&unknown).unwrap().unwrap().accept_ranges,
         None
     );
     // The list query carries it too (same row mapper).

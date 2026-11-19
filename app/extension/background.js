@@ -35,6 +35,15 @@
 
 const HOST_NAME = "com.fetchline.host";
 
+// Round 78 (yt-dlp) — resolving a platform video takes seconds
+// (the host spawns yt-dlp and waits for it), so a resolve uses
+// its own connectNative port with a 30–35 s bound — NEVER the
+// 15 s one-shot hand-over bound above, which would abort slow
+// resolves. Heartbeats arrive on the port about every 5 s.
+const RESOLVE_TIMEOUT_MS = 32000;
+const RESOLVE_PORT_NAME = "sonic-resolve";
+const EXTRACTOR_ARGS_KEY = "ytdlp_extractor_args";
+
 // File types the download watcher hands to Fetchline. A page that
 // only links to one of these still needs a click or a right-click;
 // the watcher only fires for downloads the browser itself started.
@@ -313,14 +322,18 @@ async function handToFetchline(message) {
   // download_all carries no cookies — the host expands the page
   // itself (see cookiesFor). Only a non-empty list is attached, so
   // a hand-off with no cookies for its URL is byte-identical to
-  // the old no-cookie message.
+  // the old no-cookie message. Round 78: a message that already
+  // carries a `cookies` field (a resolved quality pick — "only
+  // the cookies used for that resolve, if any", possibly []) is
+  // passed through untouched, never re-filled from the media URL.
   let cookieUrl = null;
   if (message.type === "download_link" && message.url) cookieUrl = message.url;
   if (
     message.type === "video_found" &&
     message.variants &&
     message.variants[0] &&
-    message.variants[0].url
+    message.variants[0].url &&
+    !("cookies" in message)
   ) {
     cookieUrl = message.variants[0].url;
   }
@@ -346,6 +359,176 @@ async function handToFetchline(message) {
     reply && typeof reply.pending_count === "number" ? reply.pending_count : undefined,
   );
   return reply;
+}
+
+// Round 78 — one yt-dlp resolve over a long-lived native
+// port. The content script asks (lazily, on button click only);
+// the host answers with resolve_progress heartbeats, then one
+// `resolved` or `error` reply. Closing the port kills the
+// host's yt-dlp, so Cancel is just a disconnect. `handlers`
+// are onProgress / onResolved / onError; cancel() is silent —
+// a user-cancelled resolve is not an error to surface.
+function startNativeResolve(request, handlers) {
+  let settled = false;
+  let cancelled = false;
+  let port = null;
+  const timer = setTimeout(() => {
+    finishError({
+      type: "error",
+      ok: false,
+      request_id: request.request_id,
+      error: "Sonic Manager took too long to fetch this video's qualities.",
+      needs_login: false,
+      error_kind: "timeout",
+    });
+  }, RESOLVE_TIMEOUT_MS);
+  function finish(fn, value) {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    try {
+      if (port) port.disconnect();
+    } catch {
+      // Already gone: nothing to close.
+    }
+    if (!cancelled && typeof fn === "function") fn(value);
+  }
+  function finishError(value) {
+    finish(handlers.onError, value);
+  }
+  try {
+    port = chrome.runtime.connectNative(HOST_NAME);
+  } catch (err) {
+    finishError({
+      type: "error",
+      ok: false,
+      request_id: request.request_id,
+      error: `Could not reach Sonic Manager: ${err && err.message ? err.message : err}`,
+      needs_login: false,
+      error_kind: "spawn_failed",
+    });
+    return { cancel() {} };
+  }
+  port.onMessage.addListener((msg) => {
+    if (!msg || msg.request_id !== request.request_id) return;
+    if (msg.type === "resolve_progress") {
+      if (typeof handlers.onProgress === "function") handlers.onProgress(msg);
+      return;
+    }
+    if (msg.type === "resolved") {
+      finish(handlers.onResolved, msg);
+      return;
+    }
+    if (msg.type === "error") {
+      finishError(msg);
+    }
+  });
+  // onDisconnect means the host died mid-resolve — surface it
+  // as an error, not a silent hang.
+  if (port.onDisconnect && typeof port.onDisconnect.addListener === "function") {
+    port.onDisconnect.addListener(() => {
+      finishError({
+        type: "error",
+        ok: false,
+        request_id: request.request_id,
+        error: "Sonic Manager stopped answering while fetching this video's qualities.",
+        needs_login: false,
+        error_kind: "spawn_failed",
+      });
+    });
+  }
+  try {
+    port.postMessage(request);
+  } catch (err) {
+    finishError({
+      type: "error",
+      ok: false,
+      request_id: request.request_id,
+      error: `Could not reach Sonic Manager: ${err && err.message ? err.message : err}`,
+      needs_login: false,
+      error_kind: "spawn_failed",
+    });
+  }
+  return {
+    cancel() {
+      if (settled) return;
+      cancelled = true;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        if (port) port.disconnect();
+      } catch {
+        // Already gone.
+      }
+    },
+  };
+}
+
+// Round 78 — the content script's resolve port. One native port
+// per resolve_video message; a second message on the same port
+// (the needs-login retry) opens a fresh native port. The first
+// resolve NEVER carries cookies (with_cookies false, cookies []);
+// only the retry after a needs_login error does, with the
+// cookies the content script fetched via `cookies_for` below.
+// The hidden extractor-args override is read from storage and
+// passed through only when the user stored one — no
+// player_client default is ever set in v1.
+if (chrome.runtime.onConnect && chrome.runtime.onConnect.addListener) {
+  chrome.runtime.onConnect.addListener((port) => {
+    if (!port || port.name !== RESOLVE_PORT_NAME) return;
+    let current = null;
+    const forward = (msg) => {
+      try {
+        port.postMessage(msg);
+      } catch {
+        // Content side went away: the native port is cancelled
+        // below via onDisconnect.
+      }
+    };
+    port.onMessage.addListener(async (msg) => {
+      if (!msg) return;
+      if (msg.type === "cancel_resolve") {
+        if (current) current.cancel();
+        current = null;
+        return;
+      }
+      if (msg.type !== "resolve_video") return;
+      const request = {
+        type: "resolve_video",
+        page_url: msg.page_url,
+        request_id: msg.request_id,
+        with_cookies: msg.with_cookies === true,
+        cookies: Array.isArray(msg.cookies) ? msg.cookies : [],
+      };
+      try {
+        const stored = await chrome.storage.local.get([EXTRACTOR_ARGS_KEY]);
+        const override =
+          stored && typeof stored[EXTRACTOR_ARGS_KEY] === "string"
+            ? stored[EXTRACTOR_ARGS_KEY].trim()
+            : "";
+        if (override) request.extractor_args = override;
+      } catch {
+        // Storage unreadable: resolve without the override.
+      }
+      current = startNativeResolve(request, {
+        onProgress: (m) => forward(m),
+        onResolved: (m) => {
+          current = null;
+          forward(m);
+        },
+        onError: (m) => {
+          current = null;
+          forward(m);
+        },
+      });
+    });
+    if (port.onDisconnect && typeof port.onDisconnect.addListener === "function") {
+      port.onDisconnect.addListener(() => {
+        if (current) current.cancel();
+        current = null;
+      });
+    }
+  });
 }
 
 // -- context menus -------------------------------------------------------
@@ -653,6 +836,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   // script reads the integration preference and the excluded
   // sites directly from chrome.storage.local, so nothing here
   // answers that message type any more.
+  // Round 78 — the content script cannot read chrome.cookies
+  // itself, so it asks here for a page's cookies when (and only
+  // when) the user granted the needs-login retry for that site.
+  // The reply is name/value pairs only, like cookiesFor.
+  if (message && message.type === "cookies_for") {
+    cookiesFor(message.url || "")
+      .then((cookies) => sendResponse({ ok: true, cookies }))
+      .catch(() => sendResponse({ ok: true, cookies: [] }));
+    return true;
+  }
   // Video grabber (S08): the content script reports one chosen
   // variant, and this worker is the only path to the host — the
   // content script never talks to Native Messaging itself.
@@ -661,6 +854,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       type: "video_found",
       page_url: message.page_url,
       variants: message.variants || [],
+      ...(message.cookies !== undefined ? { cookies: message.cookies } : {}),
     })
       .then((reply) => sendResponse({ ok: true, reply }))
       .catch((err) => sendResponse({ ok: false, error: String(err) }));

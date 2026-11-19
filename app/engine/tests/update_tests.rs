@@ -169,14 +169,22 @@ async fn up_to_date_reports_no_update_and_sends_no_prompt() {
     let mut settings = mgr.get_settings().unwrap();
     settings.last_update_check_at = Some(unix_to_iso(now_unix() - 8 * 24 * 3600));
     mgr.update_settings(&settings).unwrap();
-    let result = mgr.run_weekly_update_check_at(now_unix()).await.unwrap().unwrap();
+    let result = mgr
+        .run_weekly_update_check_at(now_unix())
+        .await
+        .unwrap()
+        .unwrap();
     assert!(!result.update_available);
     // A pre-release of the current version is older, not newer.
     server.set(200, r#"{"version": "0.1.0-beta", "changelog": []}"#);
     let mut settings = mgr.get_settings().unwrap();
     settings.last_update_check_at = Some(unix_to_iso(now_unix() - 8 * 24 * 3600));
     mgr.update_settings(&settings).unwrap();
-    let result = mgr.run_weekly_update_check_at(now_unix()).await.unwrap().unwrap();
+    let result = mgr
+        .run_weekly_update_check_at(now_unix())
+        .await
+        .unwrap()
+        .unwrap();
     assert!(!result.update_available);
 }
 
@@ -220,22 +228,23 @@ async fn network_failure_and_server_error_are_clear_errors() {
         .await
         .unwrap_err();
     assert!(
-        err.to_string().contains("Could not reach the update server"),
+        err.to_string()
+            .contains("Could not reach the update server"),
         "got: {err}"
     );
     // A server that answers 500.
     let server = ManifestServer::start(500, "boom");
     let err = mgr.check_for_updates_from(&server.url).await.unwrap_err();
-    assert!(
-        err.to_string().contains("status 500"),
-        "got: {err}"
-    );
+    assert!(err.to_string().contains("status 500"), "got: {err}");
     // A non-http(s) update URL is refused before any request.
     let err = mgr
         .check_for_updates_from("ftp://127.0.0.1/latest.json")
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("http:// or https://"), "got: {err}");
+    assert!(
+        err.to_string().contains("http:// or https://"),
+        "got: {err}"
+    );
 }
 
 #[tokio::test]
@@ -289,7 +298,11 @@ async fn weekly_check_runs_when_due_and_not_before_and_notifies_on_update() {
     settings.last_update_check_at = Some(unix_to_iso(now_unix() - 6 * 24 * 3600));
     mgr.update_settings(&settings).unwrap();
     assert!(!mgr.weekly_update_check_due_at(now_unix()).unwrap());
-    assert!(mgr.run_weekly_update_check_at(now_unix()).await.unwrap().is_none());
+    assert!(mgr
+        .run_weekly_update_check_at(now_unix())
+        .await
+        .unwrap()
+        .is_none());
     assert_eq!(server.hits(), 1);
 
     // Checked 8 days ago: due again, and it fetches again.
@@ -351,7 +364,12 @@ async fn update_settings_persist_validate_and_migrate() {
     assert_eq!(server.hits(), 1);
 
     // Bad addresses are rejected, nothing stored.
-    for bad in ["", "not a url", "ftp://updates.fetchline.app/x.json", "updates.fetchline.app/x.json"] {
+    for bad in [
+        "",
+        "not a url",
+        "ftp://updates.fetchline.app/x.json",
+        "updates.fetchline.app/x.json",
+    ] {
         let mut settings = mgr.get_settings().unwrap();
         settings.update_url = bad.to_string();
         let err = mgr.update_settings(&settings).unwrap_err();

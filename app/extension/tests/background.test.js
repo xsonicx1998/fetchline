@@ -17,10 +17,11 @@ const backgroundSrc = fs.readFileSync(path.join(__dirname, "..", "background.js"
 
 const tick = (ms = 10) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function loadBackground({ nativeReply = { ok: true }, tabs = [], tabSendMessage = null } = {}) {
+function loadBackground({ nativeReply = { ok: true }, tabs = [], tabSendMessage = null, cookies = [] } = {}) {
   const storage = {};
   const sentMessages = [];
   const injected = [];
+  const nativePorts = [];
   let nativeHandler = () => nativeReply;
   const listeners = {};
   const chrome = {
@@ -37,11 +38,22 @@ function loadBackground({ nativeReply = { ok: true }, tabs = [], tabSendMessage 
         },
       },
     },
+    cookies: {
+      async getAll({ url }) {
+        // Round 78 — the cookies the browser holds for a URL,
+        // as the real API returns them (name/value plus the
+        // fields the background strips away).
+        return cookies
+          .filter((c) => !c.url || c.url === url)
+          .map((c) => ({ name: c.name, value: c.value, domain: "example.com", path: "/" }));
+      },
+    },
     runtime: {
       lastError: null,
       onInstalled: { addListener(fn) { listeners.installed = fn; } },
       onStartup: { addListener(fn) { listeners.startup = fn; } },
       onMessage: { addListener(fn) { listeners.message = fn; } },
+      onConnect: { addListener(fn) { listeners.connect = fn; } },
       sendNativeMessage(_host, message, cb) {
         sentMessages.push(message);
         const reply = nativeHandler(message);
@@ -52,6 +64,36 @@ function loadBackground({ nativeReply = { ok: true }, tabs = [], tabSendMessage 
           chrome.runtime.lastError = null;
           cb(reply);
         }
+      },
+      // Round 78 — the long-lived native port a resolve opens.
+      // Each connectNative() returns a fake port the test drives
+      // by hand (deliverNative feeds it host replies).
+      connectNative(_host) {
+        const port = {
+          messages: [],
+          disconnected: false,
+          _onMessage: null,
+          _onDisconnect: null,
+          onMessage: {
+            addListener(fn) {
+              port._onMessage = fn;
+            },
+          },
+          onDisconnect: {
+            addListener(fn) {
+              port._onDisconnect = fn;
+            },
+          },
+          postMessage(msg) {
+            port.messages.push(msg);
+          },
+          disconnect() {
+            port.disconnected = true;
+            if (port._onDisconnect) port._onDisconnect();
+          },
+        };
+        nativePorts.push(port);
+        return port;
       },
     },
     contextMenus: {
@@ -88,8 +130,43 @@ function loadBackground({ nativeReply = { ok: true }, tabs = [], tabSendMessage 
     storage,
     sentMessages,
     injected,
+    nativePorts,
     listeners,
     setNativeHandler(fn) { nativeHandler = fn; },
+    // Round 78 — simulate a content script opening a resolve
+    // port: returns the fake port (its `messages` are what the
+    // background forwards to the content script).
+    connectContentPort(name = "sonic-resolve") {
+      const port = {
+        name,
+        messages: [],
+        disconnected: false,
+        _onMessage: null,
+        _onDisconnect: null,
+        onMessage: {
+          addListener(fn) {
+            port._onMessage = fn;
+          },
+        },
+        onDisconnect: {
+          addListener(fn) {
+            port._onDisconnect = fn;
+          },
+        },
+        postMessage(msg) {
+          port.messages.push(msg);
+        },
+        disconnect() {
+          port.disconnected = true;
+          if (port._onDisconnect) port._onDisconnect();
+        },
+      };
+      listeners.connect(port);
+      return port;
+    },
+    deliverNative(port, msg) {
+      if (port._onMessage) port._onMessage(msg);
+    },
   };
 }
 
@@ -316,4 +393,212 @@ test("Find videos menu rescans the active tab (Round 72 A)", async () => {
   await env.listeners.menuClicked({ menuItemId: "fetchline-find-videos" });
   await tick(20);
   assert.deepEqual(env.injected, []);
+});
+
+// -- Round 78 (yt-dlp) resolve flow --------------------------------------
+
+const RESOLVE_PAGE = "https://www.youtube.com/watch?v=abc123";
+
+function openResolve(env, overrides = {}) {
+  const port = env.connectContentPort();
+  port._onMessage({
+    type: "resolve_video",
+    page_url: RESOLVE_PAGE,
+    request_id: "req-1",
+    with_cookies: false,
+    cookies: [],
+    ...overrides,
+  });
+  return port;
+}
+
+test("a resolve opens a connectNative port, never the 15 s one-shot path", async () => {
+  const env = loadBackground();
+  const port = openResolve(env);
+  await tick(20);
+  assert.equal(env.nativePorts.length, 1, "one long-lived native port");
+  assert.equal(env.sentMessages.length, 0, "sendNativeMessage is not used for resolves");
+  const request = env.nativePorts[0].messages[0];
+  // JSON comparison: the message was built inside the vm realm.
+  assert.equal(
+    JSON.stringify(request),
+    JSON.stringify({
+      type: "resolve_video",
+      page_url: RESOLVE_PAGE,
+      request_id: "req-1",
+      with_cookies: false,
+      cookies: [],
+    }),
+  );
+  // No extractor_args when the user stored none.
+  assert.equal("extractor_args" in request, false);
+  // The request_id ties the native reply to this content port.
+  env.deliverNative(env.nativePorts[0], {
+    type: "resolved",
+    ok: true,
+    request_id: "req-1",
+    title: "Big Buck Bunny",
+    is_live: false,
+    degraded: false,
+    warning: null,
+    formats: [],
+  });
+  await tick(20);
+  assert.equal(port.messages.length, 1);
+  assert.equal(port.messages[0].type, "resolved");
+  assert.equal(port.messages[0].title, "Big Buck Bunny");
+});
+
+test("heartbeats are forwarded to the content script, then the final reply", async () => {
+  const env = loadBackground();
+  const port = openResolve(env);
+  await tick(20);
+  env.deliverNative(env.nativePorts[0], { type: "resolve_progress", ok: true, elapsed_secs: 5, request_id: "req-1" });
+  env.deliverNative(env.nativePorts[0], { type: "resolve_progress", ok: true, elapsed_secs: 10, request_id: "req-1" });
+  await tick(20);
+  assert.deepEqual(
+    port.messages.map((m) => [m.type, m.elapsed_secs]),
+    [["resolve_progress", 5], ["resolve_progress", 10]],
+  );
+  env.deliverNative(env.nativePorts[0], {
+    type: "resolved", ok: true, request_id: "req-1", title: "T", is_live: false, degraded: false, warning: null, formats: [],
+  });
+  await tick(20);
+  assert.equal(port.messages.length, 3);
+  assert.equal(port.messages[2].type, "resolved");
+});
+
+test("a host error reply is forwarded to the content script unchanged", async () => {
+  const env = loadBackground();
+  const port = openResolve(env);
+  await tick(20);
+  env.deliverNative(env.nativePorts[0], {
+    type: "error",
+    ok: false,
+    request_id: "req-1",
+    error: "This video needs login.",
+    needs_login: true,
+    error_kind: "login_required",
+  });
+  await tick(20);
+  assert.equal(port.messages.length, 1);
+  assert.equal(port.messages[0].type, "error");
+  assert.equal(port.messages[0].needs_login, true);
+  assert.equal(port.messages[0].error_kind, "login_required");
+});
+
+test("the stored extractor-args override is passed through, and only then", async () => {
+  const env = loadBackground();
+  env.storage.ytdlp_extractor_args = "youtube:player_client=android_vr,tv";
+  const port = openResolve(env);
+  await tick(20);
+  assert.equal(env.nativePorts[0].messages[0].extractor_args, "youtube:player_client=android_vr,tv");
+
+  // An empty stored value sends no override at all.
+  const plain = loadBackground();
+  plain.storage.ytdlp_extractor_args = "   ";
+  const plainPort = openResolve(plain);
+  await tick(20);
+  assert.equal("extractor_args" in plain.nativePorts[0].messages[0], false);
+  // Finish both resolves so no 32 s timeout timer lingers.
+  plainPort._onMessage({ type: "cancel_resolve", request_id: "req-1" });
+  port._onMessage({ type: "cancel_resolve", request_id: "req-1" });
+  await tick(20);
+});
+
+test("a retry with cookies forwards them to the host", async () => {
+  const env = loadBackground();
+  const port = openResolve(env, {
+    with_cookies: true,
+    cookies: [{ name: "session", value: "abc" }],
+    request_id: "req-2",
+  });
+  await tick(20);
+  const request = env.nativePorts[0].messages[0];
+  assert.equal(request.with_cookies, true);
+  assert.equal(JSON.stringify(request.cookies), JSON.stringify([{ name: "session", value: "abc" }]));
+  assert.equal(request.request_id, "req-2");
+  // Finish the resolve so no 32 s timeout timer lingers.
+  port._onMessage({ type: "cancel_resolve", request_id: "req-2" });
+  await tick(20);
+});
+
+test("cancel from the content script closes the native port", async () => {
+  const env = loadBackground();
+  const port = openResolve(env);
+  await tick(20);
+  assert.equal(env.nativePorts[0].disconnected, false);
+  port._onMessage({ type: "cancel_resolve", request_id: "req-1" });
+  await tick(20);
+  assert.equal(env.nativePorts[0].disconnected, true, "closing the port kills the host's yt-dlp");
+  assert.equal(port.messages.length, 0, "a cancel surfaces no error");
+});
+
+test("the host dying mid-resolve surfaces as an error, not a silent hang", async () => {
+  const env = loadBackground();
+  const port = openResolve(env);
+  await tick(20);
+  env.nativePorts[0].disconnect();
+  await tick(20);
+  assert.equal(port.messages.length, 1);
+  assert.equal(port.messages[0].type, "error");
+  assert.equal(port.messages[0].error_kind, "spawn_failed");
+  assert.match(port.messages[0].error, /stopped answering/);
+});
+
+test("cookies_for returns the page's cookies as name/value pairs", async () => {
+  const env = loadBackground({
+    cookies: [{ name: "session", value: "abc" }, { name: "prefs", value: "dark" }],
+  });
+  let reply = null;
+  env.listeners.message({ type: "cookies_for", url: RESOLVE_PAGE }, {}, (r) => { reply = r; });
+  await tick(20);
+  assert.equal(JSON.stringify(reply), JSON.stringify({
+    ok: true,
+    cookies: [{ name: "session", value: "abc" }, { name: "prefs", value: "dark" }],
+  }));
+});
+
+test("video_found with explicit cookies is passed through, never re-filled", async () => {
+  // A resolved pick carries cookies: [] (no cookies were used
+  // for that resolve) — the background must not refill them
+  // from the media URL behind the content script's back.
+  const env = loadBackground({
+    nativeReply: { ok: true },
+    cookies: [{ name: "session", value: "abc" }],
+  });
+  let reply = null;
+  env.listeners.message(
+    {
+      type: "video_found",
+      page_url: RESOLVE_PAGE,
+      variants: [{ url: "https://cdn.example.com/v1080.mp4", resolved: true }],
+      cookies: [],
+    },
+    {},
+    (r) => { reply = r; },
+  );
+  await tick(20);
+  assert.equal(reply.ok, true);
+  assert.equal(JSON.stringify(env.sentMessages[0].cookies), JSON.stringify([]));
+});
+
+test("video_found without a cookies field still attaches the media URL's cookies (old path)", async () => {
+  const env = loadBackground({
+    nativeReply: { ok: true },
+    cookies: [{ name: "session", value: "abc" }],
+  });
+  let reply = null;
+  env.listeners.message(
+    {
+      type: "video_found",
+      page_url: RESOLVE_PAGE,
+      variants: [{ url: "https://cdn.example.com/clip.mp4" }],
+    },
+    {},
+    (r) => { reply = r; },
+  );
+  await tick(20);
+  assert.equal(reply.ok, true);
+  assert.equal(JSON.stringify(env.sentMessages[0].cookies), JSON.stringify([{ name: "session", value: "abc" }]));
 });

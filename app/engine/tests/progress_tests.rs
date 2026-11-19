@@ -67,7 +67,13 @@ async fn retry_countdown_appears_on_500_and_recovers() {
     set_max_retries(&mgr, 3).await;
     server.set_fail_get(true);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     let mut rx = mgr.subscribe();
@@ -110,7 +116,13 @@ async fn retry_countdown_appears_when_connection_drops_mid_download() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     let mut rx = mgr.subscribe();
@@ -167,7 +179,13 @@ async fn retry_now_skips_the_backoff() {
     set_max_retries(&mgr, 3).await;
     server.set_fail_get(true);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     let mut rx = mgr.subscribe();
@@ -207,7 +225,13 @@ async fn retry_now_errors_when_nothing_is_waiting() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     // Queued, never started: not running.
@@ -234,7 +258,13 @@ async fn cancel_during_retry_deletes_the_download() {
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     server.set_fail_get(true);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     let mut rx = mgr.subscribe();
@@ -261,7 +291,13 @@ async fn no_retry_state_while_downloading_normally() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     let mut rx = mgr.subscribe();
@@ -309,7 +345,13 @@ async fn open_folder_validation() {
     // works on both platforms.
     let downloads = dir.join("downloads");
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(downloads.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(downloads.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -320,10 +362,7 @@ async fn open_folder_validation() {
     // must say so instead of opening nothing.
     std::fs::remove_dir_all(&downloads).unwrap();
     let err = mgr.folder_for_download(&id).unwrap_err();
-    assert!(
-        err.to_string().contains("no longer exists"),
-        "error: {err}"
-    );
+    assert!(err.to_string().contains("no longer exists"), "error: {err}");
     let err = mgr.open_folder(&id).unwrap_err();
     assert!(
         err.to_string().contains("no longer exists"),
@@ -346,7 +385,13 @@ async fn last_progress_snapshot_matches_completion_event() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     // Nothing stashed before the download runs.
@@ -360,8 +405,5 @@ async fn last_progress_snapshot_matches_completion_event() {
     assert_eq!(snap.status, "complete");
     assert_eq!(snap.downloaded_bytes, snap.size_bytes.unwrap());
     let row = mgr.get_download(&id).unwrap().unwrap();
-    assert_eq!(
-        std::fs::read(&row.save_path).unwrap(),
-        payload(512 * 1024)
-    );
+    assert_eq!(std::fs::read(&row.save_path).unwrap(), payload(512 * 1024));
 }

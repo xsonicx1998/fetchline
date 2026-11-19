@@ -30,7 +30,10 @@ impl RateLimiter {
     pub fn new(rate_bps: u64) -> Self {
         Self {
             rate_bps: AtomicU64::new(rate_bps),
-            bucket: StdMutex::new(Bucket { tokens: rate_bps as f64, last_refill: Instant::now() }),
+            bucket: StdMutex::new(Bucket {
+                tokens: rate_bps as f64,
+                last_refill: Instant::now(),
+            }),
         }
     }
 

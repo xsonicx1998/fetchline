@@ -8,7 +8,10 @@
 //! 3. If size is unknown or the server refuses ranges, the download runs
 //!    as a single open-ended segment.
 
-use reqwest::header::{ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, COOKIE, ETAG, LAST_MODIFIED, RANGE};
+use reqwest::header::{
+    ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, COOKIE, ETAG, LAST_MODIFIED,
+    RANGE,
+};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 
@@ -135,7 +138,9 @@ async fn probe_cookies_407_fallback(
     let offered = offered_from_response(&resp);
     let order = proxy_auth_order(&cfg.auth, &offered, cfg.has_basic_creds());
     if order.is_empty() {
-        return Err(crate::proxy::proxy_auth_not_offered_error(&cfg.auth, &offered));
+        return Err(crate::proxy::proxy_auth_not_offered_error(
+            &cfg.auth, &offered,
+        ));
     }
     for scheme in order {
         match scheme {
@@ -170,7 +175,8 @@ async fn probe_cookies_407_fallback(
                 let status = resp.status();
                 if status.as_u16() == 407 {
                     return Err(EngineError::InvalidState(
-                        "Proxy authentication failed (407) — check the proxy username and password".to_string(),
+                        "Proxy authentication failed (407) — check the proxy username and password"
+                            .to_string(),
                     ));
                 }
                 if status.is_success() || status == StatusCode::PARTIAL_CONTENT {
@@ -228,10 +234,7 @@ async fn probe_cookies_407_fallback(
 /// builder, if any. The value was validated at the host boundary
 /// (`cookies_to_header`), so it cannot smuggle a second cookie or
 /// a second header in.
-fn apply_cookies(
-    req: reqwest::RequestBuilder,
-    cookies: Option<&str>,
-) -> reqwest::RequestBuilder {
+fn apply_cookies(req: reqwest::RequestBuilder, cookies: Option<&str>) -> reqwest::RequestBuilder {
     match cookies {
         Some(value) if !value.is_empty() => req.header(COOKIE, value),
         _ => req,
@@ -245,6 +248,146 @@ async fn probe_with_ranged_get_cookies(
     proxy: Option<&ProxyConfig>,
 ) -> Result<ProbeInfo> {
     let resp = apply_cookies(client.get(url), cookies)
+        .header(RANGE, "bytes=0-0")
+        .send()
+        .await?;
+    let status = resp.status();
+    if status.as_u16() == 407 {
+        return probe_cookies_407_fallback(client, url, cookies, proxy, true).await;
+    }
+    if !status.is_success() && status != StatusCode::PARTIAL_CONTENT {
+        return Err(EngineError::Status(
+            status.as_u16(),
+            format!("{status} while checking the address"),
+        ));
+    }
+    let mut info = from_headers(resp.headers(), resp.url().as_str());
+    apply_ranged_total(&mut info, resp.headers());
+    Ok(info)
+}
+
+/// Per-download request headers (Round 78): what yt-dlp learned
+/// about a platform video — the `User-Agent` and `Referer` the
+/// stream host expects (and any other non-cookie header yt-dlp
+/// recorded). A download that needs them must send them on the
+/// probe AND on every segment request, or the host answers 403 —
+/// today segments send only Range + Cookie + proxy-auth and the
+/// UA is the global "Fetchline/0.1", which these hosts reject.
+/// `Cookie` keys are never carried here: cookies ride the
+/// `cookies` parameter, validated at the host boundary, so a
+/// header map cannot smuggle a session cookie past it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RequestHeaders {
+    pub user_agent: Option<String>,
+    pub referer: Option<String>,
+}
+
+impl RequestHeaders {
+    /// True when neither header is set — the common case for a
+    /// plain download.
+    pub fn is_empty(&self) -> bool {
+        self.user_agent
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_none()
+            && self
+                .referer
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_none()
+    }
+}
+
+/// Attach per-download headers to one request builder, if any.
+/// The values come from yt-dlp's `http_headers` for a resolved
+/// video; an empty/absent value is skipped, never sent blank.
+pub fn apply_headers(
+    req: reqwest::RequestBuilder,
+    headers: Option<&RequestHeaders>,
+) -> reqwest::RequestBuilder {
+    let Some(headers) = headers else {
+        return req;
+    };
+    let mut req = req;
+    if let Some(ua) = headers
+        .user_agent
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        req = req.header(reqwest::header::USER_AGENT, ua);
+    }
+    if let Some(referer) = headers
+        .referer
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        req = req.header(reqwest::header::REFERER, referer);
+    }
+    req
+}
+
+/// Probe with per-download headers (Round 78): the same flow as
+/// `probe_with_cookies` (HEAD, then a 1-byte ranged GET when the
+/// server refuses HEAD), with the download's `User-Agent` /
+/// `Referer` attached to both attempts. Cookies ride the
+/// `cookies` parameter as before. A 407 is handled by the same
+/// cookie fallback, which cannot carry headers through the raw
+/// Kerberos/NTLM handshakes — the same documented limit as
+/// cookies there.
+pub async fn probe_with_headers(
+    client: &Client,
+    url: &str,
+    cookies: Option<&str>,
+    headers: Option<&RequestHeaders>,
+    proxy: Option<&ProxyConfig>,
+) -> Result<ProbeInfo> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| EngineError::InvalidUrl(e.to_string()))?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err(EngineError::InvalidUrl(
+            "Only http:// and https:// addresses can carry cookies".to_string(),
+        ));
+    }
+    let head = match apply_headers(apply_cookies(client.head(url), cookies), headers)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return probe_with_ranged_get_headers(client, url, cookies, headers, proxy).await,
+    };
+    let status = head.status();
+    if status.as_u16() == 407 {
+        return probe_cookies_407_fallback(client, url, cookies, proxy, false).await;
+    }
+    if status.is_success() || status == StatusCode::PARTIAL_CONTENT {
+        return Ok(from_headers(head.headers(), head.url().as_str()));
+    }
+    if status == StatusCode::METHOD_NOT_ALLOWED
+        || status == StatusCode::NOT_IMPLEMENTED
+        || status == StatusCode::FORBIDDEN
+    {
+        return probe_with_ranged_get_headers(client, url, cookies, headers, proxy).await;
+    }
+    if status.is_client_error() || status.is_server_error() {
+        return Err(EngineError::Status(
+            status.as_u16(),
+            format!("{status} while checking the address"),
+        ));
+    }
+    Err(EngineError::Status(status.as_u16(), format!("{status}")))
+}
+
+async fn probe_with_ranged_get_headers(
+    client: &Client,
+    url: &str,
+    cookies: Option<&str>,
+    headers: Option<&RequestHeaders>,
+    proxy: Option<&ProxyConfig>,
+) -> Result<ProbeInfo> {
+    let resp = apply_headers(apply_cookies(client.get(url), cookies), headers)
         .header(RANGE, "bytes=0-0")
         .send()
         .await?;
@@ -445,7 +588,9 @@ async fn probe_proxy_auth_fallback(
     let offered = offered_from_response(&resp);
     let order = proxy_auth_order(&cfg.auth, &offered, cfg.has_basic_creds());
     if order.is_empty() {
-        return Err(crate::proxy::proxy_auth_not_offered_error(&cfg.auth, &offered));
+        return Err(crate::proxy::proxy_auth_not_offered_error(
+            &cfg.auth, &offered,
+        ));
     }
     let parsed = reqwest::Url::parse(url).map_err(|e| EngineError::InvalidUrl(e.to_string()))?;
     let mut last_err: Option<EngineError> = None;
@@ -518,7 +663,9 @@ async fn probe_proxy_auth_fallback(
                                 .find(|(n, _)| n == "content-range")
                                 .map(|(_, v)| v.as_str())
                             {
-                                if let Some(total) = range.rsplit('/').next().and_then(|t| t.parse::<u64>().ok()) {
+                                if let Some(total) =
+                                    range.rsplit('/').next().and_then(|t| t.parse::<u64>().ok())
+                                {
                                     info.size = Some(total);
                                     info.accept_ranges = true;
                                 }
@@ -563,7 +710,8 @@ async fn probe_proxy_auth_fallback(
                 };
                 if status == 407 {
                     last_err = Some(EngineError::InvalidState(
-                        "Proxy authentication failed (407) — check the proxy username and password".to_string(),
+                        "Proxy authentication failed (407) — check the proxy username and password"
+                            .to_string(),
                     ));
                     continue;
                 }
@@ -580,7 +728,9 @@ async fn probe_proxy_auth_fallback(
                         .find(|(n, _)| n == "content-range")
                         .map(|(_, v)| v.as_str())
                     {
-                        if let Some(total) = range.rsplit('/').next().and_then(|t| t.parse::<u64>().ok()) {
+                        if let Some(total) =
+                            range.rsplit('/').next().and_then(|t| t.parse::<u64>().ok())
+                        {
                             info.size = Some(total);
                             info.accept_ranges = true;
                         }
@@ -609,7 +759,8 @@ async fn probe_proxy_auth_fallback(
                 let status = resp.status();
                 if status.as_u16() == 407 {
                     last_err = Some(EngineError::InvalidState(
-                        "Proxy authentication failed (407) — check the proxy username and password".to_string(),
+                        "Proxy authentication failed (407) — check the proxy username and password"
+                            .to_string(),
                     ));
                     continue;
                 }
@@ -652,10 +803,7 @@ fn probe_info_from_raw(headers: &[(String, String)], final_url: &str) -> ProbeIn
 }
 
 /// Attach a Basic-auth credential to one request builder, if any.
-fn apply_auth(
-    req: reqwest::RequestBuilder,
-    auth: Option<(&str, &str)>,
-) -> reqwest::RequestBuilder {
+fn apply_auth(req: reqwest::RequestBuilder, auth: Option<(&str, &str)>) -> reqwest::RequestBuilder {
     match auth {
         Some((user, pass)) => req.basic_auth(user, Some(pass)),
         None => req,
@@ -684,7 +832,11 @@ async fn probe_with_ranged_get(
     }
     let mut info = from_headers(resp.headers(), resp.url().as_str());
     // A 206 answer carries the total in Content-Range: "bytes 0-0/<total>".
-    if let Some(range) = resp.headers().get(CONTENT_RANGE).and_then(|v| v.to_str().ok()) {
+    if let Some(range) = resp
+        .headers()
+        .get(CONTENT_RANGE)
+        .and_then(|v| v.to_str().ok())
+    {
         if let Some(total) = range.rsplit('/').next().and_then(|t| t.parse::<u64>().ok()) {
             info.size = Some(total);
             info.accept_ranges = true;
@@ -703,7 +855,10 @@ fn from_headers(headers: &reqwest::header::HeaderMap, final_url: &str) -> ProbeI
         .and_then(|v| v.to_str().ok())
         .map(|v| v.eq_ignore_ascii_case("bytes"))
         .unwrap_or(false);
-    let etag = headers.get(ETAG).and_then(|v| v.to_str().ok()).map(str::to_string);
+    let etag = headers
+        .get(ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
     let last_modified = headers
         .get(LAST_MODIFIED)
         .and_then(|v| v.to_str().ok())

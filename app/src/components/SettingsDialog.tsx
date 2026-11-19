@@ -16,6 +16,8 @@ import {
   testSoundFile,
   updateCategory,
   updateSettings,
+  ytdlpUpdate,
+  ytdlpVersion,
 } from '../lib/api'
 import type {
   CategoryRow,
@@ -25,6 +27,7 @@ import type {
   Settings,
   SiteLoginRow,
   SoundSetting,
+  YtdlpStatus,
 } from '../lib/types'
 import { Button } from './Button'
 
@@ -126,6 +129,13 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
   /** Antivirus hook (S14): the Test button's result. */
   const [avTestResult, setAvTestResult] = useState<string | null>(null)
   const [testingAv, setTestingAv] = useState(false)
+  /** Round 78 — the bundled yt-dlp's status (version + sidecars)
+   *  for the Video downloads section, and the update button's
+   *  state. Loaded when the dialog opens; a failed load leaves
+   *  the section showing "unknown" instead of breaking Settings. */
+  const [ytdlp, setYtdlp] = useState<YtdlpStatus | null>(null)
+  const [ytdlpUpdating, setYtdlpUpdating] = useState(false)
+  const [ytdlpMessage, setYtdlpMessage] = useState<string | null>(null)
 
   useEffect(() => {
     if (!open) return
@@ -134,6 +144,8 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
     setTestResult(null)
     setSoundTestResult(null)
     setAvTestResult(null)
+    setYtdlp(null)
+    setYtdlpMessage(null)
     setPassword('')
     setPasswordTouched(false)
     setDeletedLoginIds([])
@@ -145,10 +157,11 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
       edits[c.id] = { folder: c.default_folder, extensions: c.file_extensions.join(', ') }
     }
     setCatEdits(edits)
-    void Promise.all([getSettings(), getProxyConfig(), listSiteLogins(), getSoundSettings(), getQuotaStatus()])
-      .then(([s, p, loginsList, soundList, quota]) => {
+    void Promise.all([getSettings(), getProxyConfig(), listSiteLogins(), getSoundSettings(), getQuotaStatus(), ytdlpVersion().catch(() => null)])
+      .then(([s, p, loginsList, soundList, quota, ytdlpStatus]) => {
         setSettings(s)
         setQuotaStatus(quota)
+        setYtdlp(ytdlpStatus)
         setLogins(loginsList)
         const loginDrafts: Record<string, LoginDraft> = {}
         for (const l of loginsList) {
@@ -217,6 +230,24 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
 
   function set<T extends keyof Settings>(key: T, value: Settings[T]) {
     setSettings((prev) => (prev ? { ...prev, [key]: value } : prev))
+  }
+
+  /** Round 78 — update yt-dlp from its GitHub release (the
+   *  engine verifies the SHA-256 checksum before installing).
+   *  A failed update reports the reason and leaves the old
+   *  binary in place. */
+  async function updateYtdlp() {
+    setYtdlpUpdating(true)
+    setYtdlpMessage(null)
+    try {
+      const status = await ytdlpUpdate()
+      setYtdlp(status)
+      setYtdlpMessage(status.version ? `yt-dlp updated to ${status.version}.` : 'yt-dlp updated.')
+    } catch (e) {
+      setYtdlpMessage(e instanceof Error ? e.message : String(e))
+    } finally {
+      setYtdlpUpdating(false)
+    }
   }
 
   function validate(): string | null {
@@ -531,6 +562,56 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                 Takes effect once the browser extension is installed. When it is off, the
                 extension catches nothing and drained links are rejected.
               </p>
+              <label className="flex items-center gap-2 text-base">
+                <input
+                  type="checkbox"
+                  checked={settings.platform_downloads_enabled}
+                  onChange={(e) => set('platform_downloads_enabled', e.target.checked)}
+                  disabled={!settings.browser_integration}
+                  className="h-4 w-4 accent-accent"
+                />
+                Download videos from YouTube, Facebook, Instagram and TikTok
+              </label>
+              <p className={hintCls}>
+                On (the default), the extension&apos;s Download button on a video page lists its
+                qualities, and the app downloads the one you pick — all qualities from 360p up
+                where the site offers them. Only applies while catching downloads from the
+                browser is on.
+              </p>
+              <div>
+                <p className={labelCls}>Video component (yt-dlp)</p>
+                <p className="text-sm text-text-muted">
+                  {ytdlp === null
+                    ? 'Video component status is unknown.'
+                    : ytdlp.version
+                      ? `yt-dlp ${ytdlp.version} — JavaScript solver ${ytdlp.qjs ? 'installed' : 'missing'}, video merge tool ${ytdlp.ffmpeg ? 'installed' : 'missing'}.`
+                      : 'yt-dlp is not installed — video downloads will not work until it is.'}
+                </p>
+                {ytdlp && !ytdlp.qjs ? (
+                  <p className={hintCls}>
+                    The JavaScript solver is missing, so YouTube pages that need it will not
+                    resolve — reinstall Sonic Manager to restore it.
+                  </p>
+                ) : null}
+                {ytdlp && !ytdlp.ffmpeg ? (
+                  <p className={hintCls}>
+                    The video merge tool is missing, so qualities above 360p (which arrive as
+                    separate video and audio) cannot be merged — reinstall Sonic Manager to
+                    restore it.
+                  </p>
+                ) : null}
+                <div className="mt-2 flex items-center gap-3">
+                  <Button variant="secondary" onClick={() => void updateYtdlp()} disabled={ytdlpUpdating}>
+                    {ytdlpUpdating ? 'Updating…' : 'Update yt-dlp'}
+                  </Button>
+                  {ytdlpMessage ? <span className="text-sm text-text-muted">{ytdlpMessage}</span> : null}
+                </div>
+                <p className={hintCls}>
+                  Downloads the newest yt-dlp from its GitHub release and checks it against the
+                  release&apos;s published checksum before installing it. Use it when a video
+                  page stops resolving — sites change, and yt-dlp tracks them.
+                </p>
+              </div>
               <label className="flex items-center gap-2 text-base">
                 <input
                   type="checkbox"

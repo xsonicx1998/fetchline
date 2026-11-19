@@ -81,7 +81,13 @@ async fn whole_download_stall_mid_file_recovers_and_completes() {
     mgr.set_tail_zero_progress_cap_secs(120);
     server.set_stall_after_bytes(256 * 1024);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -130,7 +136,13 @@ async fn persistently_stalled_download_keeps_retrying_then_gives_up_at_cap() {
     mgr.set_tail_zero_progress_cap_secs(20);
     server.set_stall_after_bytes(256 * 1024);
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(dir.to_string_lossy().to_string()), None, None)
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
         .await
         .unwrap();
     let start = Instant::now();

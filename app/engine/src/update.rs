@@ -106,7 +106,11 @@ pub fn parse_version(raw: &str) -> Option<Version> {
         Some((c, p)) => (c, Some(p)),
         None => (s, None),
     };
-    if core.is_empty() || core.split('.').any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit())) {
+    if core.is_empty()
+        || core
+            .split('.')
+            .any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()))
+    {
         return None;
     }
     let numbers: Vec<u64> = core
@@ -118,10 +122,7 @@ pub fn parse_version(raw: &str) -> Option<Version> {
         Some(p) => {
             if p.is_empty()
                 || p.split('.').any(|seg| {
-                    seg.is_empty()
-                        || !seg
-                            .bytes()
-                            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                    seg.is_empty() || !seg.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
                 })
             {
                 return None;
@@ -129,7 +130,10 @@ pub fn parse_version(raw: &str) -> Option<Version> {
             Some(p.split('.').map(str::to_string).collect())
         }
     };
-    Some(Version { numbers, pre_release })
+    Some(Version {
+        numbers,
+        pre_release,
+    })
 }
 
 impl Ord for Version {
@@ -226,7 +230,8 @@ pub fn parse_manifest(body: &[u8]) -> Result<UpdateManifest> {
     let version = raw.version.trim().to_string();
     if version.is_empty() {
         return Err(EngineError::InvalidState(
-            "The update manifest has no version — check the update server address in Settings".to_string(),
+            "The update manifest has no version — check the update server address in Settings"
+                .to_string(),
         ));
     }
     if parse_version(&version).is_none() {
@@ -234,8 +239,16 @@ pub fn parse_manifest(body: &[u8]) -> Result<UpdateManifest> {
             "The update manifest has a version Fetchline cannot read: '{version}' — check the update server address in Settings"
         )));
     }
-    if let Some(url) = raw.download_url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
-        if !matches!(url.split_once("://").map(|(s, _)| s), Some("http") | Some("https")) {
+    if let Some(url) = raw
+        .download_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+    {
+        if !matches!(
+            url.split_once("://").map(|(s, _)| s),
+            Some("http") | Some("https")
+        ) {
             return Err(EngineError::InvalidState(format!(
                 "The update manifest has a download address Fetchline cannot use: '{url}'"
             )));
@@ -251,7 +264,12 @@ pub fn parse_manifest(body: &[u8]) -> Result<UpdateManifest> {
         changelog.extend(
             notes
                 .lines()
-                .map(|l| l.trim().trim_start_matches(['-', '*', ' ']).trim().to_string())
+                .map(|l| {
+                    l.trim()
+                        .trim_start_matches(['-', '*', ' '])
+                        .trim()
+                        .to_string()
+                })
                 .filter(|l| !l.is_empty()),
         );
     }
@@ -260,7 +278,10 @@ pub fn parse_manifest(body: &[u8]) -> Result<UpdateManifest> {
         version,
         changelog,
         notes: None,
-        download_url: raw.download_url.map(|u| u.trim().to_string()).filter(|u| !u.is_empty()),
+        download_url: raw
+            .download_url
+            .map(|u| u.trim().to_string())
+            .filter(|u| !u.is_empty()),
     })
 }
 
@@ -363,13 +384,22 @@ mod tests {
         assert_eq!(compare_versions("1.2.3", "1.2.2"), Some(Ordering::Greater));
         assert_eq!(compare_versions("1.2.2", "1.2.3"), Some(Ordering::Less));
         assert_eq!(compare_versions("1.2.3", "1.2.3"), Some(Ordering::Equal));
-        assert_eq!(compare_versions("2.0.0", "1.99.99"), Some(Ordering::Greater));
+        assert_eq!(
+            compare_versions("2.0.0", "1.99.99"),
+            Some(Ordering::Greater)
+        );
         // Shorter is equal when the missing parts are zero.
         assert_eq!(compare_versions("1.2", "1.2.0"), Some(Ordering::Equal));
         assert_eq!(compare_versions("1.2", "1.2.1"), Some(Ordering::Less));
         // A leading `v` and whitespace are tolerated.
-        assert_eq!(compare_versions("v1.10.0", "1.9.9"), Some(Ordering::Greater));
-        assert_eq!(compare_versions(" 1.2.3 ", "1.2.2"), Some(Ordering::Greater));
+        assert_eq!(
+            compare_versions("v1.10.0", "1.9.9"),
+            Some(Ordering::Greater)
+        );
+        assert_eq!(
+            compare_versions(" 1.2.3 ", "1.2.2"),
+            Some(Ordering::Greater)
+        );
         assert!(is_newer("1.10.0", "1.9.9"));
         assert!(!is_newer("1.9.9", "1.10.0"));
         assert!(!is_newer("0.1.0", "0.1.0"));
@@ -393,13 +423,24 @@ mod tests {
             compare_versions("1.0.0-alpha", "1.0.0-beta"),
             Some(Ordering::Less)
         );
-        assert_eq!(compare_versions("1.0.0-rc.1", "1.0.0"), Some(Ordering::Less));
+        assert_eq!(
+            compare_versions("1.0.0-rc.1", "1.0.0"),
+            Some(Ordering::Less)
+        );
         assert!(is_newer("1.0.0", "1.0.0-rc.1"));
     }
 
     #[test]
     fn malformed_versions_are_rejected() {
-        for bad in ["", "v", "1.2.x", "1..2", "1.2.3-", "1.2.3-beta..1", "one.two.three"] {
+        for bad in [
+            "",
+            "v",
+            "1.2.x",
+            "1..2",
+            "1.2.3-",
+            "1.2.3-beta..1",
+            "one.two.three",
+        ] {
             assert!(parse_version(bad).is_none(), "{bad}");
         }
         // Long dotted versions parse fine (no fixed part limit).
@@ -418,7 +459,9 @@ mod tests {
         assert_eq!(m.changelog, vec!["Faster downloads"]);
         assert!(m.download_url.is_some());
 
-        let m = parse_manifest(br#"{"version": "0.3.0", "notes": "- First thing\n- Second thing\n"}"#).unwrap();
+        let m =
+            parse_manifest(br#"{"version": "0.3.0", "notes": "- First thing\n- Second thing\n"}"#)
+                .unwrap();
         assert_eq!(m.changelog, vec!["First thing", "Second thing"]);
 
         let m = parse_manifest(br#"{"version": "0.3.0", "changes": ["Via changes"]}"#).unwrap();
@@ -431,7 +474,10 @@ mod tests {
         assert!(parse_manifest(br#"{"changelog": []}"#).is_err());
         assert!(parse_manifest(br#"{"version": ""}"#).is_err());
         assert!(parse_manifest(br#"{"version": "banana"}"#).is_err());
-        assert!(parse_manifest(br#"{"version": "0.2.0", "download_url": "ftp://example.com/x.msi"}"#).is_err());
+        assert!(parse_manifest(
+            br#"{"version": "0.2.0", "download_url": "ftp://example.com/x.msi"}"#
+        )
+        .is_err());
         assert!(parse_manifest(&vec![b'x'; MAX_MANIFEST_BYTES + 1]).is_err());
     }
 
@@ -440,8 +486,16 @@ mod tests {
         assert!(weekly_check_due(true, None, 1_000_000));
         assert!(!weekly_check_due(false, None, 1_000_000));
         // Checked 6 days 20 hours ago: not due; exactly 7 days ago: due.
-        assert!(!weekly_check_due(true, Some("2026-11-08T00:00:00Z"), 1_794_688_200));
-        assert!(weekly_check_due(true, Some("2026-11-07T20:30:00Z"), 1_794_688_200));
+        assert!(!weekly_check_due(
+            true,
+            Some("2026-11-08T00:00:00Z"),
+            1_794_688_200
+        ));
+        assert!(weekly_check_due(
+            true,
+            Some("2026-11-07T20:30:00Z"),
+            1_794_688_200
+        ));
         // A malformed stored time is "never checked", not a crash.
         assert!(weekly_check_due(true, Some("not a time"), 1_794_688_200));
     }

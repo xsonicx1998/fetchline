@@ -183,6 +183,23 @@ pub enum HostMessage {
         #[serde(default)]
         cookies: Vec<CookiePair>,
     },
+    /// Round 78 — the extension asks the HOST to resolve a
+    /// platform video page with yt-dlp (the extension cannot
+    /// reach the engine). The host runs the resolver itself and
+    /// replies with a trimmed format list — never raw `-J`
+    /// (Chrome native-messaging messages are ~1 MB). Handled by
+    /// the host binary's async loop, NOT by the sync
+    /// `handle_host_message` (a resolve takes up to ~30 s).
+    ResolveVideo {
+        page_url: String,
+        request_id: String,
+        #[serde(default)]
+        with_cookies: bool,
+        #[serde(default)]
+        cookies: Vec<CookiePair>,
+        #[serde(default)]
+        extractor_args: Option<String>,
+    },
 }
 
 /// One reply to the extension. `ok` is false with `error` set for
@@ -216,6 +233,28 @@ pub struct HostReply {
     pub pending_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_alive: Option<bool>,
+    /// Round 78 — `resolve_video` reply fields: `request_id`
+    /// echoes the request; `title` / `is_live` / `degraded` /
+    /// `warning` describe the resolved video; `formats` is the
+    /// TRIMMED quality list (one row per height, 360p and up —
+    /// never raw `-J`); `needs_login` + `error_kind` are set on
+    /// an error reply (see `YtDlpErrorKind::kind_str`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_live: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degraded: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formats: Option<Vec<crate::ytdlp::QualityRow>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_login: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
 }
 
 /// Round 75 — is the desktop app alive? The app creates a NAMED
@@ -336,6 +375,14 @@ impl HostReply {
             excluded_sites: None,
             pending_count: None,
             app_alive: None,
+            request_id: None,
+            title: None,
+            is_live: None,
+            degraded: None,
+            warning: None,
+            formats: None,
+            needs_login: None,
+            error_kind: None,
         }
     }
 
@@ -351,6 +398,14 @@ impl HostReply {
             excluded_sites: None,
             pending_count: None,
             app_alive: None,
+            request_id: None,
+            title: None,
+            is_live: None,
+            degraded: None,
+            warning: None,
+            formats: None,
+            needs_login: None,
+            error_kind: None,
         }
     }
 
@@ -393,7 +448,9 @@ pub fn decode_message<R: Read>(reader: &mut R) -> Result<Option<serde_json::Valu
     }
     let mut payload = vec![0u8; len];
     reader.read_exact(&mut payload).map_err(EngineError::Io)?;
-    serde_json::from_slice(&payload).map(Some).map_err(EngineError::Json)
+    serde_json::from_slice(&payload)
+        .map(Some)
+        .map_err(EngineError::Json)
 }
 
 /// Write one length-prefixed JSON message and flush, so the
@@ -433,22 +490,21 @@ pub fn handle_host_message(store: &Store, msg: &HostMessage) -> HostReply {
             url,
             referrer,
             cookies,
-        } => {
-            match enqueue_one(store, url, referrer.as_deref(), "browser", cookies) {
-                Ok(row) => {
-                    let mut reply = HostReply::ok("queued");
-                    reply.pending_link_id = Some(row.id);
-                    reply.message = Some("Link queued — Fetchline will pick it up".to_string());
-                    reply.with_pending_count(store)
-                }
-                Err(e) => HostReply::err("error", e.to_string()),
+        } => match enqueue_one(store, url, referrer.as_deref(), "browser", cookies) {
+            Ok(row) => {
+                let mut reply = HostReply::ok("queued");
+                reply.pending_link_id = Some(row.id);
+                reply.message = Some("Link queued — Fetchline will pick it up".to_string());
+                reply.with_pending_count(store)
             }
-        }
+            Err(e) => HostReply::err("error", e.to_string()),
+        },
         HostMessage::DownloadAll { page_url, links } => {
             if links.is_empty() {
                 return HostReply::err(
                     "error",
-                    "No links were sent with this page — the host expands the page itself".to_string(),
+                    "No links were sent with this page — the host expands the page itself"
+                        .to_string(),
                 );
             }
             let mut enqueued = 0usize;
@@ -498,9 +554,17 @@ pub fn handle_host_message(store: &Store, msg: &HostMessage) -> HostReply {
             // queue S13 uses (source "video", page URL as referrer).
             // The drain puts it through the real add_download path,
             // so the duplicate-path guard (BUG-002) applies there.
+            // Round 78: a resolved variant carries the resolver's
+            // metadata and goes through `enqueue_resolved`, so the
+            // row stores it for the Add URL dialog.
             let mut enqueued = 0usize;
             for variant in &accepted {
-                match enqueue_one(store, &variant.url, Some(page_url), "video", cookies) {
+                let queued = if variant.resolved {
+                    enqueue_resolved(store, variant, page_url, cookies)
+                } else {
+                    enqueue_one(store, &variant.url, Some(page_url), "video", cookies)
+                };
+                match queued {
                     Ok(_) => enqueued += 1,
                     Err(e) => skipped.push(format!("{}: {e}", variant.url)),
                 }
@@ -527,6 +591,15 @@ pub fn handle_host_message(store: &Store, msg: &HostMessage) -> HostReply {
                 ));
             }
             reply.with_pending_count(store)
+        }
+        HostMessage::ResolveVideo { .. } => {
+            // Round 78 — a resolve runs yt-dlp for up to ~30 s
+            // with a heartbeat, so it lives in the host binary's
+            // async loop, not in this synchronous handler.
+            HostReply::err(
+                "error",
+                "Video resolving needs the host's async loop — this message cannot be handled synchronously".to_string(),
+            )
         }
     }
 }
@@ -563,4 +636,66 @@ fn enqueue_one(
         Some(cookies_to_json(cookies)?)
     };
     store.enqueue_pending_link_with_cookies(url, referrer, source, cookies_json.as_deref())
+}
+
+/// Enqueue one resolved platform video (Round 78): the variant
+/// carries the resolver's metadata (filename, headers, source
+/// URL, format id, DASH audio URL, fragmented flag) and the row
+/// stores it via `enqueue_pending_link_resolved`, so the Add URL
+/// dialog and `confirm_pending_link` can use it without a second
+/// resolve. The same host-boundary checks as `enqueue_one` apply
+/// (integration flag, platform-downloads flag, excluded site,
+/// cookie validation).
+pub fn enqueue_resolved(
+    store: &Store,
+    variant: &VideoVariant,
+    page_url: &str,
+    cookies: &[CookiePair],
+) -> Result<PendingLinkRow> {
+    let settings = store.get_settings().unwrap_or_default();
+    if !settings.browser_integration {
+        return Err(EngineError::InvalidState(
+            "Browser integration is turned off in Fetchline settings".to_string(),
+        ));
+    }
+    if !settings.platform_downloads_enabled {
+        return Err(EngineError::InvalidState(
+            "Platform downloads are turned off in Fetchline settings".to_string(),
+        ));
+    }
+    if let Some(host) = host_of_url(&variant.url) {
+        if site_is_excluded(&host, &settings.excluded_sites) {
+            return Err(EngineError::InvalidState(format!(
+                "This site is excluded in Settings (excluded sites): {host}"
+            )));
+        }
+    }
+    let cookies_json = if cookies.is_empty() {
+        None
+    } else {
+        Some(cookies_to_json(cookies)?)
+    };
+    // The headers map was written by the resolver with Cookie
+    // keys already stripped; strip them again here (defence in
+    // depth — headers must never carry a session past the cookie
+    // validation).
+    let headers = variant.headers.as_deref().and_then(|json| {
+        let mut map: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(json).ok()?;
+        map.retain(|k, _| !k.eq_ignore_ascii_case("cookie"));
+        serde_json::to_string(&map).ok()
+    });
+    store.enqueue_pending_link_resolved(
+        &variant.url,
+        Some(page_url),
+        cookies_json.as_deref(),
+        &crate::store::ResolvedLink {
+            filename: variant.filename.clone(),
+            headers,
+            source_url: variant.source_url.clone(),
+            format_id: variant.format_id.clone(),
+            audio_url: variant.audio_url.clone(),
+            fragmented: variant.fragmented,
+        },
+    )
 }

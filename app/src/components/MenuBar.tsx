@@ -246,6 +246,10 @@ export function MenuBar({ actions, selected, queue, hasDownloading, hasComplete 
               Version 0.1.0 — a fast download manager for Windows. Downloads run in up to 16
               parts, resume after interruptions, and live in queues you can schedule.
             </p>
+            <p className="mt-2 text-sm text-text-muted">
+              Video downloads use yt-dlp, QuickJS-ng and FFmpeg (LGPL) — see
+              THIRD_PARTY_NOTICES.md next to the program for versions, licenses and sources.
+            </p>
             <div className="mt-6 flex justify-end">
               <Button variant="primary" onClick={() => setShowAbout(false)}>
                 Close

@@ -124,7 +124,7 @@ async function refreshScanLine() {
     if (reply && reply.ok && typeof reply.total === "number" && typeof reply.downloadable === "number") {
       // The rescan answered with this page's summary — show it
       // directly, no storage round-trip.
-      renderScan(el, reply.total, reply.downloadable, "This page");
+      renderScan(el, reply.total, reply.downloadable, "This page", currentUrl);
       return;
     }
     if (reply && reply.ok) {
@@ -160,7 +160,7 @@ async function refreshScanLine() {
       : scan.pageUrl
         ? `Last scan (${hostOf(scan.pageUrl)})`
         : "Last scan";
-    renderScan(el, total, downloadable, prefix);
+    renderScan(el, total, downloadable, prefix, scan.pageUrl || currentUrl);
   } catch {
     // Storage unreadable: the line simply stays hidden.
   }
@@ -168,14 +168,52 @@ async function refreshScanLine() {
 
 // `prefix` is "This page" for a fresh scan of the open tab, or
 // "Last scan (<host>)" for a stored scan from another page.
-function renderScan(el, total, downloadable, prefix) {
+// Round 78: on a supported platform (YouTube, Facebook,
+// Instagram, TikTok) the direct scan finds nothing — the
+// player's <video> src is a blob: — so "no videos found" would
+// be a lie; the line instead says to click the Download button
+// on the video to see qualities.
+function renderScan(el, total, downloadable, prefix, pageUrl) {
   if (total === 0) {
+    const name = platformNameFor(pageUrl);
+    if (name) {
+      el.textContent = `${prefix}: ${name} video — click the Download button on the video to see qualities.`;
+      return;
+    }
     el.textContent = `${prefix}: no videos found.`;
   } else if (downloadable === 0) {
     el.textContent = `${prefix}: ${total} video${total === 1 ? "" : "s"} found, none downloadable.`;
   } else {
     el.textContent = `${prefix}: ${downloadable} downloadable video${downloadable === 1 ? "" : "s"} found — hover a video to download it.`;
   }
+}
+
+// Round 78 — the platform display name for a page URL, or null
+// off-platform. video-detect.js (loaded first in popup.html)
+// owns the domain list; this mirrors its names only, so a page
+// the detector does not know never gets a platform line here.
+function platformNameFor(url) {
+  const VD = (typeof globalThis !== "undefined" && globalThis.FetchlineVideoDetect) || {};
+  if (VD.isSupportedPlatform && VD.platformName) {
+    if (!VD.isSupportedPlatform(url)) return null;
+    return VD.platformName(url);
+  }
+  let host = "";
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+  const names = [
+    ["youtube.com", "YouTube"],
+    ["youtu.be", "YouTube"],
+    ["facebook.com", "Facebook"],
+    ["fb.watch", "Facebook"],
+    ["instagram.com", "Instagram"],
+    ["tiktok.com", "TikTok"],
+  ];
+  const hit = names.find(([domain]) => host === domain || host.endsWith(`.${domain}`));
+  return hit ? hit[1] : null;
 }
 
 function hostOf(url) {

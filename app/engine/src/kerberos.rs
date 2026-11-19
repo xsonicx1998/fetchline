@@ -119,7 +119,9 @@ fn der_tlv(tag: u8, content: &[u8]) -> Vec<u8> {
 
 /// Read one TLV at `offset`: `(tag, content, next_offset)`.
 fn der_read_tlv(bytes: &[u8], offset: usize) -> Result<(u8, &[u8], usize)> {
-    let bad = || EngineError::InvalidState("The proxy sent a malformed Kerberos (SPNEGO) token".to_string());
+    let bad = || {
+        EngineError::InvalidState("The proxy sent a malformed Kerberos (SPNEGO) token".to_string())
+    };
     if offset + 2 > bytes.len() {
         return Err(bad());
     }
@@ -201,7 +203,9 @@ pub fn build_neg_token_resp(neg_state: u8, response_token: Option<&[u8]>) -> Vec
 /// Anything that is not one of those two shapes is an error — a
 /// proxy that sends garbage here is not a Kerberos proxy.
 pub fn parse_spnego_token(bytes: &[u8]) -> Result<SpnegoToken> {
-    let bad = || EngineError::InvalidState("The proxy sent a malformed Kerberos (SPNEGO) token".to_string());
+    let bad = || {
+        EngineError::InvalidState("The proxy sent a malformed Kerberos (SPNEGO) token".to_string())
+    };
     if bytes.is_empty() {
         return Err(bad());
     }
@@ -244,7 +248,10 @@ pub fn parse_spnego_token(bytes: &[u8]) -> Result<SpnegoToken> {
                 }
                 Ok(())
             })?;
-            Ok(SpnegoToken::Init { mech_types, mech_token })
+            Ok(SpnegoToken::Init {
+                mech_types,
+                mech_token,
+            })
         }
         0xa1 => {
             let (_, content, _) = der_read_tlv(bytes, 0)?;
@@ -267,7 +274,10 @@ pub fn parse_spnego_token(bytes: &[u8]) -> Result<SpnegoToken> {
                 }
                 Ok(())
             })?;
-            Ok(SpnegoToken::Resp { neg_state, response_token })
+            Ok(SpnegoToken::Resp {
+                neg_state,
+                response_token,
+            })
         }
         _ => Err(bad()),
     }
@@ -430,7 +440,10 @@ impl GssInitiator {
                 gss_status_message(major, minor)
             )));
         }
-        Ok(Self { target_name: target, context: std::ptr::null_mut() })
+        Ok(Self {
+            target_name: target,
+            context: std::ptr::null_mut(),
+        })
     }
 }
 
@@ -445,9 +458,19 @@ fn gss_status_message(major: u32, minor: u32) -> String {
         let mut message_context: u32 = 0;
         loop {
             let mut m: u32 = 0;
-            let mut buf = GssBuffer { length: 0, value: std::ptr::null_mut() };
+            let mut buf = GssBuffer {
+                length: 0,
+                value: std::ptr::null_mut(),
+            };
             let rc = unsafe {
-                gss_display_status(&mut m, value, status_type, std::ptr::null(), &mut message_context, &mut buf)
+                gss_display_status(
+                    &mut m,
+                    value,
+                    status_type,
+                    std::ptr::null(),
+                    &mut message_context,
+                    &mut buf,
+                )
             };
             if rc != GSS_S_COMPLETE || buf.value.is_null() {
                 break;
@@ -483,13 +506,25 @@ impl SpnegoInitiator for GssInitiator {
         };
         let (input_buf, _owned): (GssBuffer, Option<Vec<u8>>) = match input_token {
             Some(token) => (
-                GssBuffer { length: token.len(), value: token.as_ptr() as *mut std::ffi::c_void },
+                GssBuffer {
+                    length: token.len(),
+                    value: token.as_ptr() as *mut std::ffi::c_void,
+                },
                 None,
             ),
-            None => (GssBuffer { length: 0, value: std::ptr::null_mut() }, None),
+            None => (
+                GssBuffer {
+                    length: 0,
+                    value: std::ptr::null_mut(),
+                },
+                None,
+            ),
         };
         let mut minor: u32 = 0;
-        let mut output = GssBuffer { length: 0, value: std::ptr::null_mut() };
+        let mut output = GssBuffer {
+            length: 0,
+            value: std::ptr::null_mut(),
+        };
         let mut ret_flags: u32 = 0;
         let major = unsafe {
             gss_init_sec_context(
@@ -511,7 +546,9 @@ impl SpnegoInitiator for GssInitiator {
         let token = if output.value.is_null() || output.length == 0 {
             Vec::new()
         } else {
-            let bytes = unsafe { std::slice::from_raw_parts(output.value as *const u8, output.length).to_vec() };
+            let bytes = unsafe {
+                std::slice::from_raw_parts(output.value as *const u8, output.length).to_vec()
+            };
             let mut m: u32 = 0;
             unsafe { gss_release_buffer(&mut m, &mut output) };
             bytes
@@ -533,7 +570,10 @@ impl Drop for GssInitiator {
         use gss::*;
         if !self.context.is_null() {
             let mut minor: u32 = 0;
-            let mut out = GssBuffer { length: 0, value: std::ptr::null_mut() };
+            let mut out = GssBuffer {
+                length: 0,
+                value: std::ptr::null_mut(),
+            };
             unsafe { gss_delete_sec_context(&mut minor, &mut self.context, &mut out) };
             if !out.value.is_null() {
                 let mut m: u32 = 0;
@@ -667,8 +707,14 @@ impl SspiInitiator {
     pub fn new(proxy_host: &str) -> Result<Self> {
         use sspi::*;
         let package = std::ffi::CString::new("Kerberos").unwrap();
-        let mut cred = SecHandle { dw_lower: 0, dw_upper: 0 };
-        let mut expiry = TimeStamp { dw_low: 0, dw_high: 0 };
+        let mut cred = SecHandle {
+            dw_lower: 0,
+            dw_upper: 0,
+        };
+        let mut expiry = TimeStamp {
+            dw_low: 0,
+            dw_high: 0,
+        };
         let rc = unsafe {
             AcquireCredentialsHandleA(
                 std::ptr::null(),
@@ -688,11 +734,16 @@ impl SspiInitiator {
             )));
         }
         let target = std::ffi::CString::new(format!("HTTP/{proxy_host}")).map_err(|_| {
-            EngineError::InvalidState("The proxy host cannot be used as a Kerberos service name".to_string())
+            EngineError::InvalidState(
+                "The proxy host cannot be used as a Kerberos service name".to_string(),
+            )
         })?;
         Ok(Self {
             cred,
-            context: SecHandle { dw_lower: 0, dw_upper: 0 },
+            context: SecHandle {
+                dw_lower: 0,
+                dw_upper: 0,
+            },
             have_context: false,
             target,
         })
@@ -711,7 +762,11 @@ impl SpnegoInitiator for SspiInitiator {
             buffer_type: SECBUFFER_TOKEN,
             pv_buffer: token.as_ptr() as *mut std::ffi::c_void,
         });
-        let mut in_desc = SecBufferDesc { ul_version: SECBUFFER_VERSION, c_buffers: 0, p_buffers: std::ptr::null_mut() };
+        let mut in_desc = SecBufferDesc {
+            ul_version: SECBUFFER_VERSION,
+            c_buffers: 0,
+            p_buffers: std::ptr::null_mut(),
+        };
         if let Some(buf) = in_buf.as_mut() {
             in_desc.c_buffers = 1;
             in_desc.p_buffers = buf;
@@ -724,11 +779,26 @@ impl SpnegoInitiator for SspiInitiator {
             buffer_type: SECBUFFER_TOKEN,
             pv_buffer: out_storage.as_mut_ptr() as *mut std::ffi::c_void,
         };
-        let mut out_desc = SecBufferDesc { ul_version: SECBUFFER_VERSION, c_buffers: 1, p_buffers: &mut out_buf };
+        let mut out_desc = SecBufferDesc {
+            ul_version: SECBUFFER_VERSION,
+            c_buffers: 1,
+            p_buffers: &mut out_buf,
+        };
         let mut attrs: u32 = 0;
-        let mut expiry = TimeStamp { dw_low: 0, dw_high: 0 };
-        let ph_context = if self.have_context { &mut self.context as *mut SecHandle } else { std::ptr::null_mut() };
-        let input_ptr = if input_token.is_some() { &in_desc as *const SecBufferDesc } else { std::ptr::null() };
+        let mut expiry = TimeStamp {
+            dw_low: 0,
+            dw_high: 0,
+        };
+        let ph_context = if self.have_context {
+            &mut self.context as *mut SecHandle
+        } else {
+            std::ptr::null_mut()
+        };
+        let input_ptr = if input_token.is_some() {
+            &in_desc as *const SecBufferDesc
+        } else {
+            std::ptr::null()
+        };
         let rc = unsafe {
             InitializeSecurityContextA(
                 &self.cred,
@@ -780,10 +850,15 @@ impl Drop for SspiInitiator {
 pub fn negotiate_response_token<'a>(values: impl Iterator<Item = &'a str>) -> Option<Vec<u8>> {
     for value in values {
         let mut parts = value.split_whitespace();
-        if parts.next().map(|s| s.eq_ignore_ascii_case("negotiate")).unwrap_or(false) {
+        if parts
+            .next()
+            .map(|s| s.eq_ignore_ascii_case("negotiate"))
+            .unwrap_or(false)
+        {
             if let Some(b64) = parts.next() {
                 if let Some(bytes) = base64_decode(b64) {
-                    if let Ok(SpnegoToken::Resp { response_token, .. }) = parse_spnego_token(&bytes) {
+                    if let Ok(SpnegoToken::Resp { response_token, .. }) = parse_spnego_token(&bytes)
+                    {
                         return response_token;
                     }
                 }
@@ -808,7 +883,15 @@ pub async fn kerberos_request(
     url: &str,
     range: Option<(u64, Option<u64>)>,
 ) -> Result<(u16, Vec<RawHeader>, NtlmBodyReader)> {
-    kerberos_request_with_initiator(proxy, method, url, range, new_kerberos_initiator(&proxy.host)?, None).await
+    kerberos_request_with_initiator(
+        proxy,
+        method,
+        url,
+        range,
+        new_kerberos_initiator(&proxy.host)?,
+        None,
+    )
+    .await
 }
 
 /// The same exchange with an explicit token source. Production
@@ -844,7 +927,11 @@ pub async fn kerberos_request_with_initiator(
         }
         t
     });
-    let host_header = if port == 80 { host.clone() } else { format!("{host}:{port}") };
+    let host_header = if port == 80 {
+        host.clone()
+    } else {
+        format!("{host}:{port}")
+    };
     let range_header = range.map(|(start, end)| match end {
         Some(e) => format!("bytes={start}-{e}"),
         None => format!("bytes={start}-"),
@@ -875,7 +962,9 @@ pub async fn kerberos_request_with_initiator(
             })
             .await
             .map_err(|e| {
-                EngineError::InvalidState(format!("Kerberos (Negotiate) proxy authentication failed: {e}"))
+                EngineError::InvalidState(format!(
+                    "Kerberos (Negotiate) proxy authentication failed: {e}"
+                ))
             })?;
             initiator = back;
             let step = step_result?;
@@ -924,7 +1013,9 @@ pub async fn kerberos_request_with_initiator(
     tokio::time::timeout(KERBEROS_TIMEOUT, work)
         .await
         .map_err(|_| {
-            EngineError::InvalidState("The proxy did not answer the Kerberos handshake in time".to_string())
+            EngineError::InvalidState(
+                "The proxy did not answer the Kerberos handshake in time".to_string(),
+            )
         })?
 }
 
@@ -960,7 +1051,10 @@ mod tests {
         );
         let parsed = parse_spnego_token(&token).unwrap();
         match parsed {
-            SpnegoToken::Init { mech_types, mech_token } => {
+            SpnegoToken::Init {
+                mech_types,
+                mech_token,
+            } => {
                 assert_eq!(mech_types, vec![KERBEROS_OID.to_vec()]);
                 assert_eq!(mech_token, Some(vec![0x01, 0x02, 0x03]));
             }
@@ -978,7 +1072,10 @@ mod tests {
         assert_eq!(hex(&token), "a10d300ba0030a0101a2040402aabb");
         let parsed = parse_spnego_token(&token).unwrap();
         match parsed {
-            SpnegoToken::Resp { neg_state, response_token } => {
+            SpnegoToken::Resp {
+                neg_state,
+                response_token,
+            } => {
                 assert_eq!(neg_state, Some(1));
                 assert_eq!(response_token, Some(vec![0xaa, 0xbb]));
             }
@@ -987,7 +1084,10 @@ mod tests {
         // accept-completed with no token parses too.
         let done = build_neg_token_resp(0, None);
         match parse_spnego_token(&done).unwrap() {
-            SpnegoToken::Resp { neg_state, response_token } => {
+            SpnegoToken::Resp {
+                neg_state,
+                response_token,
+            } => {
                 assert_eq!(neg_state, Some(0));
                 assert_eq!(response_token, None);
             }

@@ -57,10 +57,17 @@ async fn add_named(
 
 /// Add a 2 MiB download and start it under a 1 MB / 1 h quota.
 /// Returns once it is paused by the quota.
-async fn download_paused_by_quota(mgr: &Arc<DownloadManager>, server_url: &str, dir: &std::path::Path) -> String {
+async fn download_paused_by_quota(
+    mgr: &Arc<DownloadManager>,
+    server_url: &str,
+    dir: &std::path::Path,
+) -> String {
     let id = add_named(mgr, server_url, dir, "big.bin").await;
     mgr.start_download(&id).await.unwrap();
-    assert!(wait_for_status(mgr, &id, "paused", 30).await, "download was not paused by the quota");
+    assert!(
+        wait_for_status(mgr, &id, "paused", 30).await,
+        "download was not paused by the quota"
+    );
     id
 }
 
@@ -107,17 +114,26 @@ async fn quota_window_math_uses_the_clock_seam() {
     assert_eq!(start, None);
     assert_eq!(used, 0);
     // The first counted byte anchors the window at that moment.
-    let used = store.record_quota_bytes(512 * 1024, 3600, 1_000_000).unwrap();
+    let used = store
+        .record_quota_bytes(512 * 1024, 3600, 1_000_000)
+        .unwrap();
     assert_eq!(used, 512 * 1024);
     let (start, used) = store.get_quota_state().unwrap();
     assert_eq!(start, Some(1_000_000));
     assert_eq!(used, 512 * 1024);
     // Inside the window, bytes accumulate; past its end, the next
     // byte anchors a fresh window instead of adding to the old one.
-    let used = store.record_quota_bytes(512 * 1024, 3600, 1_000_000 + 3599).unwrap();
+    let used = store
+        .record_quota_bytes(512 * 1024, 3600, 1_000_000 + 3599)
+        .unwrap();
     assert_eq!(used, 1024 * 1024);
-    let used = store.record_quota_bytes(100, 3600, 1_000_000 + 3600).unwrap();
-    assert_eq!(used, 100, "a byte past the window end must start a new window");
+    let used = store
+        .record_quota_bytes(100, 3600, 1_000_000 + 3600)
+        .unwrap();
+    assert_eq!(
+        used, 100,
+        "a byte past the window end must start a new window"
+    );
     let (start, _) = store.get_quota_state().unwrap();
     assert_eq!(start, Some(1_000_000 + 3600));
 }
@@ -140,9 +156,19 @@ async fn quota_reached_pauses_the_download_mid_file() {
     // Between 1 MB (the quota) and 1 MB + one in-flight chunk per
     // segment — the pause lands on chunk boundaries, never past
     // the file, and never before the quota.
-    assert!(row.downloaded_bytes >= 1024 * 1024, "paused too early: {}", row.downloaded_bytes);
-    assert!(row.downloaded_bytes < ONE_AND_HALF_MIB as i64, "quota did not pause the download");
-    assert!(row.quota_paused, "a quota pause must be marked quota_paused");
+    assert!(
+        row.downloaded_bytes >= 1024 * 1024,
+        "paused too early: {}",
+        row.downloaded_bytes
+    );
+    assert!(
+        row.downloaded_bytes < ONE_AND_HALF_MIB as i64,
+        "quota did not pause the download"
+    );
+    assert!(
+        row.quota_paused,
+        "a quota pause must be marked quota_paused"
+    );
     // The status names the quota: used >= limit, window end set.
     let status = mgr.get_quota_status().unwrap();
     assert!(status.enabled);
@@ -157,7 +183,10 @@ async fn quota_reached_pauses_the_download_mid_file() {
     // A manual start while the quota is reached is refused with
     // the resume time in the message — the download stays paused.
     let err = mgr.start_download(&id).await.unwrap_err();
-    assert!(err.to_string().contains("quota"), "expected a quota error, got: {err}");
+    assert!(
+        err.to_string().contains("quota"),
+        "expected a quota error, got: {err}"
+    );
     assert!(wait_for_status(&mgr, &id, "paused", 2).await);
 }
 
@@ -182,11 +211,17 @@ async fn quota_reached_stops_the_queue_and_leaves_the_rest_queued() {
     // Give the runner a moment to meet the second file and stop.
     tokio::time::sleep(Duration::from_millis(800)).await;
     let second_row = mgr.get_download(&second).unwrap().unwrap();
-    assert_eq!(second_row.status, "queued", "the queue must stop at the quota, not start the next file");
+    assert_eq!(
+        second_row.status, "queued",
+        "the queue must stop at the quota, not start the next file"
+    );
     assert!(!second_row.quota_paused);
     let queues = mgr.list_queues().await.unwrap();
     let q = queues.iter().find(|q| q.id == queue.id).unwrap();
-    assert!(!q.running, "the queue run must have ended when the quota was reached");
+    assert!(
+        !q.running,
+        "the queue run must have ended when the quota was reached"
+    );
 }
 
 #[tokio::test]
@@ -239,8 +274,14 @@ async fn quota_window_rollover_resumes_the_paused_download() {
     assert!(rolled, "the window should have rolled over");
     assert!(wait_for_status(&mgr, &id, "complete", 30).await);
     let row = mgr.get_download(&id).unwrap().unwrap();
-    assert_eq!(std::fs::read(&row.save_path).unwrap(), payload(ONE_AND_HALF_MIB));
-    assert!(!row.quota_paused, "a resumed download is no longer quota-paused");
+    assert_eq!(
+        std::fs::read(&row.save_path).unwrap(),
+        payload(ONE_AND_HALF_MIB)
+    );
+    assert!(
+        !row.quota_paused,
+        "a resumed download is no longer quota-paused"
+    );
     // The usage in the NEW window is only the bytes downloaded
     // after the rollover (the remainder of the file).
     let status = mgr.get_quota_status().unwrap();
@@ -296,7 +337,10 @@ async fn quota_reset_resumes_now_and_starts_a_fresh_window() {
     assert!(status.window_start_unix.is_some());
     assert!(wait_for_status(&mgr, &id, "complete", 30).await);
     let row = mgr.get_download(&id).unwrap().unwrap();
-    assert_eq!(std::fs::read(&row.save_path).unwrap(), payload(ONE_AND_HALF_MIB));
+    assert_eq!(
+        std::fs::read(&row.save_path).unwrap(),
+        payload(ONE_AND_HALF_MIB)
+    );
 }
 
 #[tokio::test]
@@ -319,7 +363,10 @@ async fn quota_window_survives_a_restart() {
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mgr2 = DownloadManager::new(store, 4);
     let status = mgr2.get_quota_status().unwrap();
-    assert_eq!(status.used_bytes, used_before, "a restart must not reset the window usage");
+    assert_eq!(
+        status.used_bytes, used_before,
+        "a restart must not reset the window usage"
+    );
     assert_eq!(status.window_start_unix, window_before);
     assert!(status.reached);
     // A new download still cannot start after the restart…
@@ -330,7 +377,10 @@ async fn quota_window_survives_a_restart() {
     mgr2.reset_quota().await.unwrap();
     assert!(wait_for_status(&mgr2, &id, "complete", 30).await);
     let row = mgr2.get_download(&id).unwrap().unwrap();
-    assert_eq!(std::fs::read(&row.save_path).unwrap(), payload(ONE_AND_HALF_MIB));
+    assert_eq!(
+        std::fs::read(&row.save_path).unwrap(),
+        payload(ONE_AND_HALF_MIB)
+    );
 }
 
 #[tokio::test]
@@ -351,12 +401,18 @@ async fn user_paused_download_is_never_auto_resumed_by_a_rollover() {
     mgr.pause_download(&id).await.unwrap();
     assert!(wait_for_status(&mgr, &id, "paused", 10).await);
     let row = mgr.get_download(&id).unwrap().unwrap();
-    assert!(!row.quota_paused, "a user's pause must not be marked quota-paused");
+    assert!(
+        !row.quota_paused,
+        "a user's pause must not be marked quota-paused"
+    );
     assert!(row.downloaded_bytes < 1024 * 1024);
     // A rollover (fake clock) resets the expired window's usage —
     // but it must leave this download paused: only quota-paused
     // downloads are auto-resumed, never one the user paused.
-    assert!(mgr.check_quota_rollover_at(now_unix() + 3601).await.unwrap());
+    assert!(mgr
+        .check_quota_rollover_at(now_unix() + 3601)
+        .await
+        .unwrap());
     assert_eq!(mgr.get_quota_status().unwrap().used_bytes, 0);
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(mgr.get_download(&id).unwrap().unwrap().status, "paused");
@@ -375,13 +431,19 @@ async fn per_download_cap_throttles_one_download() {
     let mgr = test_mgr(&dir);
     let id = add_named(&mgr, &server.url, &dir, "capped.bin").await;
     mgr.set_download_speed_limit(&id, Some(32)).unwrap();
-    assert_eq!(mgr.get_download(&id).unwrap().unwrap().speed_limit_kbps, Some(32));
+    assert_eq!(
+        mgr.get_download(&id).unwrap().unwrap().speed_limit_kbps,
+        Some(32)
+    );
     let start = Instant::now();
     mgr.start_download(&id).await.unwrap();
     assert!(wait_for_status(&mgr, &id, "complete", 40).await);
     let elapsed = start.elapsed();
     // 256 KiB at 32 KiB/s: ~7 s after the 32 KiB burst.
-    assert!(elapsed >= Duration::from_secs(5), "cap did not throttle: {elapsed:?}");
+    assert!(
+        elapsed >= Duration::from_secs(5),
+        "cap did not throttle: {elapsed:?}"
+    );
     assert!(elapsed < Duration::from_secs(25), "elapsed: {elapsed:?}");
     let row = mgr.get_download(&id).unwrap().unwrap();
     assert_eq!(std::fs::read(&row.save_path).unwrap(), payload(256 * 1024));
@@ -398,11 +460,17 @@ async fn per_download_cap_zero_means_global_cap_only() {
     let mgr = test_mgr(&dir);
     let id = add_named(&mgr, &server.url, &dir, "uncapped.bin").await;
     mgr.set_download_speed_limit(&id, Some(0)).unwrap();
-    assert_eq!(mgr.get_download(&id).unwrap().unwrap().speed_limit_kbps, None);
+    assert_eq!(
+        mgr.get_download(&id).unwrap().unwrap().speed_limit_kbps,
+        None
+    );
     let start = Instant::now();
     mgr.start_download(&id).await.unwrap();
     assert!(wait_for_status(&mgr, &id, "complete", 30).await);
-    assert!(start.elapsed() < Duration::from_secs(5), "cap 0 must not throttle");
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "cap 0 must not throttle"
+    );
 }
 
 #[tokio::test]
@@ -422,7 +490,10 @@ async fn per_download_cap_and_global_cap_compose_min_wins() {
     mgr.start_download(&id).await.unwrap();
     assert!(wait_for_status(&mgr, &id, "complete", 40).await);
     let elapsed = start.elapsed();
-    assert!(elapsed >= Duration::from_secs(5), "global cap did not bind: {elapsed:?}");
+    assert!(
+        elapsed >= Duration::from_secs(5),
+        "global cap did not bind: {elapsed:?}"
+    );
     assert!(elapsed < Duration::from_secs(25), "elapsed: {elapsed:?}");
 
     // Case 2: the per-download cap binds (128 KiB/s global, 32 per-download).
@@ -440,7 +511,10 @@ async fn per_download_cap_and_global_cap_compose_min_wins() {
     mgr2.start_download(&id2).await.unwrap();
     assert!(wait_for_status(&mgr2, &id2, "complete", 40).await);
     let elapsed = start.elapsed();
-    assert!(elapsed >= Duration::from_secs(5), "per-download cap did not bind: {elapsed:?}");
+    assert!(
+        elapsed >= Duration::from_secs(5),
+        "per-download cap did not bind: {elapsed:?}"
+    );
     assert!(elapsed < Duration::from_secs(25), "elapsed: {elapsed:?}");
     let row = mgr2.get_download(&id2).unwrap().unwrap();
     assert_eq!(std::fs::read(&row.save_path).unwrap(), payload(256 * 1024));
@@ -463,9 +537,15 @@ async fn per_download_cap_throttles_one_download_while_another_runs_at_the_globa
     mgr.start_download(&free).await.unwrap();
     // The uncapped download has the rest of the global bucket
     // (~48 KiB/s) and finishes well before the 16 KiB/s one.
-    assert!(wait_for_status(&mgr, &free, "complete", 15).await, "uncapped download did not finish first");
+    assert!(
+        wait_for_status(&mgr, &free, "complete", 15).await,
+        "uncapped download did not finish first"
+    );
     let capped_row = mgr.get_download(&capped).unwrap().unwrap();
-    assert_eq!(capped_row.status, "downloading", "the capped download must still be running when the other finishes");
+    assert_eq!(
+        capped_row.status, "downloading",
+        "the capped download must still be running when the other finishes"
+    );
     assert!(wait_for_status(&mgr, &capped, "complete", 30).await);
     for (id, name) in [(&capped, "capped.bin"), (&free, "free.bin")] {
         let row = mgr.get_download(id).unwrap().unwrap();
@@ -494,7 +574,10 @@ async fn per_download_cap_can_be_cleared_live_mid_download() {
     mgr.set_download_speed_limit(&id, Some(0)).unwrap();
     assert!(wait_for_status(&mgr, &id, "complete", 30).await);
     let elapsed = start.elapsed();
-    assert!(elapsed < Duration::from_secs(12), "clearing the cap did not speed the download up: {elapsed:?}");
+    assert!(
+        elapsed < Duration::from_secs(12),
+        "clearing the cap did not speed the download up: {elapsed:?}"
+    );
     let row = mgr.get_download(&id).unwrap().unwrap();
     assert_eq!(std::fs::read(&row.save_path).unwrap(), payload(256 * 1024));
 }
@@ -509,7 +592,9 @@ async fn per_download_cap_validation_rejects_absurd_and_negative_values() {
     // Same bound as the global cap (BUG-008): rejected, not clamped.
     assert!(mgr.set_download_speed_limit(&id, Some(10_000_001)).is_err());
     assert!(mgr.set_download_speed_limit(&id, Some(10_000_000)).is_ok());
-    assert!(mgr.set_download_speed_limit("no-such-id", Some(32)).is_err());
+    assert!(mgr
+        .set_download_speed_limit("no-such-id", Some(32))
+        .is_err());
     let row = mgr.get_download(&id).unwrap().unwrap();
     assert_eq!(row.speed_limit_kbps, Some(10_000_000));
 }
@@ -517,11 +602,24 @@ async fn per_download_cap_validation_rejects_absurd_and_negative_values() {
 // -- sync counts toward the quota ------------------------------------------
 
 /// A periodic queue holding one finished 512 KiB file.
-async fn sync_setup(mgr: &Arc<DownloadManager>, server_url: &str, dir: &std::path::Path) -> (String, String) {
+async fn sync_setup(
+    mgr: &Arc<DownloadManager>,
+    server_url: &str,
+    dir: &std::path::Path,
+) -> (String, String) {
     let queue = mgr.create_queue("Sync").unwrap();
-    mgr.update_queue(&queue.id, "periodic", None, None, false, "none", None, Some(30))
-        .await
-        .unwrap();
+    mgr.update_queue(
+        &queue.id,
+        "periodic",
+        None,
+        None,
+        false,
+        "none",
+        None,
+        Some(30),
+    )
+    .await
+    .unwrap();
     let (id, _) = mgr
         .add_download(
             server_url,
@@ -553,7 +651,11 @@ async fn sync_redownload_counts_toward_the_quota() {
     // Exactly the re-downloaded bytes — the HEAD probe counted
     // nothing, and the file was re-downloaded whole (513 KiB).
     let status = mgr.get_quota_status().unwrap();
-    assert_eq!(status.used_bytes, 513 * 1024, "sync re-download bytes must count, probe bytes must not");
+    assert_eq!(
+        status.used_bytes,
+        513 * 1024,
+        "sync re-download bytes must count, probe bytes must not"
+    );
 }
 
 #[tokio::test]
@@ -574,11 +676,19 @@ async fn sync_redownload_paused_by_quota_fails_fast_not_after_120s() {
     // The re-download pauses at the 1 MB quota; the sync reports
     // it failed (and retries at the next sync) instead of waiting
     // out the 120 s re-download timeout.
-    assert!(start.elapsed() < Duration::from_secs(60), "sync must not wait out the 120 s timeout: {:?}", start.elapsed());
+    assert!(
+        start.elapsed() < Duration::from_secs(60),
+        "sync must not wait out the 120 s timeout: {:?}",
+        start.elapsed()
+    );
     assert_eq!(result.failed, 1);
     assert_eq!(result.files[0].status, "failed");
     assert!(
-        result.files[0].message.as_deref().unwrap_or("").contains("quota"),
+        result.files[0]
+            .message
+            .as_deref()
+            .unwrap_or("")
+            .contains("quota"),
         "failure must name the quota: {:?}",
         result.files[0].message
     );
@@ -637,7 +747,14 @@ fn pre_quota_database_migrates_quota_columns_and_state() {
     assert!(!row.quota_paused);
     // The migrated columns are usable at once.
     store.set_download_speed_limit("dl-1", Some(64)).unwrap();
-    assert_eq!(store.get_download("dl-1").unwrap().unwrap().speed_limit_kbps, Some(64));
+    assert_eq!(
+        store
+            .get_download("dl-1")
+            .unwrap()
+            .unwrap()
+            .speed_limit_kbps,
+        Some(64)
+    );
     store.set_quota_paused("dl-1", true).unwrap();
     assert!(store.get_download("dl-1").unwrap().unwrap().quota_paused);
 }

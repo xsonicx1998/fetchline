@@ -32,10 +32,14 @@ pub fn unprotect_secret(stored: &str) -> Result<String> {
     if let Some(rest) = stored.strip_prefix("dpapi:") {
         #[cfg(target_os = "windows")]
         {
-            let bytes = base64_decode(rest)
-                .ok_or_else(|| EngineError::InvalidState("Stored password is corrupt".to_string()))?;
-            let plain = dpapi::unprotect(&bytes)
-                .ok_or_else(|| EngineError::InvalidState("Windows could not unlock the stored password".to_string()))?;
+            let bytes = base64_decode(rest).ok_or_else(|| {
+                EngineError::InvalidState("Stored password is corrupt".to_string())
+            })?;
+            let plain = dpapi::unprotect(&bytes).ok_or_else(|| {
+                EngineError::InvalidState(
+                    "Windows could not unlock the stored password".to_string(),
+                )
+            })?;
             return String::from_utf8(plain)
                 .map_err(|_| EngineError::InvalidState("Stored password is corrupt".to_string()));
         }
@@ -43,7 +47,8 @@ pub fn unprotect_secret(stored: &str) -> Result<String> {
         {
             let _ = rest;
             return Err(EngineError::InvalidState(
-                "This password was protected with Windows DPAPI and cannot be read on this system".to_string(),
+                "This password was protected with Windows DPAPI and cannot be read on this system"
+                    .to_string(),
             ));
         }
     }
@@ -62,12 +67,24 @@ pub fn base64_encode(data: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
     for chunk in data.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         out.push(ALPHABET[(n >> 18) as usize & 63] as char);
         out.push(ALPHABET[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { ALPHABET[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { ALPHABET[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -143,8 +160,14 @@ mod dpapi {
     const UI_FORBIDDEN: u32 = 0x1;
 
     pub fn protect(plain: &[u8]) -> Option<Vec<u8>> {
-        let input = DataBlob { cb_data: plain.len() as u32, pb_data: plain.as_ptr() as *mut u8 };
-        let mut output = DataBlob { cb_data: 0, pb_data: std::ptr::null_mut() };
+        let input = DataBlob {
+            cb_data: plain.len() as u32,
+            pb_data: plain.as_ptr() as *mut u8,
+        };
+        let mut output = DataBlob {
+            cb_data: 0,
+            pb_data: std::ptr::null_mut(),
+        };
         let ok = unsafe {
             CryptProtectData(
                 &input,
@@ -159,14 +182,21 @@ mod dpapi {
         if ok == 0 || output.pb_data.is_null() {
             return None;
         }
-        let bytes = unsafe { std::slice::from_raw_parts(output.pb_data, output.cb_data as usize).to_vec() };
+        let bytes =
+            unsafe { std::slice::from_raw_parts(output.pb_data, output.cb_data as usize).to_vec() };
         unsafe { LocalFree(output.pb_data as *mut c_void) };
         Some(bytes)
     }
 
     pub fn unprotect(enc: &[u8]) -> Option<Vec<u8>> {
-        let input = DataBlob { cb_data: enc.len() as u32, pb_data: enc.as_ptr() as *mut u8 };
-        let mut output = DataBlob { cb_data: 0, pb_data: std::ptr::null_mut() };
+        let input = DataBlob {
+            cb_data: enc.len() as u32,
+            pb_data: enc.as_ptr() as *mut u8,
+        };
+        let mut output = DataBlob {
+            cb_data: 0,
+            pb_data: std::ptr::null_mut(),
+        };
         let ok = unsafe {
             CryptUnprotectData(
                 &input,
@@ -181,7 +211,8 @@ mod dpapi {
         if ok == 0 || output.pb_data.is_null() {
             return None;
         }
-        let bytes = unsafe { std::slice::from_raw_parts(output.pb_data, output.cb_data as usize).to_vec() };
+        let bytes =
+            unsafe { std::slice::from_raw_parts(output.pb_data, output.cb_data as usize).to_vec() };
         unsafe { LocalFree(output.pb_data as *mut c_void) };
         Some(bytes)
     }

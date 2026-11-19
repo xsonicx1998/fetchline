@@ -27,13 +27,14 @@ pub mod ntlm;
 pub mod options;
 pub mod probe;
 pub mod proxy;
-pub mod quota;
 pub mod queue;
+pub mod quota;
 pub mod secret;
 pub mod store;
 pub mod timeutil;
 pub mod update;
 pub mod video;
+pub mod ytdlp;
 
 pub use antivirus::{
     run_scan, test_scanner, validate_scan_timeout, ScanResult, DEFAULT_SCAN_TIMEOUT_SECS,
@@ -57,11 +58,9 @@ pub use manager::{
 pub use native_host::{HostMessage, HostReply};
 pub use ntlm::{ntlm_head, ntlm_request, NtlmBodyReader};
 pub use options::{
-    SiteLoginInput, SiteLoginRow, SoundEventRecord, SoundSetting, SoundSettingInput,
-    SOUND_EVENTS,
+    SiteLoginInput, SiteLoginRow, SoundEventRecord, SoundSetting, SoundSettingInput, SOUND_EVENTS,
 };
 pub use probe::probe_with_auth;
-pub use video::{DetectedVideo, VideoVariantInput};
 pub use probe::{probe, ProbeInfo};
 pub use proxy::{
     basic_proxy_auth_header, offered_proxy_auth_schemes, proxy_auth_not_offered_error,
@@ -71,10 +70,12 @@ pub use proxy::{
 };
 pub use queue::PendingAction;
 pub use quota::{QuotaGate, QuotaStatus, QUOTA_MB_BYTES};
-pub use store::{CategoryRow, DownloadRow, HistoryRow, PendingLinkRow, QueueRow, SegmentRow, Settings, Store};
+pub use store::{
+    CategoryRow, DownloadRow, HistoryRow, PendingLinkRow, QueueRow, SegmentRow, Settings, Store,
+};
 pub use update::{
     compare_versions, fetch_manifest, is_newer, parse_manifest, parse_version,
-    result_from_manifest, weekly_check_due, UpdateCheckResult, UpdateManifest,
-    CURRENT_VERSION, DEFAULT_UPDATE_URL, UPDATE_CHECK_INTERVAL_SECS, UPDATER_CONFIGURED,
-    MAX_MANIFEST_BYTES,
+    result_from_manifest, weekly_check_due, UpdateCheckResult, UpdateManifest, CURRENT_VERSION,
+    DEFAULT_UPDATE_URL, MAX_MANIFEST_BYTES, UPDATER_CONFIGURED, UPDATE_CHECK_INTERVAL_SECS,
 };
+pub use video::{DetectedVideo, VideoVariantInput};

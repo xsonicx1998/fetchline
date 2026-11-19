@@ -38,26 +38,25 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex as AsyncMutex};
 use tokio::task::JoinSet;
 
+use crate::antivirus::{run_scan, test_scanner, ScanResult, SCAN_INFECTED};
 use crate::clipboard::{extract_download_link, ClipboardMonitor, ClipboardOffer};
 use crate::error::{error_chain_text, EngineError, Result};
-use crate::antivirus::{run_scan, test_scanner, ScanResult, SCAN_INFECTED};
 use crate::grabber::{
-    is_page_url, robots_disallows, same_host, type_matches, validate_grabber_input,
-    GrabberFilters, GrabberProjectRow, MatchedFile, MAIN_QUEUE_ID, MAX_FILE_ATTEMPTS,
-    POLITE_DELAY,
+    is_page_url, robots_disallows, same_host, type_matches, validate_grabber_input, GrabberFilters,
+    GrabberProjectRow, MatchedFile, MAIN_QUEUE_ID, MAX_FILE_ATTEMPTS, POLITE_DELAY,
 };
 use crate::limiter::RateLimiter;
 use crate::links::{classify_kind, extract_links, filename_from_link_url, LinkKind, PageLink};
-use crate::options::{
-    effective_completion_action, SiteLoginInput, SiteLoginRow, SoundEventRecord,
-    SoundSetting, SoundSettingInput,
-};
 use crate::native_host::{cookies_from_json, cookies_to_header};
+use crate::options::{
+    effective_completion_action, SiteLoginInput, SiteLoginRow, SoundEventRecord, SoundSetting,
+    SoundSettingInput,
+};
 use crate::probe::{probe_with_cookies, probe_with_proxy, ProbeInfo};
 use crate::proxy::{
     basic_proxy_auth_header, build_client, build_segment_client, build_tail_segment_client,
-    offered_proxy_auth_schemes, proxy_auth_order, resolve_proxy_auth, ProxyAuthScheme,
-    ProxyConfig, ProxyConfigInput, ProxyConfigRow, PROXY_AUTH_BASIC,
+    offered_proxy_auth_schemes, proxy_auth_order, resolve_proxy_auth, ProxyAuthScheme, ProxyConfig,
+    ProxyConfigInput, ProxyConfigRow, PROXY_AUTH_BASIC,
 };
 use crate::queue::PendingAction;
 use crate::quota::{window_end_unix, window_expired, QuotaGate, QuotaStatus, QUOTA_MB_BYTES};
@@ -65,9 +64,7 @@ use crate::store::{
     CategoryRow, DownloadRow, HistoryRow, PendingLinkRow, QueueRow, SegmentRow, Settings, Store,
 };
 use crate::timeutil::{now_unix, parse_iso_to_unix, unix_to_iso};
-use crate::update::{
-    fetch_manifest, result_from_manifest, weekly_check_due, UpdateCheckResult,
-};
+use crate::update::{fetch_manifest, result_from_manifest, weekly_check_due, UpdateCheckResult};
 
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(1);
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
@@ -594,6 +591,20 @@ pub struct DownloadManager {
     /// cancelled — a pause keeps it, so pause/resume in one
     /// session keeps working.
     cookies: StdMutex<HashMap<String, String>>,
+    /// Round 78 — per-download request headers (User-Agent /
+    /// Referer from yt-dlp's `http_headers`) for platform
+    /// downloads, keyed by download id. Same lifecycle as the
+    /// cookies map: written when the download is created (or
+    /// confirmed from a resolved pending link), read by the probe
+    /// and by every segment request, removed when the download
+    /// reaches a terminal status, kept on pause (the headers are
+    /// still needed on resume).
+    download_headers: StdMutex<HashMap<String, crate::probe::RequestHeaders>>,
+    /// Round 78 — download ids that already had one automatic
+    /// re-resolve this session after a 403/410. A re-resolve
+    /// happens at most once per session per download, so a
+    /// permanently-dead signed URL fails instead of looping.
+    reresolved: StdMutex<HashSet<String>>,
     /// Clipboard monitoring (Round 52): the hash of the last text
     /// seen and the URLs already offered or dismissed, so the same
     /// link is never offered twice. Pure logic — no clipboard
@@ -651,13 +662,14 @@ impl DownloadManager {
         // Round 55: the segment client has no total timeout (see
         // `build_segment_client`); a fallback plain client is the
         // same for both when the configured build fails.
-        let segment_client = build_segment_client(None, Settings::default().connection_timeout_secs as u64)
-            .unwrap_or_else(|_| {
-                Client::builder()
-                    .user_agent("Fetchline/0.1")
-                    .build()
-                    .expect("reqwest client builds")
-            });
+        let segment_client =
+            build_segment_client(None, Settings::default().connection_timeout_secs as u64)
+                .unwrap_or_else(|_| {
+                    Client::builder()
+                        .user_agent("Fetchline/0.1")
+                        .build()
+                        .expect("reqwest client builds")
+                });
         // Round 72 (C): the tail client (20 s connect timeout) —
         // same fallback shape as the segment client.
         let tail_segment_client = build_tail_segment_client(None).unwrap_or_else(|_| {
@@ -686,6 +698,8 @@ impl DownloadManager {
             action_events,
             sound_events: Arc::new(StdMutex::new(Vec::new())),
             cookies: StdMutex::new(HashMap::new()),
+            download_headers: StdMutex::new(HashMap::new()),
+            reresolved: StdMutex::new(HashSet::new()),
             clipboard: StdMutex::new(ClipboardMonitor::new()),
             update_check_running: AtomicBool::new(false),
             update_events,
@@ -806,7 +820,10 @@ impl DownloadManager {
             // BUG-008 defence in depth: the store rejects absurd caps,
             // but the multiply must never overflow even if a stored
             // value somehow got past validation.
-            settings.speed_limit_kbps.map(|k| (k.max(0) as u64).saturating_mul(1024)).unwrap_or(0),
+            settings
+                .speed_limit_kbps
+                .map(|k| (k.max(0) as u64).saturating_mul(1024))
+                .unwrap_or(0),
         );
         let proxy = self.store.get_active_proxy()?;
         let client = build_client(proxy.as_ref(), settings.connection_timeout_secs as u64)?;
@@ -887,7 +904,11 @@ impl DownloadManager {
     pub fn get_quota_status_at(&self, now: i64) -> Result<QuotaStatus> {
         let settings = self.store.get_settings()?;
         let (start, used) = self.store.get_quota_state()?;
-        let limit = match (settings.quota_enabled, settings.quota_mb, settings.quota_hours) {
+        let limit = match (
+            settings.quota_enabled,
+            settings.quota_mb,
+            settings.quota_hours,
+        ) {
             (true, Some(mb), Some(_)) => Some((mb as u64).saturating_mul(QUOTA_MB_BYTES)),
             _ => None,
         };
@@ -897,9 +918,7 @@ impl DownloadManager {
             None
         };
         let reached = match limit {
-            Some(l) if !window_expired(start, window_hours.unwrap_or(0), now) => {
-                used as u64 >= l
-            }
+            Some(l) if !window_expired(start, window_hours.unwrap_or(0), now) => used as u64 >= l,
             _ => false,
         };
         Ok(QuotaStatus {
@@ -1077,9 +1096,7 @@ impl DownloadManager {
     pub async fn check_for_updates_from(&self, url: &str) -> Result<UpdateCheckResult> {
         let outcome = fetch_manifest(&self.client(), url).await;
         let now = now_unix();
-        let _ = self
-            .store
-            .record_update_check(&unix_to_iso(now));
+        let _ = self.store.record_update_check(&unix_to_iso(now));
         match outcome {
             Ok(manifest) => Ok(result_from_manifest(&manifest, url.trim(), now)),
             Err(e) => Err(e),
@@ -1130,10 +1147,7 @@ impl DownloadManager {
         if !self.weekly_update_check_due_at(now).unwrap_or(false) {
             return;
         }
-        if self
-            .update_check_running
-            .swap(true, Ordering::SeqCst)
-        {
+        if self.update_check_running.swap(true, Ordering::SeqCst) {
             return;
         }
         let this = Arc::clone(self);
@@ -1159,6 +1173,13 @@ impl DownloadManager {
     /// from the store, at the moment of use.
     fn active_proxy(&self) -> Option<ProxyConfig> {
         self.store.get_active_proxy().ok().flatten()
+    }
+
+    /// Round 78 — the enabled proxy config, if one is configured,
+    /// for out-of-band downloads (the yt-dlp updater) that do not
+    /// go through the segment client.
+    pub fn proxy_config(&self) -> Option<ProxyConfig> {
+        self.active_proxy()
     }
 
     /// Probe a URL with the saved site login for its host, if one
@@ -1229,7 +1250,9 @@ impl DownloadManager {
     /// paused cookie download resumes with its cookies instead of
     /// failing the re-probe with 401.
     async fn probe_url_with_cookies(&self, url: &str, cookies: Option<&str>) -> Result<ProbeInfo> {
-        let is_ftp = reqwest::Url::parse(url).map(|u| u.scheme() == "ftp").unwrap_or(false);
+        let is_ftp = reqwest::Url::parse(url)
+            .map(|u| u.scheme() == "ftp")
+            .unwrap_or(false);
         match cookies {
             Some(header) if !header.is_empty() && !is_ftp => {
                 // Round 73 — same fast retries as probe_url
@@ -1257,6 +1280,87 @@ impl DownloadManager {
             }
             _ => self.probe_url(url).await,
         }
+    }
+
+    /// Probe with per-download headers (Round 78): when `headers`
+    /// carries a User-Agent or Referer, the probe sends them
+    /// (yt-dlp's `http_headers` for a resolved video — the stream
+    /// host expects them, and the global "Fetchline/0.1" UA is
+    /// answered with 403). Without headers this is exactly
+    /// `probe_url_with_cookies`, with the same fast retries.
+    /// FTP has no headers to send and falls back to the cookie
+    /// probe.
+    async fn probe_url_with_headers(
+        &self,
+        url: &str,
+        cookies: Option<&str>,
+        headers: Option<&crate::probe::RequestHeaders>,
+    ) -> Result<ProbeInfo> {
+        let Some(headers) = headers.filter(|h| !h.is_empty()) else {
+            return self.probe_url_with_cookies(url, cookies).await;
+        };
+        let is_ftp = reqwest::Url::parse(url)
+            .map(|u| u.scheme() == "ftp")
+            .unwrap_or(false);
+        if is_ftp {
+            return self.probe_url_with_cookies(url, cookies).await;
+        }
+        let proxy = self.active_proxy();
+        let mut attempt: u32 = 0;
+        loop {
+            attempt += 1;
+            match crate::probe::probe_with_headers(
+                &self.client(),
+                url,
+                cookies,
+                Some(headers),
+                proxy.as_ref(),
+            )
+            .await
+            {
+                Ok(info) => return Ok(info),
+                Err(e) => {
+                    if is_probe_retryable(&e) && attempt < PROBE_MAX_ATTEMPTS {
+                        tokio::time::sleep(PROBE_RETRY_BACKOFFS[(attempt - 1) as usize]).await;
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    /// Round 78 — parse a pending row's stored headers JSON into
+    /// a `RequestHeaders`. The map was written by the host with
+    /// Cookie keys already stripped; a `cookie` / `Cookie` key
+    /// that somehow survived is dropped here too (defence in
+    /// depth — headers must never carry a session past the cookie
+    /// validation).
+    pub fn headers_from_json(json: Option<&str>) -> crate::probe::RequestHeaders {
+        let mut out = crate::probe::RequestHeaders::default();
+        let Some(json) = json else {
+            return out;
+        };
+        let Ok(map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(json)
+        else {
+            return out;
+        };
+        for (k, v) in map {
+            let Some(s) = v.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            match k.to_ascii_lowercase().as_str() {
+                "user-agent" => out.user_agent = Some(s.to_string()),
+                "referer" => out.referer = Some(s.to_string()),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Round 78 — a download's per-request headers, if any.
+    fn headers_for(&self, id: &str) -> Option<crate::probe::RequestHeaders> {
+        self.download_headers.lock().unwrap().get(id).cloned()
     }
 
     pub fn list_site_logins(&self) -> Result<Vec<SiteLoginRow>> {
@@ -1337,10 +1441,11 @@ impl DownloadManager {
     /// `test_sound_file`). On this Linux VM this is an error:
     /// playback is Windows-only, like shutdown/hibernate.
     pub fn play_sound(&self, event: &str) -> Result<String> {
-        let file = self
-            .store
-            .get_sound_file(event)?
-            .ok_or_else(|| EngineError::InvalidState(format!("No sound is set for {event} — pick a WAV file and turn the event on first")))?;
+        let file = self.store.get_sound_file(event)?.ok_or_else(|| {
+            EngineError::InvalidState(format!(
+                "No sound is set for {event} — pick a WAV file and turn the event on first"
+            ))
+        })?;
         play_wav_file(&file)
     }
 
@@ -1435,7 +1540,10 @@ impl DownloadManager {
                 use_for: input.use_for.clone(),
                 bypass: input.bypass.clone(),
                 auth: crate::proxy::resolve_proxy_auth(
-                    input.auth.as_deref().unwrap_or(crate::proxy::PROXY_AUTH_NEGOTIATE_AUTO),
+                    input
+                        .auth
+                        .as_deref()
+                        .unwrap_or(crate::proxy::PROXY_AUTH_NEGOTIATE_AUTO),
                 )
                 .to_string(),
             };
@@ -1462,7 +1570,10 @@ impl DownloadManager {
             use_for: input.use_for.clone(),
             bypass: input.bypass.clone(),
             auth: crate::proxy::resolve_proxy_auth(
-                input.auth.as_deref().unwrap_or(crate::proxy::PROXY_AUTH_NEGOTIATE_AUTO),
+                input
+                    .auth
+                    .as_deref()
+                    .unwrap_or(crate::proxy::PROXY_AUTH_NEGOTIATE_AUTO),
             )
             .to_string(),
         };
@@ -1509,7 +1620,8 @@ impl DownloadManager {
             // the next one in the order.
             if resolve_proxy_auth(&cfg.auth) == PROXY_AUTH_BASIC {
                 return Err(EngineError::InvalidState(
-                    "Proxy authentication failed (407) — check the proxy username and password".to_string(),
+                    "Proxy authentication failed (407) — check the proxy username and password"
+                        .to_string(),
                 ));
             }
             let offered = offered_proxy_auth_schemes(
@@ -1520,7 +1632,9 @@ impl DownloadManager {
             );
             let order = proxy_auth_order(&cfg.auth, &offered, cfg.has_basic_creds());
             if order.is_empty() {
-                return Err(crate::proxy::proxy_auth_not_offered_error(&cfg.auth, &offered));
+                return Err(crate::proxy::proxy_auth_not_offered_error(
+                    &cfg.auth, &offered,
+                ));
             }
             let mut last_err: Option<EngineError> = None;
             for auth_scheme in order {
@@ -1619,7 +1733,8 @@ impl DownloadManager {
             }
             return Err(last_err.unwrap_or_else(|| {
                 EngineError::InvalidState(
-                    "Proxy authentication failed (407) — check the proxy username and password".to_string(),
+                    "Proxy authentication failed (407) — check the proxy username and password"
+                        .to_string(),
                 )
             }));
         }
@@ -1681,6 +1796,62 @@ impl DownloadManager {
         queue_id: Option<String>,
         cookies: Option<String>,
     ) -> Result<(String, ProbeInfo)> {
+        self.add_download_with_cookies_and_headers(
+            url,
+            filename,
+            folder,
+            category_id,
+            queue_id,
+            cookies,
+            None,
+        )
+        .await
+    }
+
+    /// Add a download carrying per-request headers (Round 78):
+    /// the `User-Agent` / `Referer` yt-dlp recorded for a resolved
+    /// platform video. No browser cookies.
+    pub async fn add_download_with_headers(
+        self: &Arc<Self>,
+        url: &str,
+        filename: Option<String>,
+        folder: Option<String>,
+        category_id: Option<String>,
+        queue_id: Option<String>,
+        headers: Option<crate::probe::RequestHeaders>,
+    ) -> Result<(String, ProbeInfo)> {
+        self.add_download_with_cookies_and_headers(
+            url,
+            filename,
+            folder,
+            category_id,
+            queue_id,
+            None,
+            headers,
+        )
+        .await
+    }
+
+    /// Add a download carrying the browser's cookies for its URL
+    /// (S13 finish) AND per-request headers (Round 78): `cookies`
+    /// is the validated `Cookie` header value, or `None`;
+    /// `headers` is the `User-Agent` / `Referer` yt-dlp recorded
+    /// for a resolved platform video, or `None` for a plain
+    /// download. The headers are sent on the probe (for http(s) —
+    /// FTP cannot carry them, so an FTP link probes the plain
+    /// way) and kept in memory for this download's segment
+    /// requests; a restart drops them. Nothing is stored on disk:
+    /// the pending row that carried them is wiped by the drain.
+    pub async fn add_download_with_cookies_and_headers(
+        self: &Arc<Self>,
+        url: &str,
+        filename: Option<String>,
+        folder: Option<String>,
+        category_id: Option<String>,
+        queue_id: Option<String>,
+        cookies: Option<String>,
+        headers: Option<crate::probe::RequestHeaders>,
+    ) -> Result<(String, ProbeInfo)> {
         let settings = self.store.get_settings().unwrap_or_default();
         // BUG-011: sites in the excluded-sites list are refused before
         // any network request is made — no probe, no download.
@@ -1697,8 +1868,9 @@ impl DownloadManager {
         // credential is sent as Basic auth on the probe (S09) — a
         // login-gated file probes instead of failing with 401. FTP
         // cannot carry cookies, so an FTP link probes the plain way.
+        // Round 78: a resolved video's headers ride the same probe.
         let info = self
-            .probe_url_with_cookies(url, cookies.as_deref())
+            .probe_url_with_headers(url, cookies.as_deref(), headers.as_ref())
             .await?;
         let name = sanitize_filename(
             filename
@@ -1715,7 +1887,9 @@ impl DownloadManager {
         let category = match category_id {
             Some(c) if !c.trim().is_empty() => c,
             // BUG-011: auto-assign honours the file_types_auto list.
-            _ => self.store.category_for_extension_filtered(&ext, &settings.file_types_auto)?,
+            _ => self
+                .store
+                .category_for_extension_filtered(&ext, &settings.file_types_auto)?,
         };
         let folder = folder
             .filter(|f| !f.trim().is_empty())
@@ -1729,7 +1903,11 @@ impl DownloadManager {
             })
             .or_else(|| {
                 let f = settings.default_download_folder.trim().to_string();
-                if f.is_empty() { None } else { Some(f) }
+                if f.is_empty() {
+                    None
+                } else {
+                    Some(f)
+                }
             })
             .unwrap_or_else(|| default_downloads_dir().to_string_lossy().to_string());
         std::fs::create_dir_all(&folder)?;
@@ -1770,6 +1948,18 @@ impl DownloadManager {
         // terminal state removes them (see `run` / `cancel_download`).
         if let Some(header) = cookies {
             self.cookies.lock().unwrap().insert(id.clone(), header);
+        }
+        // Round 78 — per-request headers for this download's
+        // segment requests (User-Agent / Referer from yt-dlp).
+        // Same lifecycle as the cookies above: memory only, kept
+        // on pause, removed on a terminal status.
+        if let Some(headers) = headers {
+            if !headers.is_empty() {
+                self.download_headers
+                    .lock()
+                    .unwrap()
+                    .insert(id.clone(), headers);
+            }
         }
         let ranges = initial_ranges(&info);
         self.store.create_segments(&id, &ranges)?;
@@ -1834,7 +2024,9 @@ impl DownloadManager {
         if !settings.browser_integration {
             for row in pending {
                 let err = "Browser integration is turned off in Fetchline settings".to_string();
-                let _ = self.store.mark_pending_link(&row.id, "rejected", None, Some(&err));
+                let _ = self
+                    .store
+                    .mark_pending_link(&row.id, "rejected", None, Some(&err));
                 summary.rejected.push((row.id, err));
             }
             return Ok(summary);
@@ -1847,7 +2039,9 @@ impl DownloadManager {
             if let Some(host) = url_host(&row.url) {
                 if crate::store::site_is_excluded(&host, &settings.excluded_sites) {
                     let err = format!("This site is excluded in Settings (excluded sites): {host}");
-                    let _ = self.store.mark_pending_link(&row.id, "rejected", None, Some(&err));
+                    let _ = self
+                        .store
+                        .mark_pending_link(&row.id, "rejected", None, Some(&err));
                     summary.rejected.push((row.id, err));
                     continue;
                 }
@@ -1875,19 +2069,21 @@ impl DownloadManager {
                 .await
             {
                 Ok((id, _)) => {
-                    let _ = self.store.mark_pending_link(&row.id, "accepted", Some(&id), None);
+                    let _ = self
+                        .store
+                        .mark_pending_link(&row.id, "accepted", Some(&id), None);
                     if settings.browser_start_drained {
                         if let Err(e) = self.start_download(&id).await {
-                            summary
-                                .start_failed
-                                .push((row.id.clone(), e.to_string()));
+                            summary.start_failed.push((row.id.clone(), e.to_string()));
                         }
                     }
                     summary.accepted.push((row.id, id));
                 }
                 Err(e) => {
                     let err = e.to_string();
-                    let _ = self.store.mark_pending_link(&row.id, "rejected", None, Some(&err));
+                    let _ = self
+                        .store
+                        .mark_pending_link(&row.id, "rejected", None, Some(&err));
                     summary.rejected.push((row.id, err));
                 }
             }
@@ -1943,12 +2139,29 @@ impl DownloadManager {
         url: &str,
         cookies_json: Option<&str>,
     ) -> Result<ProbeInfo> {
-        let header = cookies_json
-            .and_then(|json| cookies_to_header(&cookies_from_json(json)).ok());
+        let header = cookies_json.and_then(|json| cookies_to_header(&cookies_from_json(json)).ok());
         match header {
             Some(h) if !h.is_empty() => self.probe_url_with_cookies(url, Some(&h)).await,
             _ => self.probe_url(url).await,
         }
+    }
+
+    /// Round 78 — probe for the Add URL dialog with the resolved
+    /// video's headers (User-Agent / Referer from yt-dlp's
+    /// `http_headers`): the stream host expects them, and the
+    /// global "Fetchline/0.1" UA is answered with 403. `headers`
+    /// is the row's stored headers JSON (or the dialog's); `None`
+    /// behaves exactly like `probe_url_for_capture`.
+    pub async fn probe_url_for_capture_with_headers(
+        &self,
+        url: &str,
+        cookies_json: Option<&str>,
+        headers_json: Option<&str>,
+    ) -> Result<ProbeInfo> {
+        let header = cookies_json.and_then(|json| cookies_to_header(&cookies_from_json(json)).ok());
+        let headers = Self::headers_from_json(headers_json);
+        self.probe_url_with_headers(url, header.as_deref(), Some(&headers))
+            .await
     }
 
     /// Confirm one pending browser/video capture through the REAL
@@ -2009,26 +2222,95 @@ impl DownloadManager {
             .as_deref()
             .map(|json| cookies_to_header(&cookies_from_json(json)).ok())
             .flatten();
-        match self
-            .add_download_with_cookies(
+        // Round 78 — a resolved platform video carries its own
+        // filename (sanitized video title), headers, source URL,
+        // format id, DASH audio URL and fragmented flag. The
+        // dialog's filename wins when the user typed one; the
+        // row's filename is the fallback — the URL itself has no
+        // usable name (a googlevideo URL would otherwise become
+        // "videoplayback.mp4").
+        let resolved_filename = filename
+            .filter(|f| !f.trim().is_empty())
+            .or_else(|| row.filename.clone());
+        let headers = Self::headers_from_json(row.headers.as_deref());
+        let headers = if headers.is_empty() {
+            None
+        } else {
+            Some(headers)
+        };
+        // Round 78 — a (B) fragmented download is created
+        // without a probe or segments: yt-dlp downloads the
+        // manifest format itself, and the manifest URL is not a
+        // file to probe.
+        let add = if row.fragmented {
+            match self
+                .add_direct_ytdlp_download(
+                    &row.url,
+                    resolved_filename,
+                    folder,
+                    category_id,
+                    queue_id,
+                )
+                .await
+            {
+                Ok(download_id) => Ok((
+                    download_id,
+                    ProbeInfo {
+                        size: None,
+                        accept_ranges: false,
+                        etag: None,
+                        last_modified: None,
+                        filename: row.filename.clone(),
+                        final_url: row.url.clone(),
+                    },
+                )),
+                Err(e) => Err(e),
+            }
+        } else {
+            self.add_download_with_cookies_and_headers(
                 &row.url,
-                filename,
+                resolved_filename,
                 folder,
                 category_id,
                 queue_id,
                 cookies,
+                headers,
             )
             .await
-        {
+        };
+        match add {
             Ok((download_id, probe)) => {
                 let _ = self
                     .store
                     .mark_pending_link(&row.id, "accepted", Some(&download_id), None);
+                // Round 78 — record the resolver metadata on the
+                // row: the page URL + format id are what a 403/410
+                // re-resolve needs; the (B) flag marks a direct
+                // yt-dlp download.
+                let _ = self.store.set_download_ytdlp_meta(
+                    &download_id,
+                    row.source_url.as_deref(),
+                    row.format_id.as_deref(),
+                    row.fragmented,
+                );
                 if let Some(kbps) = speed_limit_kbps.filter(|k| *k > 0) {
                     let _ = self.set_download_speed_limit(&download_id, Some(kbps));
                 }
                 if start_now {
-                    let _ = self.start_download(&download_id).await;
+                    // Round 78 — a DASH pair (video + audio) or a
+                    // (B) fragmented download does not start as a
+                    // plain segmented download: the pair starts
+                    // its two children + merge supervisor, the
+                    // (B) download starts the yt-dlp runner.
+                    if row.fragmented {
+                        let _ = self.start_direct_ytdlp(&download_id).await;
+                    } else if let Some(audio_url) =
+                        row.audio_url.as_deref().filter(|u| !u.trim().is_empty())
+                    {
+                        let _ = self.start_dash_download(&download_id, audio_url).await;
+                    } else {
+                        let _ = self.start_download(&download_id).await;
+                    }
                 }
                 Ok((download_id, probe))
             }
@@ -2131,7 +2413,8 @@ impl DownloadManager {
         // returned with an error, so the UI lists them as unselectable
         // exactly like dead links. The rest are probed in parallel.
         let is_excluded = |u: &str| {
-            url_host(u).is_some_and(|h| crate::store::site_is_excluded(&h, &settings.excluded_sites))
+            url_host(u)
+                .is_some_and(|h| crate::store::site_is_excluded(&h, &settings.excluded_sites))
         };
         let to_probe: Vec<String> = urls.iter().filter(|u| !is_excluded(u)).cloned().collect();
         // Probe the links in parallel: a page can hold dozens of them
@@ -2170,9 +2453,7 @@ impl DownloadManager {
                     filename,
                     kind,
                     size: None,
-                    error: Some(
-                        "This site is excluded in Settings (excluded sites)".to_string(),
-                    ),
+                    error: Some("This site is excluded in Settings (excluded sites)".to_string()),
                     already_exists,
                 });
                 continue;
@@ -2346,21 +2627,25 @@ impl DownloadManager {
         let proxy = self.active_proxy();
         let mut out = Vec::new();
         for variant in playlist.variants.iter().take(MAX_HLS_VARIANTS) {
-            let Ok(variant_url) = reqwest::Url::parse(&item.url)
-                .and_then(|base| base.join(&variant.uri))
+            let Ok(variant_url) =
+                reqwest::Url::parse(&item.url).and_then(|base| base.join(&variant.uri))
             else {
                 continue;
             };
             let variant_url = variant_url.to_string();
-            if out.iter().any(|v: &crate::video::DetectedVideo| v.url == variant_url) {
+            if out
+                .iter()
+                .any(|v: &crate::video::DetectedVideo| v.url == variant_url)
+            {
                 continue;
             }
             let auth = self.site_auth_for_url(&variant_url);
             let auth_ref = auth.as_ref().map(|(u, p)| (u.as_str(), p.as_str()));
-            let (size, error) = match probe_with_proxy(&client, &variant_url, auth_ref, proxy.as_ref()).await {
-                Ok(info) => (info.size, None),
-                Err(e) => (None, Some(e.to_string())),
-            };
+            let (size, error) =
+                match probe_with_proxy(&client, &variant_url, auth_ref, proxy.as_ref()).await {
+                    Ok(info) => (info.size, None),
+                    Err(e) => (None, Some(e.to_string())),
+                };
             // Liveness/encryption come from the variant's own media
             // playlist when it can be fetched; when it cannot, the
             // entry keeps the generic note and live=false — the
@@ -2465,7 +2750,15 @@ impl DownloadManager {
         on_complete_action: &str,
         on_complete_program: Option<&str>,
     ) -> Result<GrabberProjectRow> {
-        let filters = validate_grabber_input(name, start_url, types, depth, max_pages, mode, schedule_start_at)?;
+        let filters = validate_grabber_input(
+            name,
+            start_url,
+            types,
+            depth,
+            max_pages,
+            mode,
+            schedule_start_at,
+        )?;
         crate::queue::validate_completion_action(on_complete_action, on_complete_program)?;
         let queue_id = queue_id
             .map(str::trim)
@@ -2493,9 +2786,7 @@ impl DownloadManager {
             schedule_start_at.map(str::trim).filter(|s| !s.is_empty()),
             &queue_id,
             on_complete_action,
-            on_complete_program
-                .map(str::trim)
-                .filter(|p| !p.is_empty()),
+            on_complete_program.map(str::trim).filter(|p| !p.is_empty()),
         )
     }
 
@@ -2592,11 +2883,16 @@ impl DownloadManager {
             let settings = self.store.get_settings().unwrap_or_default();
             if let Some(host) = url_host(&project.start_url) {
                 if crate::store::site_is_excluded(&host, &settings.excluded_sites) {
-                    let msg = format!(
-                        "This site is excluded in Settings (excluded sites): {host}"
-                    );
+                    let msg = format!("This site is excluded in Settings (excluded sites): {host}");
                     let _ = self.store.update_grabber_project(
-                        &id, "failed", Some(&msg), 0, 0, 0, 0, &[],
+                        &id,
+                        "failed",
+                        Some(&msg),
+                        0,
+                        0,
+                        0,
+                        0,
+                        &[],
                     );
                     self.grabber_runs.lock().await.remove(&id);
                     return;
@@ -2616,17 +2912,17 @@ impl DownloadManager {
                     "The queue this project files into no longer exists: {} — pick another queue and run it again",
                     project.queue_id
                 );
-                let _ = self.store.update_grabber_project(
-                    &id, "failed", Some(&msg), 0, 0, 0, 0, &[],
-                );
+                let _ =
+                    self.store
+                        .update_grabber_project(&id, "failed", Some(&msg), 0, 0, 0, 0, &[]);
                 self.grabber_runs.lock().await.remove(&id);
                 return;
             }
             Err(e) => {
                 let msg = format!("Could not read the project's queue: {e}");
-                let _ = self.store.update_grabber_project(
-                    &id, "failed", Some(&msg), 0, 0, 0, 0, &[],
-                );
+                let _ =
+                    self.store
+                        .update_grabber_project(&id, "failed", Some(&msg), 0, 0, 0, 0, &[]);
                 self.grabber_runs.lock().await.remove(&id);
                 return;
             }
@@ -2638,7 +2934,12 @@ impl DownloadManager {
         let mut failed: i64 = 0;
         let mut last_completed_path: Option<String> = None;
         let mut seen_files: HashSet<String> = HashSet::new();
-        let save = |status: &str, error: Option<&str>, pages: i64, matched: &[MatchedFile], dl: i64, fl: i64| {
+        let save = |status: &str,
+                    error: Option<&str>,
+                    pages: i64,
+                    matched: &[MatchedFile],
+                    dl: i64,
+                    fl: i64| {
             let _ = self.store.update_grabber_project(
                 &id,
                 status,
@@ -2760,14 +3061,7 @@ impl DownloadManager {
                     });
                 }
             }
-            save(
-                "exploring",
-                None,
-                pages_explored,
-                &matched,
-                0,
-                0,
-            );
+            save("exploring", None, pages_explored, &matched, 0, 0);
         }
         if let Some(err) = crawl_error {
             save("failed", Some(&err), pages_explored, &matched, 0, 0);
@@ -2775,7 +3069,14 @@ impl DownloadManager {
             return;
         }
         if stop.load(Ordering::SeqCst) {
-            save("stopped", Some("Stopped by the user"), pages_explored, &matched, downloaded, failed);
+            save(
+                "stopped",
+                Some("Stopped by the user"),
+                pages_explored,
+                &matched,
+                downloaded,
+                failed,
+            );
             self.grabber_runs.lock().await.remove(&id);
             return;
         }
@@ -2826,7 +3127,14 @@ impl DownloadManager {
             );
         }
         if stop.load(Ordering::SeqCst) {
-            save("stopped", Some("Stopped by the user"), pages_explored, &matched, downloaded, failed);
+            save(
+                "stopped",
+                Some("Stopped by the user"),
+                pages_explored,
+                &matched,
+                downloaded,
+                failed,
+            );
         } else {
             save("done", None, pages_explored, &matched, downloaded, failed);
             // On-completion action (Milestone 4): armed through the
@@ -2849,9 +3157,7 @@ impl DownloadManager {
             // with downloaded = 0). A run stopped after some
             // files finished does not arm it either, mirroring
             // the queue drain (stopped early → no action).
-            if project.mode == "download"
-                && downloaded >= 1
-                && project.on_complete_action != "none"
+            if project.mode == "download" && downloaded >= 1 && project.on_complete_action != "none"
             {
                 let queue_name = self
                     .store
@@ -2884,7 +3190,12 @@ impl DownloadManager {
             parsed.host_str()?,
             parsed.port().map(|p| format!(":{p}")).unwrap_or_default()
         );
-        let resp = self.client().get(format!("{origin}/robots.txt")).send().await.ok()?;
+        let resp = self
+            .client()
+            .get(format!("{origin}/robots.txt"))
+            .send()
+            .await
+            .ok()?;
         if !resp.status().is_success() {
             return None;
         }
@@ -3026,12 +3337,7 @@ impl DownloadManager {
             }
         }
         if let Some(c) = &category_id {
-            if !c.trim().is_empty()
-                && !self
-                    .store
-                    .list_categories()?
-                    .iter()
-                    .any(|cat| &cat.id == c)
+            if !c.trim().is_empty() && !self.store.list_categories()?.iter().any(|cat| &cat.id == c)
             {
                 return Err(EngineError::NotFound(c.clone()));
             }
@@ -3054,7 +3360,13 @@ impl DownloadManager {
                 continue;
             }
             match self
-                .add_download(url, None, folder.clone(), category_id.clone(), queue_id.clone())
+                .add_download(
+                    url,
+                    None,
+                    folder.clone(),
+                    category_id.clone(),
+                    queue_id.clone(),
+                )
                 .await
             {
                 Ok((id, _)) => {
@@ -3099,7 +3411,12 @@ impl DownloadManager {
 
     // -- categories (pass-through to the store) ---------------------------
 
-    pub fn create_category(&self, name: &str, folder: &str, extensions: &[String]) -> Result<CategoryRow> {
+    pub fn create_category(
+        &self,
+        name: &str,
+        folder: &str,
+        extensions: &[String],
+    ) -> Result<CategoryRow> {
         self.store.create_category(name, folder, extensions)
     }
 
@@ -3255,7 +3572,9 @@ impl DownloadManager {
     pub async fn stop_queue(&self, id: &str) -> Result<()> {
         let runs = self.queue_runs.lock().await;
         let Some(stop) = runs.get(id) else {
-            return Err(EngineError::InvalidState("This queue is not running".to_string()));
+            return Err(EngineError::InvalidState(
+                "This queue is not running".to_string(),
+            ));
         };
         stop.store(true, Ordering::SeqCst);
         if let Ok(files) = self.store.list_queue_files(id) {
@@ -3546,9 +3865,7 @@ impl DownloadManager {
                     download_id: file.id,
                     filename: file.filename,
                     status: "skipped".to_string(),
-                    message: Some(
-                        "Sync stopped — the stop time arrived".to_string(),
-                    ),
+                    message: Some("Sync stopped — the stop time arrived".to_string()),
                 });
                 continue;
             }
@@ -3614,19 +3931,15 @@ impl DownloadManager {
             // `.part` file until it finishes, and the sync re-checks
             // the file at the next run. (Pinned by
             // `sync_skips_a_file_that_is_mid_download_and_leaves_it_byte_identical`.)
-            _ => {
-                return skipped(
-                    "This file has not finished downloading yet — start it first",
-                )
-            }
+            _ => return skipped("This file has not finished downloading yet — start it first"),
         }
         // A finished file whose local copy is gone is re-downloaded
         // whatever the probe says: there is nothing to keep.
         let local_missing = !Path::new(&file.save_path).exists();
-        let info = match self.probe_url(&file.url).await {
-            Ok(info) => info,
-            Err(EngineError::Status(404, _)) => {
-                return SyncFileResult {
+        let info =
+            match self.probe_url(&file.url).await {
+                Ok(info) => info,
+                Err(EngineError::Status(404, _)) => return SyncFileResult {
                     download_id: file.id.clone(),
                     filename: file.filename.clone(),
                     status: "removed".to_string(),
@@ -3634,10 +3947,9 @@ impl DownloadManager {
                         "The file is no longer on the server (404) — it was not deleted locally"
                             .to_string(),
                     ),
-                }
-            }
-            Err(e) => return failed(e.to_string()),
-        };
+                },
+                Err(e) => return failed(e.to_string()),
+            };
         let changed = match remote_changed(&info, file) {
             Some(changed) => local_missing || changed,
             // The server sends no size and no validator at all, so
@@ -3687,9 +3999,7 @@ impl DownloadManager {
                     download_id: file.id.clone(),
                     filename: file.filename.clone(),
                     status: "changed".to_string(),
-                    message: Some(
-                        "Re-downloaded after the previous attempt failed".to_string(),
-                    ),
+                    message: Some("Re-downloaded after the previous attempt failed".to_string()),
                 },
                 Err(e) => SyncFileResult {
                     download_id: file.id.clone(),
@@ -3987,10 +4297,12 @@ impl DownloadManager {
                 Ok(f) => f,
                 Err(_) => break,
             };
-            let Some(next) = files
-                .iter()
-                .find(|d| matches!(d.status.as_str(), "queued" | "paused" | "downloading" | "error" | "complete"))
-            else {
+            let Some(next) = files.iter().find(|d| {
+                matches!(
+                    d.status.as_str(),
+                    "queued" | "paused" | "downloading" | "error" | "complete"
+                )
+            }) else {
                 break; // nothing left to do
             };
             let next = next.clone();
@@ -4148,7 +4460,9 @@ impl DownloadManager {
             .get_download(id)?
             .ok_or_else(|| EngineError::NotFound(id.to_string()))?;
         if row.status == "complete" {
-            return Err(EngineError::InvalidState("This download is already complete".to_string()));
+            return Err(EngineError::InvalidState(
+                "This download is already complete".to_string(),
+            ));
         }
         // Download quota (S12): roll an expired window, then refuse
         // a start while the quota is reached. The message names the
@@ -4170,7 +4484,9 @@ impl DownloadManager {
         {
             let running = self.running.lock().await;
             if running.contains_key(id) {
-                return Err(EngineError::InvalidState("This download is already running".to_string()));
+                return Err(EngineError::InvalidState(
+                    "This download is already running".to_string(),
+                ));
             }
         }
         // A start clears the quota-paused flag: the download is
@@ -4206,6 +4522,32 @@ impl DownloadManager {
             this.run(id, pause_clone, retry_clone, limiter_clone, progress_clone)
                 .await;
         }));
+        self.register_running(
+            &row,
+            pause,
+            retry,
+            per_download_limiter,
+            last_progress_ms,
+            handle,
+        )
+        .await;
+        Ok(())
+    }
+
+    /// Register a spawned run task in the `running` map and both
+    /// watchdogs (Round 78: shared by the segmented run in
+    /// `start_download` and the (B) yt-dlp run in
+    /// `start_direct_ytdlp`, so pause / cancel / watchdogs
+    /// behave the same for both).
+    async fn register_running(
+        self: &Arc<Self>,
+        row: &DownloadRow,
+        pause: Arc<AtomicBool>,
+        retry: Arc<RetrySlot>,
+        per_download_limiter: Arc<RateLimiter>,
+        last_progress_ms: Arc<AtomicU64>,
+        handle: Arc<tokio::task::JoinHandle<()>>,
+    ) {
         // The watchdog's id, cloned before the insert below moves
         // `row.id` into the map key.
         let watch_id = row.id.clone();
@@ -4219,7 +4561,7 @@ impl DownloadManager {
             handle: Arc::clone(&handle),
         });
         self.running.lock().await.insert(
-            row.id,
+            row.id.clone(),
             Running {
                 pause,
                 handle,
@@ -4263,7 +4605,6 @@ impl DownloadManager {
                 Self::thread_watchdog(thread_mgr, thread_id, thread_entry, timeout_secs);
             });
         }
-        Ok(())
     }
 
     /// The retry wait of a running download, if a segment is in its
@@ -4432,7 +4773,8 @@ impl DownloadManager {
         // error — and it is re-emitted, so a dialog open on the
         // download shows it without a refresh.
         if !settings.antivirus_enabled {
-            let result = ScanResult::not_configured("Antivirus scanning is turned off in Settings.");
+            let result =
+                ScanResult::not_configured("Antivirus scanning is turned off in Settings.");
             let _ = self.store.set_scan_result(id, &result);
             self.emit_snapshot(id, "complete").await;
             return Ok(result);
@@ -4535,12 +4877,15 @@ impl DownloadManager {
                 row.save_path
             )));
         }
-        let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).ok_or_else(|| {
-            EngineError::InvalidState(format!(
-                "The file \"{}\" has no folder to quarantine it from",
-                row.filename
-            ))
-        })?;
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .ok_or_else(|| {
+                EngineError::InvalidState(format!(
+                    "The file \"{}\" has no folder to quarantine it from",
+                    row.filename
+                ))
+            })?;
         let quarantine_dir = parent.join("Quarantine");
         std::fs::create_dir_all(&quarantine_dir)?;
         let stem = path
@@ -4566,14 +4911,50 @@ impl DownloadManager {
     /// Ask a running download to stop at the next chunk boundary, then
     /// persist its progress. The run loop sets status `paused`.
     pub async fn pause_download(&self, id: &str) -> Result<()> {
+        // Round 78 — a DASH parent has no run of its own: pause
+        // its children and mark the parent paused (the merge
+        // supervisor sees the status on its next tick and exits).
+        if self.pause_dash_parent(id).await? {
+            return Ok(());
+        }
         let running = self.running.lock().await;
         match running.get(id) {
             Some(r) => {
                 r.pause.store(true, Ordering::SeqCst);
                 Ok(())
             }
-            None => Err(EngineError::InvalidState("This download is not running".to_string())),
+            None => Err(EngineError::InvalidState(
+                "This download is not running".to_string(),
+            )),
         }
+    }
+
+    /// Round 78 — pause a DASH parent: mark the parent paused
+    /// first (so the merge supervisor exits on its next tick),
+    /// then pause each child. Returns `Ok(true)` when the row is
+    /// a DASH parent (the caller then returns), `Ok(false)` for
+    /// any other download.
+    async fn pause_dash_parent(&self, id: &str) -> Result<bool> {
+        let row = self
+            .store
+            .get_download(id)?
+            .ok_or_else(|| EngineError::NotFound(id.to_string()))?;
+        if row.parent_id.is_some() || row.merge_status.is_none() {
+            return Ok(false);
+        }
+        self.store.set_status(id, "paused", None)?;
+        let children = self.store.list_child_downloads(id)?;
+        for child in &children {
+            // Children are never DASH parents, so their pause is
+            // the plain running-map flag — no recursion into
+            // `pause_download` (an async fn cannot call itself
+            // without boxing).
+            if let Some(r) = self.running.lock().await.get(&child.id) {
+                r.pause.store(true, Ordering::SeqCst);
+            }
+        }
+        self.emit_snapshot(id, "paused").await;
+        Ok(true)
     }
 
     /// Resume a paused (or failed) download. The server is re-probed
@@ -4605,7 +4986,32 @@ impl DownloadManager {
             );
         }
         if row.status == "complete" {
-            return Err(EngineError::InvalidState("This download is already complete".to_string()));
+            return Err(EngineError::InvalidState(
+                "This download is already complete".to_string(),
+            ));
+        }
+        // Round 78 — a DASH parent resumes as a pair: the video
+        // child resumes from its stored segments and the audio
+        // child from its own; the parent itself is never probed
+        // or downloaded directly.
+        if row.merge_status.is_some() {
+            let children = self.store.list_child_downloads(id)?;
+            let audio_url = children
+                .iter()
+                .find(|c| c.child_kind.as_deref() == Some("audio"))
+                .map(|c| c.url.clone());
+            let Some(audio_url) = audio_url else {
+                return Err(EngineError::InvalidState(
+                    "This download's audio part is missing".to_string(),
+                ));
+            };
+            return self.start_dash_download(id, &audio_url).await;
+        }
+        // Round 78 — a (B) direct yt-dlp download resumes in
+        // the yt-dlp runner (it resumes its own `.part` file);
+        // it is never probed or segmented.
+        if row.direct_ytdlp {
+            return self.start_direct_ytdlp(id).await;
         }
         // Browser cookies (S13 finish): a paused cookie download
         // resumes with its cookies — without them the re-probe
@@ -4764,9 +5170,7 @@ impl DownloadManager {
             return Ok(RefreshAddressResult::Mismatch {
                 size_bytes: info.size.map(|s| s as i64),
                 etag: info.etag,
-                filename: info
-                    .filename
-                    .or_else(|| filename_from_url(&info.final_url)),
+                filename: info.filename.or_else(|| filename_from_url(&info.final_url)),
             });
         }
         if changed {
@@ -4880,6 +5284,28 @@ impl DownloadManager {
             .store
             .get_download(id)?
             .ok_or_else(|| EngineError::NotFound(id.to_string()))?;
+        // Round 78 — a DASH parent cancels its children first
+        // (their part files go with them); the normal path below
+        // then deletes the parent row. The merge supervisor sees
+        // the parent's deleted status on its next tick and exits.
+        if row.parent_id.is_none() && row.merge_status.is_some() {
+            for child in self.store.list_child_downloads(id).unwrap_or_default() {
+                let _ = self.cancel_row(&child.id).await;
+            }
+        }
+        self.cancel_row(id).await
+    }
+
+    /// Cancel one download row (no DASH handling): stop its run,
+    /// delete its part file, mark it deleted, drop its session.
+    /// An async fn cannot call itself without boxing, so the
+    /// DASH-parent branch in `cancel_download` uses this for the
+    /// children instead of recursing.
+    async fn cancel_row(&self, id: &str) -> Result<()> {
+        let row = self
+            .store
+            .get_download(id)?
+            .ok_or_else(|| EngineError::NotFound(id.to_string()))?;
         {
             let running = self.running.lock().await;
             if let Some(r) = running.get(id) {
@@ -4897,7 +5323,807 @@ impl DownloadManager {
         // Browser cookies (S13 finish): a deleted download keeps no
         // session behind.
         self.cookies.lock().unwrap().remove(id);
+        self.download_headers.lock().unwrap().remove(id);
         Ok(())
+    }
+
+    // -- Round 78: yt-dlp platform downloads -------------------------
+
+    /// Where the yt-dlp sidecars live: the directory of the
+    /// running executable (the app exe in the desktop app, the
+    /// host exe in the native host), or its parent when the host
+    /// runs from `binaries/` next to the app. The resolver's
+    /// `locate_sidecars` checks the app-data bin dir first, so
+    /// an updated yt-dlp wins over the bundled copy.
+    fn sidecar_exe_dir() -> PathBuf {
+        let current = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        let Some(dir) = current else {
+            return PathBuf::from(".");
+        };
+        // The host binary lives in `binaries/` next to the app;
+        // the sidecars ship next to the app exe, one level up.
+        let ytdlp_name = if cfg!(windows) {
+            "yt-dlp.exe"
+        } else {
+            "yt-dlp"
+        };
+        if dir.join(ytdlp_name).is_file() {
+            return dir;
+        }
+        if let Some(parent) = dir.parent() {
+            if parent.join(ytdlp_name).is_file() {
+                return parent.to_path_buf();
+            }
+        }
+        dir
+    }
+
+    /// Build a `RequestHeaders` from yt-dlp's `http_headers`
+    /// map (the same Cookie-key rule as `headers_from_json`:
+    /// only User-Agent / Referer survive).
+    fn headers_map_from_http_headers(
+        map: &std::collections::HashMap<String, String>,
+    ) -> crate::probe::RequestHeaders {
+        let mut out = crate::probe::RequestHeaders::default();
+        for (k, v) in map {
+            let s = v.trim();
+            if s.is_empty() {
+                continue;
+            }
+            match k.to_ascii_lowercase().as_str() {
+                "user-agent" => out.user_agent = Some(s.to_string()),
+                "referer" => out.referer = Some(s.to_string()),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// True when a run failure is a 403/410 (an expired signed
+    /// stream URL), the only failures a re-resolve can fix. Any
+    /// other failure (404, disk, stall) fails the download as
+    /// before.
+    fn is_reresolvable_error(&self, e: &EngineError) -> bool {
+        matches!(e, EngineError::Status(403 | 410, _))
+    }
+
+    /// Re-resolve a resolved platform video once: run yt-dlp on
+    /// the stored page URL, find the format with the stored
+    /// format id, and point the row at its fresh direct URL
+    /// (with its fresh headers). Returns `Ok(true)` when the row
+    /// was updated and the run may retry, `Ok(false)` when there
+    /// is nothing to re-resolve (no page URL / format id,
+    /// already re-resolved this session, resolve failed, or the
+    /// format is gone / a different file) — the caller then
+    /// fails with the original error.
+    async fn reresolve_once(&self, id: &str) -> Result<bool> {
+        let row = self
+            .store
+            .get_download(id)?
+            .ok_or_else(|| EngineError::NotFound(id.to_string()))?;
+        let Some(source_url) = row.source_url.clone().filter(|u| !u.trim().is_empty()) else {
+            return Ok(false);
+        };
+        let Some(format_id) = row.format_id.clone().filter(|f| !f.trim().is_empty()) else {
+            return Ok(false);
+        };
+        // At most one re-resolve per download per session.
+        {
+            let mut done = self.reresolved.lock().unwrap();
+            if !done.insert(id.to_string()) {
+                return Ok(false);
+            }
+        }
+        let settings = self.store.get_settings().unwrap_or_default();
+        if !settings.platform_downloads_enabled {
+            return Ok(false);
+        }
+        let opts = crate::ytdlp::ResolveOptions {
+            paths: crate::ytdlp::locate_sidecars(&Self::sidecar_exe_dir()),
+            cookies: Vec::new(),
+            extractor_args: settings.ytdlp_extractor_args.clone(),
+            timeout_secs: crate::ytdlp::RESOLVE_TIMEOUT_SECS,
+        };
+        let video = match crate::ytdlp::resolve(&source_url, &opts).await {
+            Ok(v) => v,
+            Err(e) => {
+                self.store.log(&format!(
+                    "re-resolve of {id} failed: {} ({})",
+                    e.user_message(),
+                    e.kind_str()
+                ));
+                return Ok(false);
+            }
+        };
+        let Some(format) = video.formats.iter().find(|f| f.format_id == format_id) else {
+            self.store.log(&format!(
+                "re-resolve of {id}: format {format_id} no longer listed"
+            ));
+            return Ok(false);
+        };
+        // The same format must be the same file: a different size
+        // means the resolver found something else, and the stored
+        // bytes must never be stitched onto it.
+        if let (Some(size), Some(new_size)) = (row.size_bytes, format.filesize) {
+            if size != new_size as i64 {
+                self.store.log(&format!(
+                    "re-resolve of {id}: format {format_id} changed size ({size} -> {new_size}) — not retrying"
+                ));
+                return Ok(false);
+            }
+        }
+        if format.url.trim().is_empty() || format.url == row.url {
+            return Ok(false);
+        }
+        // Fresh headers replace the stored ones (the new signed
+        // URL may need a new User-Agent / Referer).
+        let headers = Self::headers_map_from_http_headers(&format.http_headers);
+        if !headers.is_empty() {
+            self.download_headers
+                .lock()
+                .unwrap()
+                .insert(id.to_string(), headers);
+        }
+        self.store
+            .set_download_url(id, &format.url, Some(&format.url))?;
+        Ok(true)
+    }
+
+    /// Start a DASH (video+audio) download: create (or reuse,
+    /// on resume) the two child downloads, link them to the
+    /// parent, and spawn the merge supervisor. The parent itself
+    /// is never downloaded directly — its file only appears when
+    /// ffmpeg merges the two children. The parent's size is the
+    /// sum of the children's sizes, so the table shows the real
+    /// total.
+    pub async fn start_dash_download(self: &Arc<Self>, id: &str, audio_url: &str) -> Result<()> {
+        let parent = self
+            .store
+            .get_download(id)?
+            .ok_or_else(|| EngineError::NotFound(id.to_string()))?;
+        if parent.status == "complete" {
+            return Err(EngineError::InvalidState(
+                "This download is already complete".to_string(),
+            ));
+        }
+        let children = self.store.list_child_downloads(id)?;
+        let (video_child, audio_child) = if children.len() >= 2 {
+            // Resume: the children already exist — reuse them
+            // (their segments and bytes are kept, like any
+            // resumed download).
+            let video = children
+                .iter()
+                .find(|c| c.child_kind.as_deref() == Some("video"))
+                .cloned();
+            let audio = children
+                .iter()
+                .find(|c| c.child_kind.as_deref() == Some("audio"))
+                .cloned();
+            match (video, audio) {
+                (Some(v), Some(a)) => (v, a),
+                _ => {
+                    return Err(EngineError::InvalidState(
+                        "This download's video or audio part is missing".to_string(),
+                    ))
+                }
+            }
+        } else {
+            // Fresh: create the two children next to the parent
+            // file. Their names carry the part kind, so the merge
+            // can tell them apart on disk and a stray child file
+            // never overwrites the parent. The audio child is
+            // named `.m4a` (YouTube audio is AAC in an M4A
+            // container; the merge reads by content, not by
+            // extension, so a WebM/Opus audio part still merges).
+            let parent_path = PathBuf::from(&parent.save_path);
+            let folder = parent_path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from("."));
+            let stem = parent_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("video");
+            let parent_ext = parent_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("mp4");
+            let video_name = format!("{stem}.video.{parent_ext}");
+            let audio_name = format!("{stem}.audio.m4a");
+            let cookies = self.cookies.lock().unwrap().get(id).cloned();
+            let headers = self.headers_for(id);
+            let video = self
+                .add_download_with_cookies_and_headers(
+                    &parent.url,
+                    Some(video_name),
+                    Some(folder.to_string_lossy().to_string()),
+                    Some(parent.category_id.clone()),
+                    parent.queue_id.clone(),
+                    cookies.clone(),
+                    headers.clone(),
+                )
+                .await?;
+            let audio = self
+                .add_download_with_cookies_and_headers(
+                    audio_url,
+                    Some(audio_name),
+                    Some(folder.to_string_lossy().to_string()),
+                    Some(parent.category_id.clone()),
+                    parent.queue_id.clone(),
+                    cookies,
+                    headers,
+                )
+                .await?;
+            let video_row = self
+                .store
+                .get_download(&video.0)?
+                .ok_or_else(|| EngineError::NotFound(video.0.clone()))?;
+            let audio_row = self
+                .store
+                .get_download(&audio.0)?
+                .ok_or_else(|| EngineError::NotFound(audio.0.clone()))?;
+            self.store.link_child_to_parent(&video.0, id, "video")?;
+            self.store.link_child_to_parent(&audio.0, id, "audio")?;
+            let total = video.1.size.unwrap_or(0) as i64 + audio.1.size.unwrap_or(0) as i64;
+            if total > 0 {
+                let _ = self.store.update_known_remote(id, Some(total), None, None);
+            }
+            (video_row, audio_row)
+        };
+        // The parent runs as a pair from here: status
+        // 'downloading', merge pending; the supervisor drives it.
+        self.store.set_status(id, "downloading", None)?;
+        let _ = self.store.set_merge_status(id, "pending");
+        // Start the children through the normal path (their own
+        // runs, segments, retries) and spawn the supervisor. A
+        // child that is already complete (resume after both
+        // finished but the merge never ran) refuses the start —
+        // ignored here, the supervisor merges it at once.
+        let _ = self.start_download(&video_child.id).await;
+        let _ = self.start_download(&audio_child.id).await;
+        let this = Arc::clone(self);
+        let parent_id = id.to_string();
+        let video_id = video_child.id.clone();
+        let audio_id = audio_child.id.clone();
+        tokio::spawn(async move {
+            this.dash_supervisor(parent_id, video_id, audio_id).await;
+        });
+        Ok(())
+    }
+
+    /// The DASH merge supervisor: polls the parent and its two
+    /// children about once a second, aggregates the children's
+    /// progress into the parent row (bytes, speed, ETA,
+    /// connections, parts), and merges with ffmpeg when both
+    /// children are complete. Pause/cancel propagate through
+    /// the parent's status (see `pause_download` /
+    /// `cancel_download`): the supervisor never pauses children
+    /// itself, it only exits when the parent stops being
+    /// 'downloading'. A failed child fails the parent with the
+    /// child's message; a failed merge fails the parent and
+    /// keeps the child files for diagnosis.
+    async fn dash_supervisor(
+        self: Arc<Self>,
+        parent_id: String,
+        video_id: String,
+        audio_id: String,
+    ) {
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let parent = match self.store.get_download(&parent_id) {
+                Ok(Some(p)) => p,
+                _ => return,
+            };
+            if parent.status != "downloading" {
+                // Paused, cancelled, errored or already complete
+                // by another path: the supervisor's job is done.
+                return;
+            }
+            let video = self.store.get_download(&video_id).ok().flatten();
+            let audio = self.store.get_download(&audio_id).ok().flatten();
+            let (Some(video), Some(audio)) = (video, audio) else {
+                let _ = self.store.set_status(
+                    &parent_id,
+                    "error",
+                    Some("This download's video or audio part went missing"),
+                );
+                return;
+            };
+            // Aggregate progress into the parent row.
+            let total_done = video.downloaded_bytes + audio.downloaded_bytes;
+            let total_size = video.size_bytes.unwrap_or(0) + audio.size_bytes.unwrap_or(0);
+            let speed = (video.speed_bps + audio.speed_bps).max(0);
+            let eta = if speed > 0 && total_size > 0 {
+                Some((total_size - total_done).max(0) / speed)
+            } else {
+                None
+            };
+            let _ = self.store.checkpoint(
+                &parent_id,
+                total_done,
+                speed,
+                eta,
+                video.active_connections + audio.active_connections,
+                video.segment_count + audio.segment_count,
+            );
+            self.emit_dash_progress(&parent_id, "downloading").await;
+            // A failed child fails the parent with its message.
+            if video.status == "error" || audio.status == "error" {
+                let msg = video
+                    .error_message
+                    .clone()
+                    .or(audio.error_message.clone())
+                    .unwrap_or_else(|| "The video or audio part failed".to_string());
+                let _ = self.store.set_merge_status(&parent_id, "failed");
+                let _ = self.store.set_status(&parent_id, "error", Some(&msg));
+                self.emit_dash_progress(&parent_id, "error").await;
+                self.emit_sound("download_failed");
+                return;
+            }
+            if video.status == "complete" && audio.status == "complete" {
+                // Both parts are on disk: merge them.
+                let _ = self.store.set_merge_status(&parent_id, "merging");
+                match self.merge_dash(&parent, &video, &audio).await {
+                    Ok(()) => {
+                        let _ = self.store.set_merge_status(&parent_id, "done");
+                        // The child files are intermediate: remove
+                        // them and their rows now the merged file
+                        // exists.
+                        let _ = std::fs::remove_file(&video.save_path);
+                        let _ = std::fs::remove_file(&audio.save_path);
+                        let _ = self.store.set_status(&video_id, "deleted", None);
+                        let _ = self.store.set_status(&audio_id, "deleted", None);
+                        let _ = self.store.mark_complete(&parent_id);
+                        // Antivirus hook (S14), same as a segmented
+                        // completion: the merged file is scanned,
+                        // not the intermediate parts.
+                        match self.store.get_settings() {
+                            Ok(settings) if settings.antivirus_enabled => {
+                                match settings
+                                    .antivirus_command
+                                    .as_deref()
+                                    .filter(|c| !c.trim().is_empty())
+                                {
+                                    Some(_) => {
+                                        let _ = self
+                                            .store
+                                            .set_scan_result(&parent_id, &ScanResult::scanning());
+                                        let mgr = Arc::clone(&self);
+                                        let scan_id = parent_id.clone();
+                                        tokio::spawn(async move {
+                                            let _ = mgr.run_antivirus_scan(&scan_id).await;
+                                        });
+                                    }
+                                    None => {
+                                        let _ = self.store.set_scan_result(
+                                            &parent_id,
+                                            &ScanResult::not_configured(
+                                                "No antivirus scanner is configured in Settings.",
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
+                            Ok(_) => {
+                                let _ = self.store.set_scan_result(
+                                    &parent_id,
+                                    &ScanResult::not_configured(
+                                        "Antivirus scanning is turned off in Settings.",
+                                    ),
+                                );
+                            }
+                            Err(_) => {}
+                        }
+                        self.emit_dash_progress(&parent_id, "complete").await;
+                        self.emit_sound("download_complete");
+                    }
+                    Err(e) => {
+                        let _ = self.store.set_merge_status(&parent_id, "failed");
+                        let _ = self.store.set_status(
+                            &parent_id,
+                            "error",
+                            Some(&format!("Merging the video and audio parts failed: {e}")),
+                        );
+                        self.emit_dash_progress(&parent_id, "error").await;
+                        self.emit_sound("download_failed");
+                    }
+                }
+                return;
+            }
+        }
+    }
+
+    /// Emit a progress event for a DASH parent built from its
+    /// children's segments (the parent's own segments are never
+    /// downloaded, so the parent's snapshot would always read 0
+    /// bytes). `status` is the parent's status.
+    async fn emit_dash_progress(&self, parent_id: &str, status: &str) {
+        let Ok(Some(parent)) = self.store.get_download(parent_id) else {
+            return;
+        };
+        let Ok(children) = self.store.list_child_downloads(parent_id) else {
+            return;
+        };
+        let mut states = Vec::new();
+        let mut speed: u64 = 0;
+        for child in &children {
+            speed = speed.saturating_add(child.speed_bps.max(0) as u64);
+            if let Ok(segs) = self.store.get_segments(&child.id) {
+                for r in segs {
+                    let end = r.end_byte.map(|e| e as u64);
+                    let done = r.downloaded_bytes as u64;
+                    states.push(Arc::new(StdMutex::new(SegState::new(r, done, end))));
+                }
+            }
+        }
+        self.emit(parent_id, &parent, &states, speed, status, None)
+            .await;
+    }
+
+    /// Merge a DASH video+audio pair with the bundled ffmpeg:
+    /// stream-copy only (`-c copy`), no re-encode. The output is
+    /// the parent's save path. An error means ffmpeg is missing
+    /// or the merge failed — the child files are kept then, for
+    /// diagnosis.
+    async fn merge_dash(
+        &self,
+        parent: &DownloadRow,
+        video: &DownloadRow,
+        audio: &DownloadRow,
+    ) -> Result<()> {
+        let paths = crate::ytdlp::locate_sidecars(&Self::sidecar_exe_dir());
+        let Some(ffmpeg) = paths.ffmpeg else {
+            return Err(EngineError::InvalidState(
+                "The video component (ffmpeg) is missing — reinstall Sonic Manager to merge this video"
+                    .to_string(),
+            ));
+        };
+        merge_dash_files(
+            &video.save_path,
+            &audio.save_path,
+            &parent.save_path,
+            &ffmpeg,
+        )
+        .await
+    }
+
+    /// Start a (B)-fallback download: yt-dlp itself downloads
+    /// the fragmented/manifest format into the row's save path,
+    /// resuming its own `.part` file when re-run. Registered in
+    /// the `running` map like a normal run, so pause/cancel and
+    /// the watchdogs work the same (pause kills the yt-dlp
+    /// process; the next start resumes it).
+    pub async fn start_direct_ytdlp(self: &Arc<Self>, id: &str) -> Result<()> {
+        let row = self
+            .store
+            .get_download(id)?
+            .ok_or_else(|| EngineError::NotFound(id.to_string()))?;
+        if row.status == "complete" {
+            return Err(EngineError::InvalidState(
+                "This download is already complete".to_string(),
+            ));
+        }
+        {
+            let running = self.running.lock().await;
+            if running.contains_key(id) {
+                return Err(EngineError::InvalidState(
+                    "This download is already running".to_string(),
+                ));
+            }
+        }
+        let _ = self.store.set_quota_paused(id, false);
+        let pause = Arc::new(AtomicBool::new(false));
+        let retry = Arc::new(RetrySlot::new());
+        let per_download_limiter = Arc::new(RateLimiter::new(
+            row.speed_limit_kbps
+                .map(|k| (k.max(0) as u64).saturating_mul(1024))
+                .unwrap_or(0),
+        ));
+        let last_progress_ms = Arc::new(AtomicU64::new(now_millis()));
+        let this = Arc::clone(self);
+        let id_string = id.to_string();
+        let pause_clone = Arc::clone(&pause);
+        let retry_clone = Arc::clone(&retry);
+        let limiter_clone = Arc::clone(&per_download_limiter);
+        let progress_clone = Arc::clone(&last_progress_ms);
+        let handle = Arc::new(tokio::spawn(async move {
+            this.run_ytdlp_direct(
+                id_string,
+                pause_clone,
+                retry_clone,
+                limiter_clone,
+                progress_clone,
+            )
+            .await;
+        }));
+        self.register_running(
+            &row,
+            pause,
+            retry,
+            per_download_limiter,
+            last_progress_ms,
+            handle,
+        )
+        .await;
+        Ok(())
+    }
+
+    /// The (B) runner: yt-dlp downloads the fragmented format
+    /// itself; `finish_run` (shared with the segmented run)
+    /// handles the tail — error status, cookie/header cleanup,
+    /// and the completion/failure sound.
+    async fn run_ytdlp_direct(
+        self: Arc<Self>,
+        id: String,
+        pause: Arc<AtomicBool>,
+        retry: Arc<RetrySlot>,
+        _per_download_limiter: Arc<RateLimiter>,
+        last_progress_ms: Arc<AtomicU64>,
+    ) {
+        let outcome = self
+            .run_ytdlp_direct_inner(&id, &pause, &last_progress_ms)
+            .await;
+        self.finish_run(&id, outcome, &retry).await;
+    }
+
+    /// The (B) inner run: spawn yt-dlp, parse its progress
+    /// lines into checkpoints, kill it on pause (its `.part`
+    /// file stays, and the next start resumes it). yt-dlp
+    /// writes the file directly to the save path, so completion
+    /// is verified by the file on disk, not by a rename.
+    async fn run_ytdlp_direct_inner(
+        &self,
+        id: &str,
+        pause: &Arc<AtomicBool>,
+        last_progress_ms: &Arc<AtomicU64>,
+    ) -> Result<()> {
+        let row = self
+            .store
+            .get_download(id)?
+            .ok_or_else(|| EngineError::NotFound(id.to_string()))?;
+        self.store.set_status(id, "downloading", None)?;
+        let Some(source_url) = row.source_url.clone().filter(|u| !u.trim().is_empty()) else {
+            return Err(EngineError::InvalidState(
+                "This download has no page address to download from".to_string(),
+            ));
+        };
+        let Some(format_id) = row.format_id.clone().filter(|f| !f.trim().is_empty()) else {
+            return Err(EngineError::InvalidState(
+                "This download has no video format to download".to_string(),
+            ));
+        };
+        let paths = crate::ytdlp::locate_sidecars(&Self::sidecar_exe_dir());
+        if !paths.ytdlp.is_file() {
+            return Err(EngineError::InvalidState(
+                "The video component (yt-dlp) is missing — reinstall Sonic Manager".to_string(),
+            ));
+        }
+        let save_path = row.save_path.clone();
+        if let Some(parent) = Path::new(&save_path).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut cmd = tokio::process::Command::new(&paths.ytdlp);
+        cmd.args([
+            "--ignore-config",
+            "--no-playlist",
+            "-f",
+            &format_id,
+            "-o",
+            &save_path,
+            "--",
+            &source_url,
+        ]);
+        // Round 78 — the (B) fallback merges with yt-dlp itself,
+        // so it must be told where the bundled ffmpeg/ffprobe
+        // live (they are not on PATH): without
+        // `--ffmpeg-location` a merge fails with "ffprobe and
+        // ffmpeg not found". yt-dlp needs BOTH for a merge — a
+        // plain ffmpeg.exe is not enough (verified against
+        // yt-dlp's README). The JS solver is needed here too: a
+        // YouTube format that needs signature solving fails
+        // without it.
+        if paths.ffmpeg.is_some() && paths.ffprobe.is_some() {
+            if let Some(dir) = paths.ffmpeg.as_ref().and_then(|f| f.parent()) {
+                cmd.args(["--ffmpeg-location", &crate::ytdlp::clean_windows_path(dir)]);
+            }
+        }
+        if let Some(qjs) = &paths.qjs {
+            cmd.args([
+                "--js-runtimes",
+                &format!("quickjs:{}", crate::ytdlp::clean_windows_path(qjs)),
+            ]);
+        }
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        cmd.kill_on_drop(true);
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| EngineError::InvalidState(format!("Could not start yt-dlp: {e}")))?;
+        // Drain stdout (yt-dlp prints nothing useful there for a
+        // download, but an un-drained pipe would block it).
+        if let Some(stdout) = child.stdout.take() {
+            tokio::spawn(async move {
+                use tokio::io::AsyncReadExt;
+                let mut stdout = stdout;
+                let mut buf = [0u8; 8192];
+                loop {
+                    match stdout.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+            });
+        }
+        // Parse progress from stderr (`[download] 42.1% of
+        // 123.45MiB at 1.23MiB/s ETA 00:41`) into a channel; the
+        // loop below turns each line into a checkpoint.
+        let (tx, mut rx) =
+            tokio::sync::mpsc::channel::<(f64, Option<u64>, Option<u64>, Option<u64>)>(32);
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(async move {
+                use tokio::io::{AsyncBufReadExt, BufReader};
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    if let Some(parsed) = parse_ytdlp_progress_line(&line) {
+                        if tx.send(parsed).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+        let mut total_size: Option<u64> = row.size_bytes.map(|s| s as u64);
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                    if pause.load(Ordering::SeqCst) {
+                        let _ = child.kill().await;
+                        let _ = child.wait().await;
+                        self.store.set_status(id, "paused", None)?;
+                        self.emit_snapshot(id, "paused").await;
+                        return Ok(());
+                    }
+                    if let Ok(Some(status)) = child.try_wait() {
+                        if !status.success() {
+                            return Err(EngineError::InvalidState(format!(
+                                "yt-dlp exited with {status} while downloading this video"
+                            )));
+                        }
+                        break;
+                    }
+                }
+                Some((pct, total, speed, eta)) = rx.recv() => {
+                    if total.is_some() {
+                        total_size = total;
+                        let _ = self
+                            .store
+                            .update_known_remote(id, total.map(|t| t as i64), None, None);
+                    }
+                    last_progress_ms.store(now_millis(), Ordering::SeqCst);
+                    let downloaded = match total_size {
+                        Some(t) => (pct / 100.0 * t as f64) as i64,
+                        None => 0,
+                    };
+                    let _ = self.store.checkpoint(
+                        id,
+                        downloaded.max(0),
+                        speed.map(|s| s as i64).unwrap_or(0),
+                        eta.map(|e| e as i64),
+                        0,
+                        0,
+                    );
+                    self.emit_snapshot(id, "downloading").await;
+                }
+            }
+        }
+        // yt-dlp wrote the file directly to the save path.
+        match std::fs::metadata(&save_path) {
+            Ok(m) if m.len() > 0 => {
+                let _ = self
+                    .store
+                    .update_known_remote(id, Some(m.len() as i64), None, None);
+                let _ = self.store.checkpoint(id, m.len() as i64, 0, None, 0, 0);
+                self.store.mark_complete(id)?;
+                self.emit_snapshot(id, "complete").await;
+                Ok(())
+            }
+            _ => Err(EngineError::InvalidState(
+                "yt-dlp finished but the file is missing or empty".to_string(),
+            )),
+        }
+    }
+
+    /// Create a (B)-fallback download row: no probe and no
+    /// segments — yt-dlp itself downloads the fragmented /
+    /// manifest format, and its progress lines report the size.
+    /// The row's URL is the format's manifest URL (for display);
+    /// the runner downloads from the page URL + format id stored
+    /// by `confirm_pending_link`.
+    async fn add_direct_ytdlp_download(
+        &self,
+        url: &str,
+        filename: Option<String>,
+        folder: Option<String>,
+        category_id: Option<String>,
+        queue_id: Option<String>,
+    ) -> Result<String> {
+        let settings = self.store.get_settings().unwrap_or_default();
+        if let Some(host) = url_host(url) {
+            if crate::store::site_is_excluded(&host, &settings.excluded_sites) {
+                return Err(EngineError::InvalidState(format!(
+                    "This site is excluded in Settings (excluded sites): {host}"
+                )));
+            }
+        }
+        let name = sanitize_filename(
+            filename
+                .filter(|f| !f.trim().is_empty())
+                .unwrap_or_else(|| "download".to_string()),
+        );
+        let category = match category_id {
+            Some(c) if !c.trim().is_empty() => c,
+            _ => {
+                let ext = Path::new(&name)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                self.store
+                    .category_for_extension_filtered(&ext, &settings.file_types_auto)?
+            }
+        };
+        let folder = folder
+            .filter(|f| !f.trim().is_empty())
+            .or_else(|| {
+                self.store
+                    .get_category(&category)
+                    .ok()
+                    .flatten()
+                    .map(|c| c.default_folder)
+                    .filter(|f| !f.trim().is_empty())
+            })
+            .or_else(|| {
+                let f = settings.default_download_folder.trim().to_string();
+                if f.is_empty() {
+                    None
+                } else {
+                    Some(f)
+                }
+            })
+            .unwrap_or_else(|| default_downloads_dir().to_string_lossy().to_string());
+        std::fs::create_dir_all(&folder)?;
+        let folder_path = PathBuf::from(&folder);
+        let save_path = if settings.duplicate_action == "overwrite" {
+            folder_path.join(&name)
+        } else {
+            unique_path(&folder_path, &name, &|p| {
+                p.exists()
+                    || PathBuf::from(format!("{}.part", p.display())).exists()
+                    || self
+                        .store
+                        .is_save_path_used(&p.to_string_lossy())
+                        .unwrap_or(false)
+            })
+        };
+        let id = self.store.create_download(
+            url,
+            None,
+            &name,
+            &save_path.to_string_lossy(),
+            &category,
+            None,
+            None,
+            None,
+            None,
+        )?;
+        if let Some(queue) = queue_id {
+            self.store.add_to_queue(&id, &queue)?;
+        }
+        Ok(id)
     }
 
     // -- the run loop ------------------------------------------------------
@@ -4923,22 +6149,64 @@ impl DownloadManager {
                 &last_progress_ms,
             )
             .await;
+        // Round 78 — a 403/410 on a resolved platform video
+        // usually means the signed stream URL expired: re-resolve
+        // the page once (same format) and retry the run against
+        // the fresh URL, keeping the bytes already downloaded.
+        // At most one re-resolve per download per session, so a
+        // permanently-dead link fails instead of looping.
+        let outcome = match outcome {
+            Err(e) if self.is_reresolvable_error(&e) => match self.reresolve_once(&id).await {
+                Ok(true) => {
+                    self.store.log(&format!(
+                        "re-resolved {id} after {e} — retrying the run against the fresh URL"
+                    ));
+                    self.run_inner(
+                        &id,
+                        &pause,
+                        &retry,
+                        &per_download_limiter,
+                        &last_progress_ms,
+                    )
+                    .await
+                }
+                _ => Err(e),
+            },
+            other => other,
+        };
+        self.finish_run(&id, outcome, &retry).await;
+    }
+
+    /// The shared run tail (Round 78): the run is over for every
+    /// outcome — paused, complete, error. No segment is waiting
+    /// any more, whatever the outcome was. The `running` entry
+    /// and the thread watchdog's entry go with the run (a
+    /// finished run's watchdog must never mistake a later run's
+    /// stall for its own — the `ptr_eq` check is the backstop).
+    /// A failure sets the error status; a terminal status drops
+    /// the cookies and per-download headers and plays the
+    /// completion/failure sound — except a DASH child, which
+    /// keeps no session behind but plays no sound (the parent
+    /// owns the fanfare). Used by the segmented `run` and the
+    /// (B) `run_ytdlp_direct` — one place, so a (B) download
+    /// sounds and cleans up exactly like a segmented one.
+    async fn finish_run(&self, id: &str, outcome: Result<()>, retry: &Arc<RetrySlot>) {
         // The run is over for every outcome: paused, complete, error.
         // No segment is waiting any more, whatever the outcome was.
         retry.clear_wait();
         // Round 74 (A) — a finished run leaves no stall-retry mode
         // behind for the next run of this download.
         retry.clear_whole_stall_retry();
-        self.running.lock().await.remove(&id);
+        self.running.lock().await.remove(id);
         // Round 57 (§9.2f): the thread watchdog's entry goes with
         // the run — without this the thread would keep watching a
         // finished run (and, on a later stall of a NEW run of the
         // same download, could mistake the old entry for the
         // current one; the `ptr_eq` check below is the backstop).
-        self.thread_watchdogs.lock().unwrap().remove(&id);
+        self.thread_watchdogs.lock().unwrap().remove(id);
         if let Err(e) = outcome {
-            let _ = self.store.set_status(&id, "error", Some(&e.to_string()));
-            self.emit_snapshot(&id, "error").await;
+            let _ = self.store.set_status(id, "error", Some(&e.to_string()));
+            self.emit_snapshot(id, "error").await;
         }
         // Sounds (S09): read the stored status, not the outcome —
         // `run_inner` also returns Ok for a pause, and a pause is
@@ -4947,15 +6215,24 @@ impl DownloadManager {
         // terminal status (complete / error) drops them — a restart
         // would drop them anyway, and a stale session must never be
         // reused. A pause keeps them, so pause/resume in one
-        // session keeps working.
-        match self.store.get_download(&id).ok().flatten().map(|r| r.status) {
-            Some(s) if s == "complete" => {
-                self.cookies.lock().unwrap().remove(&id);
+        // session keeps working. Round 78: the same for the
+        // per-download headers, and a DASH child keeps no session
+        // behind either — but it plays no sound: the parent owns
+        // the completion/failure fanfare.
+        match self.store.get_download(id).ok().flatten() {
+            Some(row) if row.status == "complete" && row.parent_id.is_none() => {
+                self.cookies.lock().unwrap().remove(id);
+                self.download_headers.lock().unwrap().remove(id);
                 self.emit_sound("download_complete");
             }
-            Some(s) if s == "error" => {
-                self.cookies.lock().unwrap().remove(&id);
+            Some(row) if row.status == "error" && row.parent_id.is_none() => {
+                self.cookies.lock().unwrap().remove(id);
+                self.download_headers.lock().unwrap().remove(id);
                 self.emit_sound("download_failed");
+            }
+            Some(row) if row.parent_id.is_some() => {
+                self.cookies.lock().unwrap().remove(id);
+                self.download_headers.lock().unwrap().remove(id);
             }
             _ => {}
         }
@@ -5072,6 +6349,7 @@ impl DownloadManager {
                 }
                 self.emit_snapshot(&id, "error").await;
                 self.cookies.lock().unwrap().remove(&id);
+                self.download_headers.lock().unwrap().remove(&id);
                 self.store.log(&format!(
                     "run watchdog aborted {id} after {timeout_secs}s without progress"
                 ));
@@ -5205,6 +6483,7 @@ impl DownloadManager {
                 ));
             }
             mgr.cookies.lock().unwrap().remove(&id);
+            mgr.download_headers.lock().unwrap().remove(&id);
             return;
         }
     }
@@ -5220,10 +6499,15 @@ impl DownloadManager {
         // independent watchdog task.
         last_progress_ms: &Arc<AtomicU64>,
     ) -> Result<()> {
-        let row = self.store.get_download(id)?.ok_or_else(|| EngineError::NotFound(id.to_string()))?;
+        let row = self
+            .store
+            .get_download(id)?
+            .ok_or_else(|| EngineError::NotFound(id.to_string()))?;
         let segments = self.store.get_segments(id)?;
         if segments.is_empty() {
-            return Err(EngineError::InvalidState("This download has no segments".to_string()));
+            return Err(EngineError::InvalidState(
+                "This download has no segments".to_string(),
+            ));
         }
         self.store.set_status(id, "downloading", None)?;
 
@@ -5231,7 +6515,10 @@ impl DownloadManager {
         if let Some(parent) = part.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let file = std::fs::OpenOptions::new().create(true).write(true).open(&part)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&part)?;
         if let Some(size) = row.size_bytes {
             if size > 0 {
                 file.set_len(size as u64)?;
@@ -5263,6 +6550,11 @@ impl DownloadManager {
         // like the site credential. A download with no entry runs
         // exactly as before.
         let cookies = self.cookies.lock().unwrap().get(id).cloned();
+        // Round 78 — per-download headers (User-Agent / Referer
+        // from yt-dlp), looked up once per run the same way and
+        // carried by every segment. A download with no entry runs
+        // exactly as before.
+        let headers = self.headers_for(id);
         // Download quota (S12): this run's gate, built from the
         // settings in force at start time. `None` when the quota
         // is off — segment code then skips the gate entirely.
@@ -5310,6 +6602,7 @@ impl DownloadManager {
                     site_auth.clone(),
                     proxy.clone(),
                     cookies.clone(),
+                    headers.clone(),
                     Arc::clone(state),
                     Arc::clone(&file),
                     Arc::clone(pause),
@@ -5336,6 +6629,15 @@ impl DownloadManager {
         // not hammer it with the full connection count again.
         if let Some(host) = url_host(&row.url) {
             if let Some(cap) = self.host_connection_cap(&host) {
+                effective_cap = effective_cap.min(cap);
+            }
+            // Round 78 — platform hosts cap segments per the
+            // resolver's rules (YouTube 8, fbcdn 4, TikTok 1–2):
+            // parallel range requests to these hosts are
+            // rate-limited or refused, and a single-stream
+            // fallback already applies when the server answers
+            // 200 without Accept-Ranges/206.
+            if let Some(cap) = crate::ytdlp::default_host_segment_cap(&host) {
                 effective_cap = effective_cap.min(cap);
             }
         }
@@ -5432,6 +6734,7 @@ impl DownloadManager {
                     &site_auth,
                     &proxy,
                     &cookies,
+                    &headers,
                     per_download_limiter,
                     &quota_gate,
                 )
@@ -5505,6 +6808,7 @@ impl DownloadManager {
                                     &site_auth,
                                     &proxy,
                                     &cookies,
+                                    &headers,
                                     per_download_limiter,
                                     &quota_gate,
                                 )
@@ -5533,6 +6837,7 @@ impl DownloadManager {
                                 &site_auth,
                                 &proxy,
                                 &cookies,
+                                &headers,
                                 per_download_limiter,
                                 &quota_gate,
                             )
@@ -5580,6 +6885,7 @@ impl DownloadManager {
                                 &site_auth,
                                 &proxy,
                                 &cookies,
+                                &headers,
                                 per_download_limiter,
                                 &quota_gate,
                             )
@@ -5631,6 +6937,7 @@ impl DownloadManager {
                                     site_auth.clone(),
                                     proxy.clone(),
                                     cookies.clone(),
+                                    headers.clone(),
                                     state,
                                     Arc::clone(&file),
                                     Arc::clone(pause),
@@ -5673,6 +6980,7 @@ impl DownloadManager {
                                     site_auth.clone(),
                                     proxy.clone(),
                                     cookies.clone(),
+                                    headers.clone(),
                                     state,
                                     Arc::clone(&file),
                                     Arc::clone(pause),
@@ -5805,6 +7113,7 @@ impl DownloadManager {
                             &site_auth,
                             &proxy,
                             &cookies,
+                            &headers,
                             per_download_limiter,
                             &quota_gate,
                         )
@@ -5860,6 +7169,7 @@ impl DownloadManager {
                                 &site_auth,
                                 &proxy,
                                 &cookies,
+                                &headers,
                                 per_download_limiter,
                                 &quota_gate,
                             )
@@ -5939,7 +7249,14 @@ impl DownloadManager {
         self.checkpoint(id, &states, 0).await;
         drop(file);
         std::fs::rename(&part, &row.save_path)?;
-        self.store.mark_complete(id)?;
+        // Round 78 — a DASH child completes without a history
+        // row: the history belongs to the merged parent file,
+        // not to the child's intermediate file.
+        if row.parent_id.is_some() {
+            self.store.mark_child_complete(id)?;
+        } else {
+            self.store.mark_complete(id)?;
+        }
         // Antivirus hook (S14): the scan runs AFTER the rename,
         // so the scanner always sees the finished file, never the
         // `.part`. No scanner configured (or scanning turned off)
@@ -5951,11 +7268,13 @@ impl DownloadManager {
         // and re-emitted as a completion event when it lands.
         match self.store.get_settings() {
             Ok(settings) if settings.antivirus_enabled => {
-                match settings.antivirus_command.as_deref().filter(|c| !c.trim().is_empty()) {
+                match settings
+                    .antivirus_command
+                    .as_deref()
+                    .filter(|c| !c.trim().is_empty())
+                {
                     Some(_) => {
-                        let _ = self
-                            .store
-                            .set_scan_result(id, &ScanResult::scanning());
+                        let _ = self.store.set_scan_result(id, &ScanResult::scanning());
                         let mgr = Arc::clone(self);
                         let scan_id = id.to_string();
                         tokio::spawn(async move {
@@ -5975,14 +7294,13 @@ impl DownloadManager {
             Ok(_) => {
                 let _ = self.store.set_scan_result(
                     id,
-                    &ScanResult::not_configured(
-                        "Antivirus scanning is turned off in Settings.",
-                    ),
+                    &ScanResult::not_configured("Antivirus scanning is turned off in Settings."),
                 );
             }
             Err(_) => {}
         }
-        self.emit(id, &row, &states, 0, "complete", Some(retry)).await;
+        self.emit(id, &row, &states, 0, "complete", Some(retry))
+            .await;
         Ok(())
     }
 
@@ -6129,6 +7447,7 @@ impl DownloadManager {
         site_auth: &Option<(String, String)>,
         proxy: &Option<ProxyConfig>,
         cookies: &Option<String>,
+        headers: &Option<crate::probe::RequestHeaders>,
         per_download_limiter: &Arc<RateLimiter>,
         quota_gate: &Option<Arc<QuotaGate>>,
     ) {
@@ -6166,6 +7485,7 @@ impl DownloadManager {
                 site_auth,
                 proxy,
                 cookies,
+                headers,
                 per_download_limiter,
                 quota_gate,
             )
@@ -6194,6 +7514,7 @@ impl DownloadManager {
         site_auth: &Option<(String, String)>,
         proxy: &Option<ProxyConfig>,
         cookies: &Option<String>,
+        headers: &Option<crate::probe::RequestHeaders>,
         per_download_limiter: &Arc<RateLimiter>,
         quota_gate: &Option<Arc<QuotaGate>>,
     ) {
@@ -6249,6 +7570,7 @@ impl DownloadManager {
                 site_auth.clone(),
                 proxy.clone(),
                 cookies.clone(),
+                headers.clone(),
                 Arc::clone(&states[i]),
                 Arc::clone(file),
                 Arc::clone(pause),
@@ -6352,6 +7674,7 @@ impl DownloadManager {
             site_auth.clone(),
             proxy.clone(),
             cookies.clone(),
+            headers.clone(),
             Arc::clone(&new_state),
             Arc::clone(file),
             Arc::clone(pause),
@@ -6433,9 +7756,7 @@ impl DownloadManager {
             }
             for (seg_id, done, status) in segs {
                 if let Err(e) = store.update_segment(&seg_id, done, status) {
-                    store.log(&format!(
-                        "checkpoint failed for segment {seg_id}: {e}"
-                    ));
+                    store.log(&format!("checkpoint failed for segment {seg_id}: {e}"));
                 }
             }
         })
@@ -6451,6 +7772,14 @@ impl DownloadManager {
         status: &str,
         retry: Option<&RetrySlot>,
     ) {
+        // Round 78 — a DASH child row never emits progress or
+        // completion events of its own: the parent aggregates
+        // them, and the child never appears in the UI list, so
+        // its events would only ever open a progress window or a
+        // completion dialog for a file the user never sees.
+        if row.parent_id.is_some() {
+            return;
+        }
         let total: u64 = states.iter().map(|s| s.lock().unwrap().done).sum();
         let eta = match (row.size_bytes, speed_bps) {
             (Some(size), s) if s > 0 => Some(((size as u64).saturating_sub(total)) / s),
@@ -6465,7 +7794,11 @@ impl DownloadManager {
                     start_byte: st.row.start_byte,
                     end_byte: st.row.end_byte,
                     downloaded_bytes: st.done as i64,
-                    status: if st.done >= segment_len_of(&st) { "done".into() } else { "active".into() },
+                    status: if st.done >= segment_len_of(&st) {
+                        "done".into()
+                    } else {
+                        "active".into()
+                    },
                 }
             })
             .collect();
@@ -6532,6 +7865,110 @@ impl DownloadManager {
             self.emit(id, &row, &states, 0, status, None).await;
         }
     }
+}
+
+/// Merge one video file and one audio file into `output` with
+/// ffmpeg, stream-copy only (`-c copy`): no re-encode, the merge
+/// takes seconds. `ffmpeg` is the bundled sidecar path. A
+/// nonzero exit is an error carrying ffmpeg's stderr tail. On
+/// Windows the process is created with CREATE_NO_WINDOW so no
+/// console flashes.
+pub async fn merge_dash_files(video: &str, audio: &str, output: &str, ffmpeg: &Path) -> Result<()> {
+    let mut cmd = tokio::process::Command::new(ffmpeg);
+    cmd.args(["-y", "-i", video, "-i", audio, "-c", "copy", output]);
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| EngineError::InvalidState(format!("Could not run ffmpeg: {e}")))?;
+    if !out.status.success() {
+        let tail = String::from_utf8_lossy(&out.stderr);
+        let tail = tail
+            .lines()
+            .rev()
+            .take(3)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join(" ");
+        return Err(EngineError::InvalidState(format!(
+            "ffmpeg could not merge the video and audio parts: {tail}"
+        )));
+    }
+    // The merge must have produced a real file.
+    match std::fs::metadata(output) {
+        Ok(m) if m.len() > 0 => Ok(()),
+        _ => Err(EngineError::InvalidState(
+            "ffmpeg finished but the merged file is missing or empty".to_string(),
+        )),
+    }
+}
+
+/// Parse one yt-dlp `[download]` progress line into
+/// (percent, total_bytes, speed_bps, eta_secs). Returns `None`
+/// for any other line. Units are the binary ones yt-dlp prints
+/// (KiB/MiB/GiB/TiB); a missing total reads as `None` (an
+/// unknown-size download).
+fn parse_ytdlp_progress_line(line: &str) -> Option<(f64, Option<u64>, Option<u64>, Option<u64>)> {
+    let line = line.trim();
+    let rest = line.strip_prefix("[download]")?.trim();
+    // "42.1% of 123.45MiB at 1.23MiB/s ETA 00:41"
+    let pct_end = rest.find('%')?;
+    let pct: f64 = rest[..pct_end].trim().parse().ok()?;
+    let mut total = None;
+    let mut speed = None;
+    let mut eta = None;
+    if let Some(of) = rest.find(" of ") {
+        let after = &rest[of + 4..];
+        let size_token = after.split_whitespace().next()?;
+        total = parse_ytdlp_size(size_token);
+    }
+    if let Some(at) = rest.find(" at ") {
+        let after = &rest[at + 4..];
+        let speed_token = after.split_whitespace().next()?;
+        speed = speed_token.strip_suffix("/s").and_then(parse_ytdlp_size);
+    }
+    if let Some(e) = rest.find(" ETA ") {
+        let after = &rest[e + 5..];
+        let eta_token = after.split_whitespace().next()?;
+        eta = parse_ytdlp_eta(eta_token);
+    }
+    Some((pct, total, speed, eta))
+}
+
+/// One yt-dlp size token ("123.45MiB" | "1.23GiB" | "456KiB" |
+/// "789B") in bytes.
+fn parse_ytdlp_size(token: &str) -> Option<u64> {
+    let (num, mult) = if let Some(n) = token.strip_suffix("TiB") {
+        (n, 1024u64.pow(4))
+    } else if let Some(n) = token.strip_suffix("GiB") {
+        (n, 1024u64.pow(3))
+    } else if let Some(n) = token.strip_suffix("MiB") {
+        (n, 1024u64.pow(2))
+    } else if let Some(n) = token.strip_suffix("KiB") {
+        (n, 1024)
+    } else if let Some(n) = token.strip_suffix('B') {
+        (n, 1)
+    } else {
+        return None;
+    };
+    let v: f64 = num.parse().ok()?;
+    Some((v * mult as f64) as u64)
+}
+
+/// One yt-dlp ETA token ("00:41" | "01:02:03" | "41") in
+/// seconds.
+fn parse_ytdlp_eta(token: &str) -> Option<u64> {
+    let parts: Vec<&str> = token.split(':').collect();
+    let mut secs = 0u64;
+    for part in parts {
+        secs = secs
+            .checked_mul(60)?
+            .checked_add(part.parse::<u64>().ok()?)?;
+    }
+    Some(secs)
 }
 
 // -- segment task ----------------------------------------------------------
@@ -6917,6 +8354,7 @@ async fn run_segment(
     site_auth: Option<(String, String)>,
     proxy: Option<ProxyConfig>,
     cookies: Option<String>,
+    headers: Option<crate::probe::RequestHeaders>,
     state: Arc<StdMutex<SegState>>,
     file: Arc<StdMutex<std::fs::File>>,
     pause: Arc<AtomicBool>,
@@ -6950,6 +8388,7 @@ async fn run_segment(
         site_auth,
         proxy,
         cookies,
+        headers,
         Arc::clone(&state),
         file,
         pause,
@@ -6971,6 +8410,7 @@ async fn run_segment_inner(
     site_auth: Option<(String, String)>,
     proxy: Option<ProxyConfig>,
     cookies: Option<String>,
+    headers: Option<crate::probe::RequestHeaders>,
     state: Arc<StdMutex<SegState>>,
     file: Arc<StdMutex<std::fs::File>>,
     pause: Arc<AtomicBool>,
@@ -7005,6 +8445,7 @@ async fn run_segment_inner(
             &site_auth,
             &proxy,
             &cookies,
+            &headers,
             &state,
             &file,
             &pause,
@@ -7211,6 +8652,7 @@ async fn download_segment_once(
     site_auth: &Option<(String, String)>,
     proxy: &Option<ProxyConfig>,
     cookies: &Option<String>,
+    headers: &Option<crate::probe::RequestHeaders>,
     state: &Arc<StdMutex<SegState>>,
     file: &Arc<StdMutex<std::fs::File>>,
     pause: &Arc<AtomicBool>,
@@ -7222,7 +8664,19 @@ async fn download_segment_once(
     // FTP: the FTP transport, not reqwest — RETR over PASV, with
     // REST resume, through the FTP proxy when one is configured.
     if url.starts_with("ftp://") {
-        return download_segment_ftp(limiter, per_download, quota, url, proxy, start, end, state, file, pause).await;
+        return download_segment_ftp(
+            limiter,
+            per_download,
+            quota,
+            url,
+            proxy,
+            start,
+            end,
+            state,
+            file,
+            pause,
+        )
+        .await;
     }
     let range = match end {
         Some(e) => format!("bytes={start}-{e}"),
@@ -7257,11 +8711,12 @@ async fn download_segment_once(
                 req = req.header(reqwest::header::COOKIE, header);
             }
         }
+        // Round 78 — per-download headers (User-Agent / Referer
+        // from yt-dlp): the stream host expects them, and the
+        // global "Fetchline/0.1" UA is answered with 403.
+        req = crate::probe::apply_headers(req, headers.as_ref());
         if let Some((user, pass)) = proxy_basic {
-            req = req.header(
-                "proxy-authorization",
-                basic_proxy_auth_header(user, pass),
-            );
+            req = req.header("proxy-authorization", basic_proxy_auth_header(user, pass));
         }
         req
     };
@@ -7297,7 +8752,9 @@ async fn download_segment_once(
                 );
                 let order = proxy_auth_order(&cfg.auth, &offered, cfg.has_basic_creds());
                 if order.is_empty() {
-                    return Err(crate::proxy::proxy_auth_not_offered_error(&cfg.auth, &offered));
+                    return Err(crate::proxy::proxy_auth_not_offered_error(
+                        &cfg.auth, &offered,
+                    ));
                 }
                 let mut last_err: Option<EngineError> = None;
                 let mut retried_with_basic = false;
@@ -7349,7 +8806,19 @@ async fn download_segment_once(
                                         .to_string(),
                                 ));
                             }
-                            match download_segment_ntlm(limiter, per_download, quota, url, cfg, start, end, state, file, pause).await
+                            match download_segment_ntlm(
+                                limiter,
+                                per_download,
+                                quota,
+                                url,
+                                cfg,
+                                start,
+                                end,
+                                state,
+                                file,
+                                pause,
+                            )
+                            .await
                             {
                                 Ok(()) => return Ok(()),
                                 Err(e) => {
@@ -7767,8 +9236,7 @@ fn remote_changed(info: &ProbeInfo, row: &DownloadRow) -> Option<bool> {
             return Some(true);
         }
     }
-    if let (Some(new), Some(old)) = (info.last_modified.as_deref(), row.last_modified.as_deref())
-    {
+    if let (Some(new), Some(old)) = (info.last_modified.as_deref(), row.last_modified.as_deref()) {
         compared = true;
         if new != old {
             return Some(true);
@@ -7865,8 +9333,14 @@ fn unique_path(folder: &Path, name: &str, is_taken: &dyn Fn(&Path) -> bool) -> P
     if !is_taken(&path) {
         return path;
     }
-    let stem = Path::new(name).file_stem().and_then(|s| s.to_str()).unwrap_or(name);
-    let ext = Path::new(name).extension().and_then(|s| s.to_str()).unwrap_or("");
+    let stem = Path::new(name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(name);
+    let ext = Path::new(name)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
     let mut n = 2;
     loop {
         let candidate = if ext.is_empty() {
@@ -7940,10 +9414,8 @@ mod tests {
     /// read back byte-exact.
     #[test]
     fn write_at_pos_writes_out_of_order_byte_exact() {
-        let path = std::env::temp_dir().join(format!(
-            "fetchline-write-at-pos-{}.bin",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("fetchline-write-at-pos-{}.bin", std::process::id()));
         let _ = std::fs::remove_file(&path);
         {
             let mut f = std::fs::File::create(&path).unwrap();
@@ -7978,5 +9450,52 @@ mod tests {
         f.read_exact(&mut tail).unwrap();
         assert_eq!(&tail, b"world");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Round 78 — the (B) direct-download progress parser: a
+    /// `[download]` line yields percent, total, speed and ETA in
+    /// the units yt-dlp prints (binary KiB/MiB/GiB/TiB); any
+    /// other line yields nothing.
+    #[test]
+    fn ytdlp_progress_line_parses_percent_total_speed_eta() {
+        let (pct, total, speed, eta) =
+            parse_ytdlp_progress_line("[download]  42.1% of 123.45MiB at  1.23MiB/s ETA 00:41")
+                .expect("a full progress line parses");
+        assert!((pct - 42.1).abs() < 0.001);
+        // 123.45 MiB = 129,446,707 bytes; 1.23 MiB/s = 1,289,748 B/s.
+        assert_eq!(total, Some(129_446_707));
+        assert_eq!(speed, Some(1_289_748));
+        assert_eq!(eta, Some(41));
+        // An hour-scale ETA and GiB units.
+        let (_, total, _, eta) =
+            parse_ytdlp_progress_line("[download]   7.0% of  2.50GiB at  5.00MiB/s ETA 01:02:03")
+                .expect("GiB line parses");
+        assert_eq!(total, Some(2_684_354_560));
+        assert_eq!(eta, Some(3723));
+        // Unknown size: no " of " total, but percent and speed
+        // still parse.
+        let (pct, total, speed, eta) =
+            parse_ytdlp_progress_line("[download]  12.0% at  512.00KiB/s ETA 00:05")
+                .expect("unknown-size line parses");
+        assert!((pct - 12.0).abs() < 0.001);
+        assert_eq!(total, None);
+        assert_eq!(speed, Some(524_288));
+        assert_eq!(eta, Some(5));
+        // Anything that is not a `[download]` line is not progress.
+        assert!(parse_ytdlp_progress_line("[Merger] Merging formats into \"out.mp4\"").is_none());
+        assert!(parse_ytdlp_progress_line("[download] Downloading video 1 of 1").is_none());
+        assert!(parse_ytdlp_progress_line("").is_none());
+    }
+
+    #[test]
+    fn ytdlp_size_and_eta_tokens() {
+        assert_eq!(parse_ytdlp_size("789B"), Some(789));
+        assert_eq!(parse_ytdlp_size("456KiB"), Some(466_944));
+        assert_eq!(parse_ytdlp_size("1.00TiB"), Some(1_099_511_627_776));
+        assert_eq!(parse_ytdlp_size("Unknown"), None);
+        assert_eq!(parse_ytdlp_eta("41"), Some(41));
+        assert_eq!(parse_ytdlp_eta("00:41"), Some(41));
+        assert_eq!(parse_ytdlp_eta("01:02:03"), Some(3723));
+        assert_eq!(parse_ytdlp_eta("x"), None);
     }
 }

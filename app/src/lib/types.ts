@@ -172,7 +172,14 @@ export type RefreshAddressResult =
  *  `source` is 'browser' | 'video' | 'download_all', `status`
  *  is 'pending' while it waits. `cookies` is the browser's
  *  cookies for the URL as a JSON array (or null) — the dialog's
- *  probe and confirm send them, so a cookie-gated link works. */
+ *  probe and confirm send them, so a cookie-gated link works.
+ *  Round 78 — a resolved platform video carries its metadata
+ *  on the row: `filename` is the sanitized video title (never
+ *  `videoplayback.mp4`), `headers` the resolver's http_headers
+ *  JSON, `source_url` the page it came from, `format_id` the
+ *  chosen yt-dlp format, `audio_url` the DASH audio half when
+ *  the video needs a merge, `fragmented` when the format is a
+ *  fragment list. */
 export interface PendingLinkRow {
   id: string
   url: string
@@ -183,6 +190,55 @@ export interface PendingLinkRow {
   error: string | null
   cookies: string | null
   created_at: string
+  filename: string | null
+  headers: string | null
+  source_url: string | null
+  format_id: string | null
+  audio_url: string | null
+  fragmented: boolean
+}
+
+/** Round 78 — the bundled yt-dlp's status, for the Settings
+ *  "Video downloads" section. `version` is null when yt-dlp is
+ *  missing or will not run; `qjs` / `ffmpeg` say whether the
+ *  JavaScript solver and the merge tool are present. */
+export interface YtdlpStatus {
+  version: string | null
+  path: string
+  qjs: boolean
+  ffmpeg: boolean
+}
+
+/** Round 78 — one row of the trimmed quality list a resolve
+ *  returns (one row per height, 360p and up). Mirrors the
+ *  engine's `QualityRow`: `needs_merge` means the video half
+ *  needs its audio half (`audio_url`) merged with ffmpeg;
+ *  `fragmented` means the format is a fragment list the engine
+ *  downloads and joins. */
+export interface QualityRow {
+  height: number
+  label: string
+  ext: string
+  has_audio: boolean
+  needs_merge: boolean
+  filesize: number | null
+  url: string
+  audio_url: string | null
+  audio_format_id: string | null
+  format_id: string
+  headers: Record<string, string>
+  fragmented: boolean
+}
+
+/** Round 78 — the result of resolving a platform video page
+ *  from the app itself. `warning` is the first SABR/degradation
+ *  warning, if any. */
+export interface YtdlpResolveResult {
+  title: string
+  is_live: boolean
+  degraded: boolean
+  warning: string | null
+  formats: QualityRow[]
 }
 
 /** Round 52 — clipboard monitoring: the engine's offer for a
@@ -444,6 +500,15 @@ export interface Settings {
    *  theming any more, and Settings no longer offers the choice. */
   theme: 'light' | 'dark'
   browser_integration: boolean
+  /** Round 78 — platform video downloads (YouTube, Facebook,
+   *  Instagram, TikTok via the bundled yt-dlp resolver). Off
+   *  means the extension never resolves a video page and the
+   *  host refuses `resolve_video`. */
+  platform_downloads_enabled: boolean
+  /** Round 78 — hidden extractor-args override for yt-dlp
+   *  (`--extractor-args "youtube:player_client=…"`), for field
+   *  fixes when a site changes. Null means no override. */
+  ytdlp_extractor_args: string | null
   /** Clipboard monitoring (Round 52): watch the system clipboard
    *  and offer a copied download link (default true). Off means
    *  the poller still runs but the engine never offers a link. */

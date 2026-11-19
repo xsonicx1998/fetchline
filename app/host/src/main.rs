@@ -34,6 +34,18 @@
 //    media extension, dedup, excluded sites, DRM refused) and
 //    enqueued into `pending_links` with source "video", so the
 //    desktop app drains it through the real `add_download` path.
+//  * `resolve_video` — Round 78: the extension asks the host to
+//    resolve a platform video page with yt-dlp (the extension
+//    cannot reach the engine, and the host must answer even when
+//    the app is closed). The host runs the shared resolver
+//    itself, writes a `resolve_progress` heartbeat about every
+//    5 s so the extension's `connectNative` port stays alive,
+//    and replies with a TRIMMED format list (one row per height,
+//    360p and up — never raw `-J`, Chrome native-messaging
+//    messages are ~1 MB). Cookies are tried WITHOUT first and
+//    only sent after a login-required error, per the extension's
+//    consent flow; the temp Netscape file is deleted on drop and
+//    stale ones are swept at startup.
 //
 // The host only ENQUEUES, into the `pending_links` table of the
 // SAME SQLite file the desktop app uses. It never starts a
@@ -55,7 +67,10 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use fetchline_engine::native_host::{decode_message, handle_host_message, write_message, HostMessage};
+use fetchline_engine::native_host::{
+    decode_message, handle_host_message, write_message, CookiePair, HostMessage,
+};
+use fetchline_engine::ytdlp;
 use fetchline_engine::{DownloadManager, EngineError, Store};
 
 fn print_usage() {
@@ -249,6 +264,118 @@ fn ensure_store(
     }
 }
 
+/// Round 78 — resolve one platform video page with yt-dlp and
+/// return the framed reply value, or `None` when stdout closed
+/// mid-resolve (the browser is gone; the host loop exits).
+/// The resolve is store-optional: platform downloads are gated by
+/// the setting when the database opens, but a database that cannot
+/// be opened must not block the resolve — the extension's quality
+/// pick goes through the app, which re-checks the flag. The
+/// stored extractor-args override (hidden setting) is used when
+/// the request carries none of its own.
+async fn resolve_video(
+    db_path: &std::path::Path,
+    log_path: &std::path::Path,
+    store: &mut Option<Arc<Store>>,
+    manager: &mut Option<Arc<DownloadManager>>,
+    output: &mut std::io::StdoutLock<'static>,
+    page_url: String,
+    request_id: String,
+    with_cookies: bool,
+    cookies: &[CookiePair],
+    extractor_args: Option<&str>,
+) -> Option<serde_json::Value> {
+    let mut platform_enabled = true;
+    let mut stored_extractor_args: Option<String> = None;
+    if let Ok((s, _)) = ensure_store(db_path, log_path, store, manager) {
+        if let Ok(settings) = s.get_settings() {
+            platform_enabled = settings.platform_downloads_enabled;
+            stored_extractor_args = settings.ytdlp_extractor_args;
+        }
+    }
+    if !platform_enabled {
+        return Some(serde_json::json!({
+            "type": "error", "ok": false, "request_id": request_id,
+            "error": "Platform downloads are turned off in Fetchline settings",
+            "needs_login": false, "error_kind": "unsupported",
+        }));
+    }
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let opts = ytdlp::ResolveOptions {
+        paths: ytdlp::locate_sidecars(&exe_dir),
+        cookies: if with_cookies {
+            cookies.to_vec()
+        } else {
+            Vec::new()
+        },
+        extractor_args: extractor_args
+            .map(|s| s.to_string())
+            .or(stored_extractor_args),
+        timeout_secs: ytdlp::RESOLVE_TIMEOUT_SECS,
+    };
+    resolve_with_heartbeat(output, &request_id, page_url, opts).await
+}
+
+/// Round 78 — run the resolve while writing a `resolve_progress`
+/// heartbeat about every 5 s, so the extension's `connectNative`
+/// port sees traffic during a long resolve and Chrome does not
+/// consider the channel idle. Dropping the pinned future on a
+/// closed stdout kills yt-dlp (kill-on-drop).
+async fn resolve_with_heartbeat(
+    output: &mut std::io::StdoutLock<'static>,
+    request_id: &str,
+    page_url: String,
+    opts: ytdlp::ResolveOptions,
+) -> Option<serde_json::Value> {
+    let fut = ytdlp::resolve(&page_url, &opts);
+    tokio::pin!(fut);
+    let mut elapsed: u64 = 0;
+    loop {
+        tokio::select! {
+            r = &mut fut => return Some(resolve_to_reply(request_id, r)),
+            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                elapsed += 5;
+                let beat = serde_json::json!({
+                    "type": "resolve_progress", "ok": true,
+                    "request_id": request_id, "elapsed_secs": elapsed,
+                });
+                if write_message(output, &beat).is_err() {
+                    return None; // stdout closed: the browser is gone
+                }
+                let _ = output.flush();
+            }
+        }
+    }
+}
+
+/// Round 78 — turn a resolve outcome into the framed reply:
+/// success carries the trimmed quality list (never raw `-J`);
+/// an error carries the human message plus `needs_login` and
+/// the machine `error_kind` the extension switches on.
+fn resolve_to_reply(
+    request_id: &str,
+    result: Result<ytdlp::ResolvedVideo, ytdlp::YtDlpError>,
+) -> serde_json::Value {
+    match result {
+        Ok(video) => serde_json::json!({
+            "type": "resolved", "ok": true, "request_id": request_id,
+            "title": video.title, "is_live": video.is_live,
+            "degraded": video.degraded,
+            "warning": video.warnings.first(),
+            "formats": ytdlp::quality_rows(&video),
+        }),
+        Err(e) => serde_json::json!({
+            "type": "error", "ok": false, "request_id": request_id,
+            "error": e.user_message(),
+            "needs_login": e.kind == ytdlp::YtDlpErrorKind::LoginRequired,
+            "error_kind": e.kind_str(),
+        }),
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let parsed = match parse_host_args(std::env::args().skip(1)) {
@@ -271,6 +398,10 @@ async fn main() {
         &log_path,
         &format!("fetchline-host: started (db {})", db_path.display()),
     );
+    // Round 78 — sweep stale yt-dlp cookie temp files left by a
+    // crashed host (the cookie file is deleted on drop in the
+    // normal path; a crash leaves it behind).
+    ytdlp::sweep_stale_cookie_files(&std::env::temp_dir());
     // Round 70 — the store opens lazily, on the first message that
     // needs it. A ping is answered with no store at all.
     let mut store: Option<Arc<Store>> = None;
@@ -327,6 +458,34 @@ async fn main() {
             continue;
         }
         let reply_value = match msg {
+            Ok(HostMessage::ResolveVideo {
+                page_url,
+                request_id,
+                with_cookies,
+                cookies,
+                extractor_args,
+            }) => {
+                // Round 78 — a resolve runs yt-dlp for up to ~30 s
+                // with a heartbeat; it cannot go through the sync
+                // `handle_host_message` (which refuses it).
+                match resolve_video(
+                    &db_path,
+                    &log_path,
+                    &mut store,
+                    &mut manager,
+                    &mut output,
+                    page_url,
+                    request_id,
+                    with_cookies,
+                    &cookies,
+                    extractor_args.as_deref(),
+                )
+                .await
+                {
+                    Some(v) => v,
+                    None => break, // stdout closed mid-resolve: the browser is gone
+                }
+            }
             Ok(HostMessage::DownloadAll { page_url, links }) if links.is_empty() => {
                 // No links supplied: expand the page with the engine
                 // (fetch + probe), then enqueue what it found.
@@ -437,5 +596,113 @@ mod tests {
         let a = parse_host_args(["--parent-window", "--db-path", "x.db"].iter().copied())
             .unwrap();
         assert_eq!(a.db_path, Some(PathBuf::from("x.db")));
+    }
+
+    // Round 78 — the resolve reply carries a TRIMMED quality
+    // list (one row per height, 360p and up), never raw `-J`:
+    // a 1080p video-only format becomes a row that needs a
+    // merge, a 720p progressive format a row that does not.
+    fn resolved_video_fixture() -> ytdlp::ResolvedVideo {
+        use std::collections::HashMap;
+        ytdlp::ResolvedVideo {
+            title: "Test video".to_string(),
+            is_live: false,
+            extractor: "youtube".to_string(),
+            formats: vec![
+                ytdlp::ResolvedFormat {
+                    format_id: "137".to_string(),
+                    ext: "mp4".to_string(),
+                    height: Some(1080),
+                    width: Some(1920),
+                    vcodec: Some("avc1.640028".to_string()),
+                    acodec: None,
+                    filesize: Some(90_000_000),
+                    url: "https://rr1---sn.googlevideo.com/videoplayback?id=137".to_string(),
+                    protocol: "https".to_string(),
+                    http_headers: HashMap::new(),
+                    has_fragments: false,
+                },
+                ytdlp::ResolvedFormat {
+                    format_id: "22".to_string(),
+                    ext: "mp4".to_string(),
+                    height: Some(720),
+                    width: Some(1280),
+                    vcodec: Some("avc1.64001F".to_string()),
+                    acodec: Some("mp4a.40.2".to_string()),
+                    filesize: Some(40_000_000),
+                    url: "https://rr1---sn.googlevideo.com/videoplayback?id=22".to_string(),
+                    protocol: "https".to_string(),
+                    http_headers: HashMap::new(),
+                    has_fragments: false,
+                },
+                ytdlp::ResolvedFormat {
+                    format_id: "140".to_string(),
+                    ext: "m4a".to_string(),
+                    height: None,
+                    width: None,
+                    vcodec: None,
+                    acodec: Some("mp4a.40.2".to_string()),
+                    filesize: Some(5_000_000),
+                    url: "https://rr1---sn.googlevideo.com/videoplayback?id=140".to_string(),
+                    protocol: "https".to_string(),
+                    http_headers: HashMap::new(),
+                    has_fragments: false,
+                },
+            ],
+            warnings: vec![],
+            degraded: false,
+        }
+    }
+
+    #[test]
+    fn resolve_reply_carries_trimmed_quality_rows() {
+        let reply = resolve_to_reply("req-1", Ok(resolved_video_fixture()));
+        assert_eq!(reply["type"], "resolved");
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["request_id"], "req-1");
+        assert_eq!(reply["title"], "Test video");
+        assert_eq!(reply["is_live"], false);
+        assert_eq!(reply["degraded"], false);
+        let formats = reply["formats"].as_array().expect("formats array");
+        assert_eq!(formats.len(), 2);
+        // Sorted ascending: 720p progressive first (no merge),
+        // then 1080p video-only (needs merge, audio paired).
+        assert_eq!(formats[0]["height"], 720);
+        assert_eq!(formats[0]["needs_merge"], false);
+        assert_eq!(formats[0]["has_audio"], true);
+        assert_eq!(formats[1]["height"], 1080);
+        assert_eq!(formats[1]["needs_merge"], true);
+        assert_eq!(formats[1]["audio_format_id"], "140");
+        // No raw dump: the reply has no `formats` dump, no
+        // extractor internals, and no full format list.
+        assert!(reply.get("formats_json").is_none());
+        assert!(reply.get("extractor").is_none());
+    }
+
+    #[test]
+    fn resolve_error_reply_carries_kind_and_login_flag() {
+        let login = resolve_to_reply(
+            "req-2",
+            Err(ytdlp::YtDlpError::new(
+                ytdlp::YtDlpErrorKind::LoginRequired,
+                "sign in to confirm".to_string(),
+            )),
+        );
+        assert_eq!(login["type"], "error");
+        assert_eq!(login["ok"], false);
+        assert_eq!(login["request_id"], "req-2");
+        assert_eq!(login["needs_login"], true);
+        assert_eq!(login["error_kind"], "login_required");
+        assert!(login["error"].as_str().unwrap().contains("signed in"));
+
+        let timeout = resolve_to_reply(
+            "req-3",
+            Err(ytdlp::YtDlpError::new(
+                ytdlp::YtDlpErrorKind::Timeout,
+                "timed out".to_string(),
+            )),
+        );
+        assert_eq!(timeout["needs_login"], false);
+        assert_eq!(timeout["error_kind"], "timeout");
     }
 }

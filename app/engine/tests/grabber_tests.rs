@@ -68,26 +68,69 @@ fn create_rejects_depth_over_5_empty_types_and_bad_url() {
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
     let err = mgr
-        .create_grabber_project("p", "http://127.0.0.1/", &types(&["image"]), 6, 200, "download", None)
+        .create_grabber_project(
+            "p",
+            "http://127.0.0.1/",
+            &types(&["image"]),
+            6,
+            200,
+            "download",
+            None,
+        )
         .unwrap_err();
     assert!(err.to_string().contains("too deep"), "{err}");
     assert!(mgr
         .create_grabber_project("p", "http://127.0.0.1/", &[], 2, 200, "download", None)
         .is_err());
     assert!(mgr
-        .create_grabber_project("p", "http://127.0.0.1/", &types(&["image"]), 2, 1001, "download", None)
+        .create_grabber_project(
+            "p",
+            "http://127.0.0.1/",
+            &types(&["image"]),
+            2,
+            1001,
+            "download",
+            None
+        )
         .is_err());
     assert!(mgr
-        .create_grabber_project("p", "not a url", &types(&["image"]), 2, 200, "download", None)
+        .create_grabber_project(
+            "p",
+            "not a url",
+            &types(&["image"]),
+            2,
+            200,
+            "download",
+            None
+        )
         .is_err());
     assert!(mgr
-        .create_grabber_project("", "http://127.0.0.1/", &types(&["image"]), 2, 200, "download", None)
+        .create_grabber_project(
+            "",
+            "http://127.0.0.1/",
+            &types(&["image"]),
+            2,
+            200,
+            "download",
+            None
+        )
         .is_err());
     let ok = mgr
-        .create_grabber_project("p", "http://127.0.0.1/", &types(&["image", "document"]), 2, 200, "download", None)
+        .create_grabber_project(
+            "p",
+            "http://127.0.0.1/",
+            &types(&["image", "document"]),
+            2,
+            200,
+            "download",
+            None,
+        )
         .unwrap();
     assert_eq!(ok.status, "idle");
-    assert_eq!(ok.filters.types, vec!["image".to_string(), "document".to_string()]);
+    assert_eq!(
+        ok.filters.types,
+        vec!["image".to_string(), "document".to_string()]
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -97,7 +140,15 @@ fn create_rejects_excluded_start_site() {
     let mgr = test_mgr(&dir);
     set_excluded(mgr.store(), &["127.0.0.1"]);
     let err = mgr
-        .create_grabber_project("p", "http://127.0.0.1/page.html", &types(&["image"]), 2, 200, "download", None)
+        .create_grabber_project(
+            "p",
+            "http://127.0.0.1/page.html",
+            &types(&["image"]),
+            2,
+            200,
+            "download",
+            None,
+        )
         .unwrap_err();
     assert!(err.to_string().contains("excluded"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -111,7 +162,15 @@ async fn explore_only_lists_matched_files_without_downloading() {
     let mgr = test_mgr(&dir);
     let site = GrabberSite::start(RobotsMode::None);
     let p = mgr
-        .create_grabber_project("explore", &site.page_url, &all_types(), 2, 200, "explore", None)
+        .create_grabber_project(
+            "explore",
+            &site.page_url,
+            &all_types(),
+            2,
+            200,
+            "explore",
+            None,
+        )
         .unwrap();
     mgr.run_grabber(&p.id).await.unwrap();
     let done = wait_grabber(&mgr, &p.id, 30).await;
@@ -124,9 +183,9 @@ async fn explore_only_lists_matched_files_without_downloading() {
     assert!(urls.iter().any(|u| u.ends_with("/pic.png")));
     assert!(urls.iter().any(|u| u.ends_with("/archive.zip")));
     assert!(!urls.iter().any(|u| u.ends_with("/secret.pdf"))); // depth 3, not reached
-    // BUG-040: print the rows on failure — a non-empty list here
-    // used to mean the test opened a stale tmpdir database, and
-    // the bare `is_empty()` gave no clue which rows leaked in.
+                                                               // BUG-040: print the rows on failure — a non-empty list here
+                                                               // used to mean the test opened a stale tmpdir database, and
+                                                               // the bare `is_empty()` gave no clue which rows leaked in.
     let downloads = mgr.list_downloads().unwrap();
     assert!(
         downloads.is_empty(),
@@ -141,7 +200,15 @@ async fn same_host_only_off_site_link_never_matched_or_followed() {
     let mgr = test_mgr(&dir);
     let site = GrabberSite::start(RobotsMode::None);
     let p = mgr
-        .create_grabber_project("host", &site.page_url, &all_types(), 5, 200, "explore", None)
+        .create_grabber_project(
+            "host",
+            &site.page_url,
+            &all_types(),
+            5,
+            200,
+            "explore",
+            None,
+        )
         .unwrap();
     mgr.run_grabber(&p.id).await.unwrap();
     let done = wait_grabber(&mgr, &p.id, 30).await;
@@ -165,15 +232,19 @@ async fn depth_limit_is_enforced() {
     let done0 = wait_grabber(&mgr, &p0.id, 30).await;
     assert_eq!(done0.pages_explored, 1);
     assert_eq!(done0.files_matched, 3); // pic, doc, video
-    // Depth 1: page2/page3 files appear, deep files do not.
+                                        // Depth 1: page2/page3 files appear, deep files do not.
     let p1 = mgr
         .create_grabber_project("d1", &site.page_url, &all_types(), 1, 200, "explore", None)
         .unwrap();
     mgr.run_grabber(&p1.id).await.unwrap();
     let done1 = wait_grabber(&mgr, &p1.id, 30).await;
     assert_eq!(done1.pages_explored, 3);
-    assert!(matched_urls(&done1).iter().any(|u| u.ends_with("/song.mp3")));
-    assert!(!matched_urls(&done1).iter().any(|u| u.ends_with("/archive.zip")));
+    assert!(matched_urls(&done1)
+        .iter()
+        .any(|u| u.ends_with("/song.mp3")));
+    assert!(!matched_urls(&done1)
+        .iter()
+        .any(|u| u.ends_with("/archive.zip")));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -183,7 +254,15 @@ async fn type_filter_only_matches_selected_types() {
     let mgr = test_mgr(&dir);
     let site = GrabberSite::start(RobotsMode::None);
     let p = mgr
-        .create_grabber_project("img", &site.page_url, &types(&["image"]), 2, 200, "explore", None)
+        .create_grabber_project(
+            "img",
+            &site.page_url,
+            &types(&["image"]),
+            2,
+            200,
+            "explore",
+            None,
+        )
         .unwrap();
     mgr.run_grabber(&p.id).await.unwrap();
     let done = wait_grabber(&mgr, &p.id, 30).await;
@@ -204,7 +283,10 @@ async fn max_pages_cap_stops_cleanly() {
         .unwrap();
     mgr.run_grabber(&p.id).await.unwrap();
     let done = wait_grabber(&mgr, &p.id, 30).await;
-    assert_eq!(done.status, "done", "the cap is a clean stop, not a failure");
+    assert_eq!(
+        done.status, "done",
+        "the cap is a clean stop, not a failure"
+    );
     assert_eq!(done.pages_explored, 2);
     // Only the first two pages (index, then page2) contributed files.
     assert_eq!(done.files_matched, 4); // pic, doc, video, song
@@ -219,7 +301,15 @@ async fn robots_disallow_blocks_the_start_url() {
     let mgr = test_mgr(&dir);
     let site = GrabberSite::start(RobotsMode::BlockAll);
     let p = mgr
-        .create_grabber_project("robots", &site.page_url, &all_types(), 2, 200, "explore", None)
+        .create_grabber_project(
+            "robots",
+            &site.page_url,
+            &all_types(),
+            2,
+            200,
+            "explore",
+            None,
+        )
         .unwrap();
     mgr.run_grabber(&p.id).await.unwrap();
     let done = wait_grabber(&mgr, &p.id, 30).await;
@@ -236,7 +326,15 @@ async fn login_required_start_page_is_reported_not_skipped() {
     let mgr = test_mgr(&dir);
     let site = GrabberSite::start(RobotsMode::None);
     let p = mgr
-        .create_grabber_project("login", &site.login_url, &all_types(), 2, 200, "explore", None)
+        .create_grabber_project(
+            "login",
+            &site.login_url,
+            &all_types(),
+            2,
+            200,
+            "explore",
+            None,
+        )
         .unwrap();
     mgr.run_grabber(&p.id).await.unwrap();
     let done = wait_grabber(&mgr, &p.id, 30).await;
@@ -344,7 +442,15 @@ async fn stop_grabber_records_stopped() {
     let mgr = test_mgr(&dir);
     let site = GrabberSite::start(RobotsMode::None);
     let p = mgr
-        .create_grabber_project("stop", &site.page_url, &all_types(), 5, 200, "explore", None)
+        .create_grabber_project(
+            "stop",
+            &site.page_url,
+            &all_types(),
+            5,
+            200,
+            "explore",
+            None,
+        )
         .unwrap();
     mgr.run_grabber(&p.id).await.unwrap();
     // The crawl takes ~2 s (500 ms between 5 pages); stop mid-crawl.
@@ -403,7 +509,15 @@ async fn run_grabber_twice_is_rejected_while_running() {
     let mgr = test_mgr(&dir);
     let site = GrabberSite::start(RobotsMode::None);
     let p = mgr
-        .create_grabber_project("twice", &site.page_url, &all_types(), 5, 200, "explore", None)
+        .create_grabber_project(
+            "twice",
+            &site.page_url,
+            &all_types(),
+            5,
+            200,
+            "explore",
+            None,
+        )
         .unwrap();
     mgr.run_grabber(&p.id).await.unwrap();
     assert!(mgr.run_grabber(&p.id).await.is_err());
@@ -450,7 +564,11 @@ fn marker_script(dir: &std::path::Path, name: &str) -> (std::path::PathBuf, std:
     #[cfg(windows)]
     std::fs::write(&script, format!("@echo done > \"{}\"\n", marker.display())).unwrap();
     #[cfg(not(windows))]
-    std::fs::write(&script, format!("#!/bin/sh\necho done > {}\n", marker.display())).unwrap();
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\necho done > {}\n", marker.display()),
+    )
+    .unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -482,7 +600,11 @@ async fn grabber_files_land_in_the_chosen_queue_not_main() {
     assert_eq!(done.status, "done");
     assert_eq!(done.files_downloaded, 3);
     let in_queue = mgr.list_queue_files(&queue.id).unwrap();
-    assert_eq!(in_queue.len(), 3, "every grabbed file must be filed in the chosen queue");
+    assert_eq!(
+        in_queue.len(),
+        3,
+        "every grabbed file must be filed in the chosen queue"
+    );
     assert!(in_queue.iter().all(|d| d.status == "complete"));
     let in_main = mgr.list_queue_files("queue-main").unwrap();
     assert!(in_main.is_empty(), "nothing may leak into the main queue");
@@ -508,7 +630,10 @@ fn grabber_create_rejects_unknown_queue() {
         )
         .unwrap_err();
     assert!(err.to_string().contains("Queue not found"), "{err}");
-    assert!(mgr.list_grabber_projects().unwrap().is_empty(), "nothing is saved on a rejected create");
+    assert!(
+        mgr.list_grabber_projects().unwrap().is_empty(),
+        "nothing is saved on a rejected create"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -518,7 +643,15 @@ async fn grabber_create_defaults_to_main_queue_and_no_action() {
     let mgr = test_mgr(&dir);
     let site = GrabberSite::start(RobotsMode::None);
     let p = mgr
-        .create_grabber_project("plain", &site.page_url, &types(&["image"]), 0, 200, "download", None)
+        .create_grabber_project(
+            "plain",
+            &site.page_url,
+            &types(&["image"]),
+            0,
+            200,
+            "download",
+            None,
+        )
         .unwrap();
     assert_eq!(p.queue_id, "queue-main");
     assert_eq!(p.on_complete_action, "none");
@@ -539,23 +672,49 @@ fn grabber_create_rejects_bad_completion_action() {
     let mgr = test_mgr(&dir);
     let err = mgr
         .create_grabber_project_full(
-            "p", "http://127.0.0.1/", &types(&["image"]), 2, 200, "download", None, None,
-            "explode", None,
+            "p",
+            "http://127.0.0.1/",
+            &types(&["image"]),
+            2,
+            200,
+            "download",
+            None,
+            None,
+            "explode",
+            None,
         )
         .unwrap_err();
-    assert!(err.to_string().contains("Unknown completion action"), "{err}");
+    assert!(
+        err.to_string().contains("Unknown completion action"),
+        "{err}"
+    );
     for bad_program in [None, Some(""), Some("   ")] {
         let err = mgr
             .create_grabber_project_full(
-                "p", "http://127.0.0.1/", &types(&["image"]), 2, 200, "download", None, None,
-                "run_program", bad_program,
+                "p",
+                "http://127.0.0.1/",
+                &types(&["image"]),
+                2,
+                200,
+                "download",
+                None,
+                None,
+                "run_program",
+                bad_program,
             )
             .unwrap_err();
         assert!(err.to_string().contains("Choose a program"), "{err}");
     }
     // shutdown / hibernate need no program and are accepted.
     let ok = create_full(
-        &mgr, "shut", "http://127.0.0.1/", types(&["image"]), 2, "download", None, "shutdown",
+        &mgr,
+        "shut",
+        "http://127.0.0.1/",
+        types(&["image"]),
+        2,
+        "download",
+        None,
+        "shutdown",
         None,
     );
     assert_eq!(ok.on_complete_action, "shutdown");
@@ -569,21 +728,32 @@ async fn grabber_run_fails_when_its_queue_is_gone() {
     let site = GrabberSite::start(RobotsMode::None);
     let queue = mgr.create_queue("Doomed").unwrap();
     let p = create_full(
-        &mgr, "gone", &site.page_url, types(&["image"]), 0, "download", Some(&queue.id), "none",
+        &mgr,
+        "gone",
+        &site.page_url,
+        types(&["image"]),
+        0,
+        "download",
+        Some(&queue.id),
+        "none",
         None,
     );
     // The queue is deleted after the project was created — the
     // create-time check cannot catch this, the run must.
     {
         let db = rusqlite::Connection::open(dir.join("app.db")).unwrap();
-        db.execute("DELETE FROM queues WHERE id = ?1", [queue.id.as_str()]).unwrap();
+        db.execute("DELETE FROM queues WHERE id = ?1", [queue.id.as_str()])
+            .unwrap();
     }
     mgr.run_grabber(&p.id).await.unwrap();
     let done = wait_grabber(&mgr, &p.id, 30).await;
     assert_eq!(done.status, "failed");
     let err = done.error_message.unwrap_or_default();
     assert!(err.contains("no longer exists"), "{err}");
-    assert_eq!(done.pages_explored, 0, "the run must fail before crawling anything");
+    assert_eq!(
+        done.pages_explored, 0,
+        "the run must fail before crawling anything"
+    );
     // BUG-040: print the rows on failure — a non-empty list here
     // used to mean the test opened a stale tmpdir database, and
     // the bare `is_empty()` gave no clue which rows leaked in.
@@ -622,7 +792,11 @@ async fn grabber_completion_action_runs_when_files_downloaded() {
         .expect("the action must be armed after downloading a file");
     assert_eq!(pending.action, "run_program");
     assert!(
-        pending.file_path.as_deref().unwrap_or_default().ends_with("pic.png"),
+        pending
+            .file_path
+            .as_deref()
+            .unwrap_or_default()
+            .ends_with("pic.png"),
         "the action carries the downloaded file: {:?}",
         pending.file_path
     );
@@ -647,7 +821,14 @@ async fn grabber_completion_action_not_armed_when_nothing_downloaded() {
     // Only-dead page: one matched file, it fails both attempts.
     let dead_page = format!("{}/only-dead.html", site.base);
     let p = create_full(
-        &mgr, "zero", &dead_page, types(&["document"]), 0, "download", None, "run_program",
+        &mgr,
+        "zero",
+        &dead_page,
+        types(&["document"]),
+        0,
+        "download",
+        None,
+        "run_program",
         Some("/bin/true"),
     );
     mgr.run_grabber(&p.id).await.unwrap();
@@ -662,7 +843,15 @@ async fn grabber_completion_action_not_armed_when_nothing_downloaded() {
     );
     // And a run that matched nothing at all must not arm it either.
     let p2 = create_full(
-        &mgr, "zero2", &dead_page, types(&["image"]), 0, "download", None, "shutdown", None,
+        &mgr,
+        "zero2",
+        &dead_page,
+        types(&["image"]),
+        0,
+        "download",
+        None,
+        "shutdown",
+        None,
     );
     mgr.run_grabber(&p2.id).await.unwrap();
     let done2 = wait_grabber(&mgr, &p2.id, 60).await;
@@ -679,7 +868,15 @@ async fn grabber_completion_action_not_armed_in_explore_only() {
     let mgr = test_mgr(&dir);
     let site = GrabberSite::start(RobotsMode::None);
     let p = create_full(
-        &mgr, "exp", &site.page_url, all_types(), 2, "explore", None, "shutdown", None,
+        &mgr,
+        "exp",
+        &site.page_url,
+        all_types(),
+        2,
+        "explore",
+        None,
+        "shutdown",
+        None,
     );
     mgr.run_grabber(&p.id).await.unwrap();
     let done = wait_grabber(&mgr, &p.id, 30).await;
@@ -708,7 +905,15 @@ async fn grabber_completion_action_not_armed_when_the_run_failed() {
     let site = GrabberSite::start(RobotsMode::None);
     let missing = format!("{}/missing.html", site.base);
     let p = create_full(
-        &mgr, "dead", &missing, all_types(), 2, "download", None, "shutdown", None,
+        &mgr,
+        "dead",
+        &missing,
+        all_types(),
+        2,
+        "download",
+        None,
+        "shutdown",
+        None,
     );
     mgr.run_grabber(&p.id).await.unwrap();
     let done = wait_grabber(&mgr, &p.id, 30).await;
@@ -730,7 +935,14 @@ async fn grabber_completion_action_cancel_clears_it() {
     let mgr = test_mgr(&dir);
     let site = GrabberSite::start(RobotsMode::None);
     let p = create_full(
-        &mgr, "cancel", &site.page_url, types(&["image"]), 0, "download", None, "shutdown",
+        &mgr,
+        "cancel",
+        &site.page_url,
+        types(&["image"]),
+        0,
+        "download",
+        None,
+        "shutdown",
         None,
     );
     mgr.run_grabber(&p.id).await.unwrap();
@@ -775,7 +987,11 @@ async fn grabber_completion_action_open_file_names_the_last_file() {
         .expect("the open-file action must be armed");
     assert_eq!(pending.action, "open_file");
     assert!(
-        pending.file_path.as_deref().unwrap_or_default().ends_with("notes.txt"),
+        pending
+            .file_path
+            .as_deref()
+            .unwrap_or_default()
+            .ends_with("notes.txt"),
         "the last file downloaded is notes.txt: {:?}",
         pending.file_path
     );
@@ -790,7 +1006,15 @@ async fn grabber_completion_action_not_armed_when_stopped_after_downloading() {
     let mgr = test_mgr(&dir);
     let site = GrabberSite::start(RobotsMode::None);
     let p = create_full(
-        &mgr, "stopdl", &site.page_url, all_types(), 5, "download", None, "shutdown", None,
+        &mgr,
+        "stopdl",
+        &site.page_url,
+        all_types(),
+        5,
+        "download",
+        None,
+        "shutdown",
+        None,
     );
     mgr.run_grabber(&p.id).await.unwrap();
     // Poll fast: stop the moment the download phase has finished at
@@ -811,10 +1035,16 @@ async fn grabber_completion_action_not_armed_when_stopped_after_downloading() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(stopped, "the stop must land mid-download, not after the run finished");
+    assert!(
+        stopped,
+        "the stop must land mid-download, not after the run finished"
+    );
     let done = wait_grabber(&mgr, &p.id, 60).await;
     assert_eq!(done.status, "stopped");
-    assert!(done.files_downloaded >= 1, "files did download before the stop");
+    assert!(
+        done.files_downloaded >= 1,
+        "files did download before the stop"
+    );
     assert!(
         mgr.pending_action("queue-main").await.is_none(),
         "a stopped run must not arm its action even though files downloaded"

@@ -48,6 +48,21 @@
 //    button. A live stream's .m3u8 is offered as-is, labelled as a
 //    playlist file, never as a merged video.
 //
+// Round 78 (yt-dlp) — on a supported platform (YouTube,
+// Facebook, Instagram, TikTok — see video-detect.js
+// isSupportedPlatform) the <video> src is a blob:/MediaSource
+// handle, never the file, so the direct scan finds nothing and
+// the button still attaches. Clicking it resolves qualities
+// LAZILY through the host's yt-dlp (background.js opens one
+// connectNative port per resolve; heartbeats say "Checking… N
+// s"); nothing resolves on page load, on hover, or from the
+// popup scan. Resolved lists are cached in memory here, keyed
+// by normalized page URL for a few minutes, and cleared when
+// the page URL changes (SPA navigation). A needs_login error
+// asks once per site whether the browser login may be used
+// (stored consent grants silently next time; a denial is
+// remembered for this session only). No sizes are ever shown.
+//
 // The button and dropdown are Sonic design (dark #0B0F24, purple
 // #8B20FF → pink #F02DCD → cyan #00C8FF gradient) — no artwork or
 // wording from any other download manager. It never reads cookies,
@@ -160,6 +175,56 @@
     return allowedPromise;
   }
 
+  // Round 78 — resolve helpers live in video-detect.js (pure
+  // logic, shared with the Node tests); they are globals in the
+  // page (classic scripts share one scope) and on
+  // FetchlineVideoDetect in the vm tests. Fallbacks keep an old
+  // video-detect.js from breaking the direct path: without them
+  // the platform button simply never attaches.
+  const VD = (typeof globalThis !== "undefined" && globalThis.FetchlineVideoDetect) || {};
+  const isSupportedPlatformFn =
+    typeof isSupportedPlatform === "function" ? isSupportedPlatform : VD.isSupportedPlatform || (() => false);
+  const normalizePageUrlFn =
+    typeof normalizePageUrl === "function" ? normalizePageUrl : VD.normalizePageUrl || ((u) => String(u || ""));
+  const degradedWarningTextFn =
+    typeof degradedWarningText === "function" ? degradedWarningText : VD.degradedWarningText || (() => null);
+  const filterResolvableFormatsFn =
+    typeof filterResolvableFormats === "function" ? filterResolvableFormats : VD.filterResolvableFormats || ((f) => f || []);
+  const qualityRowLabelFn =
+    typeof qualityRowLabel === "function" ? qualityRowLabel : VD.qualityRowLabel || ((f) => (f && f.label) || "Unknown quality");
+  const buildResolvedVariantFn =
+    typeof buildResolvedVariant === "function" ? buildResolvedVariant : VD.buildResolvedVariant || null;
+  const createResolveCacheFn =
+    typeof createResolveCache === "function" ? createResolveCache : VD.createResolveCache || null;
+
+  // Round 78 — resolved format lists, cached in memory HERE
+  // (per page, never persisted — the URLs are signed and go
+  // stale), keyed by normalized page URL. The background holds
+  // no resolve state beyond one in-flight native port per
+  // requesting port. A denial of the cookie consent is kept for
+  // this session only; a grant is stored per site.
+  const resolveCache = createResolveCacheFn
+    ? createResolveCacheFn()
+    : { get: () => null, getEntry: () => null, isStale: () => true, set: () => {}, clear: () => {} };
+  const deniedConsentHosts = new Set();
+  let activeResolve = null; // { requestId, port, video, withCookies, cookies, onResolved }
+  let lastPageUrl = normalizePageUrlFn(location.href);
+  let loadingNote = null;
+
+  // Round 78 — SPA navigation (YouTube/Instagram/TikTok change
+  // the URL with history.pushState, no reload): the cached
+  // qualities belong to the OLD video and must never be offered
+  // for the new one. Called from the history wrappers, popstate,
+  // and every rescan (the MutationObserver backstop).
+  function notePageUrlChanged() {
+    const now = normalizePageUrlFn(location.href);
+    if (now === lastPageUrl) return false;
+    lastPageUrl = now;
+    resolveCache.clear();
+    closeDropdown();
+    return true;
+  }
+
   let button = null;
   let dropdown = null;
   let toast = null;
@@ -173,6 +238,10 @@
   // mouseenter listener (a rescan must not attach a second one).
   const byElement = new Map();
   const attached = new Set();
+  // Round 78 — platform videos with no direct downloadable
+  // source (blob: src): they still get a button, and clicking
+  // it resolves qualities instead of listing direct variants.
+  const resolveOnly = new Set();
 
   // (Re-)scan the live DOM for <video> / <audio> elements and
   // their <source> children (video-detect.js, loaded first in
@@ -188,11 +257,21 @@
       firstScanLogged = true;
       debugVideo("first-scan");
     }
+    // Round 78 — a rescan is also the backstop for SPA
+    // navigation: if the URL moved since the last scan, the
+    // cached qualities for the old video are dropped here.
+    notePageUrlChanged();
     const media = scanLiveMedia(document, location.href);
     // Drop videos that left the page since the last scan.
     for (const video of byElement.keys()) {
       if (!document.contains(video)) {
         byElement.delete(video);
+        attached.delete(video);
+      }
+    }
+    for (const video of resolveOnly) {
+      if (!document.contains(video)) {
+        resolveOnly.delete(video);
         attached.delete(video);
       }
     }
@@ -218,14 +297,24 @@
         typeof dedupeVariants === "function" ? dedupeVariants(variants) : variants;
       if (deduped.length > 0) {
         byElement.set(el, deduped);
-        if (!attached.has(el)) {
-          attached.add(el);
-          el.addEventListener("mouseenter", () => {
-            clearTimeout(hideTimer);
-            showButton(el);
-          });
-          el.addEventListener("mouseleave", scheduleHide);
-        }
+        resolveOnly.delete(el);
+      } else if (isSupportedPlatformFn(location.href)) {
+        // Round 78 — no direct source (blob: / empty src on a
+        // platform player): the button still attaches, and the
+        // click resolves qualities through yt-dlp instead.
+        byElement.delete(el);
+        resolveOnly.add(el);
+      } else {
+        byElement.delete(el);
+        resolveOnly.delete(el);
+      }
+      if ((byElement.has(el) || resolveOnly.has(el)) && !attached.has(el)) {
+        attached.add(el);
+        el.addEventListener("mouseenter", () => {
+          clearTimeout(hideTimer);
+          showButton(el);
+        });
+        el.addEventListener("mouseleave", scheduleHide);
       }
     });
     const downloadable = media.filter((v) => !v.drm).length;
@@ -275,15 +364,35 @@
       scheduleHide();
     });
     // Toggle the dropdown anchored below the button (a second
-    // click closes it again).
+    // click closes it again). Round 78: on a platform video with
+    // no direct source the click resolves qualities instead;
+    // repeat clicks are ignored while a resolve is in flight.
     b.addEventListener("click", () => {
       if (dropdown && dropdown.style.display !== "none" && dropdown._video === currentVideo) {
         closeDropdown();
+        return;
+      }
+      if (activeResolve && activeResolve.video === currentVideo) return;
+      if (needsResolve(currentVideo)) {
+        openResolveDropdown(currentVideo);
       } else {
         openDropdown(currentVideo);
       }
     });
     return b;
+  }
+
+  // Round 78 — this video's qualities come from the resolver,
+  // not the direct scan: either it is a platform video with no
+  // direct source, or it has no direct downloadable variants at
+  // all. A platform video WITH direct variants keeps the direct
+  // dropdown — the file is right there, no resolve needed.
+  function needsResolve(video) {
+    if (!video) return false;
+    if (!isSupportedPlatformFn(location.href)) return false;
+    if (resolveOnly.has(video)) return true;
+    const variants = byElement.get(video) || [];
+    return variants.length === 0;
   }
 
   // Top-right corner of the video, like IDM's floating button
@@ -298,7 +407,7 @@
 
   function showButton(video) {
     if (allowedResolved && !allowed) return;
-    if (!byElement.has(video)) return;
+    if (!byElement.has(video) && !resolveOnly.has(video)) return;
     if (!button) {
       button = makeButton();
       document.body.appendChild(button);
@@ -326,9 +435,33 @@
   }
 
   // Hide the dropdown only (the button stays until the pointer
-  // leaves the video, per scheduleHide).
+  // leaves the video, per scheduleHide). Round 78: closing it
+  // also cancels an in-flight resolve — the port closes, which
+  // kills the host's yt-dlp.
   function closeDropdown() {
+    if (activeResolve) cancelResolve();
     if (dropdown) dropdown.style.display = "none";
+  }
+
+  // Round 78 — cancel the in-flight resolve, if any, by
+  // closing its port to the background (which closes the native
+  // port, killing yt-dlp). Silent: a user-cancelled resolve is
+  // not an error to surface.
+  function cancelResolve() {
+    const current = activeResolve;
+    activeResolve = null;
+    if (button) button.disabled = false;
+    if (!current || !current.port) return;
+    try {
+      current.port.postMessage({ type: "cancel_resolve", request_id: current.requestId });
+    } catch {
+      // Port already gone.
+    }
+    try {
+      if (typeof current.port.disconnect === "function") current.port.disconnect();
+    } catch {
+      // Port already gone.
+    }
   }
 
   // Is `node` the element `root` itself or inside it? Walks
@@ -432,8 +565,10 @@
     }, 2600);
   }
 
-  function openDropdown(video) {
-    const variants = byElement.get(video) || [];
+  // Create the dropdown element once and anchor it below the
+  // button (shared by the direct dropdown and the Round 78
+  // resolve dropdown).
+  function ensureDropdown(video) {
     if (!dropdown) {
       dropdown = document.createElement("div");
       dropdown.setAttribute("role", "dialog");
@@ -457,8 +592,10 @@
     }
     dropdown._video = video;
     positionDropdown(video);
+    return dropdown;
+  }
 
-    dropdown.innerHTML = "";
+  function dropdownTitle() {
     const title = document.createElement("h3");
     title.textContent = "Download this video";
     Object.assign(title.style, {
@@ -470,7 +607,15 @@
       background: DROPDOWN_HEADER_BG,
       borderBottom: "1px solid rgba(255, 255, 255, 0.08)",
     });
-    dropdown.appendChild(title);
+    return title;
+  }
+
+  function openDropdown(video) {
+    const variants = byElement.get(video) || [];
+    ensureDropdown(video);
+
+    dropdown.innerHTML = "";
+    dropdown.appendChild(dropdownTitle());
 
     // One row per variant, deduped by URL at scan time (Round
     // 73): the whole row is the button — quality on the left,
@@ -543,7 +688,343 @@
     dropdown.style.display = "block";
   }
 
-  function sendVariant(variant, row, label) {
+  // -- Round 78 (yt-dlp) resolve flow ---------------------------------
+  //
+  // Lazy only: nothing here runs until the user clicks the
+  // button on a platform video. The dropdown opens in a
+  // "Checking…" state, the background opens one connectNative
+  // port to the host, and heartbeats update the elapsed seconds
+  // until the final `resolved` or `error` reply arrives.
+
+  function openResolveDropdown(video) {
+    if (activeResolve && activeResolve.video === video) return;
+    const cached = resolveCache.get(normalizePageUrlFn(location.href));
+    if (cached) {
+      renderResolved(video, cached);
+      return;
+    }
+    renderResolveLoading(video);
+    startResolve(video, { withCookies: false, cookies: [], onResolved: null });
+  }
+
+  function renderResolveLoading(video) {
+    ensureDropdown(video);
+    dropdown.innerHTML = "";
+    dropdown.appendChild(dropdownTitle());
+    loadingNote = document.createElement("p");
+    loadingNote.style.cssText = "margin: 0; padding: 11px 14px; font-size: 13px; color: #E8ECF8;";
+    loadingNote.textContent = "Checking… 0 s";
+    dropdown.appendChild(loadingNote);
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.textContent = "Cancel";
+    Object.assign(cancel.style, {
+      display: "block",
+      width: "100%",
+      padding: "11px 14px",
+      border: "0",
+      background: "none",
+      fontFamily: "inherit",
+      fontSize: "13.5px",
+      color: "#F02DCD",
+      textAlign: "left",
+      cursor: "pointer",
+    });
+    cancel.addEventListener("click", () => closeDropdown());
+    dropdown.appendChild(cancel);
+    dropdown.style.display = "block";
+  }
+
+  function updateResolveLoading(elapsedSecs) {
+    if (!loadingNote) return;
+    const secs = typeof elapsedSecs === "number" ? elapsedSecs : 0;
+    loadingNote.textContent = `Checking… ${secs} s`;
+  }
+
+  function renderResolveError(video, message) {
+    ensureDropdown(video);
+    dropdown.innerHTML = "";
+    loadingNote = null;
+    dropdown.appendChild(dropdownTitle());
+    const note = document.createElement("p");
+    note.style.cssText = "margin: 0; padding: 11px 14px; font-size: 13px; color: #F02DCD;";
+    note.textContent = message;
+    dropdown.appendChild(note);
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.textContent = "Try again";
+    Object.assign(retry.style, {
+      display: "block",
+      width: "100%",
+      padding: "11px 14px",
+      border: "0",
+      background: "none",
+      fontFamily: "inherit",
+      fontSize: "13.5px",
+      color: "#ffffff",
+      textAlign: "left",
+      cursor: "pointer",
+    });
+    retry.addEventListener("click", () => {
+      renderResolveLoading(video);
+      startResolve(video, { withCookies: false, cookies: [], onResolved: null });
+    });
+    dropdown.appendChild(retry);
+    dropdown.style.display = "block";
+  }
+
+  // One row per resolved format, 360p and up, with the honest
+  // note for video-only / stream rows. No sizes — nothing here
+  // knows one. A degraded reply shows the warning at the top;
+  // a live stream shows that it cannot be downloaded, and no
+  // qualities at all.
+  function renderResolved(video, entry) {
+    const resolved = entry.resolved;
+    ensureDropdown(video);
+    dropdown.innerHTML = "";
+    loadingNote = null;
+    dropdown.appendChild(dropdownTitle());
+    if (resolved.is_live) {
+      const note = document.createElement("p");
+      note.style.cssText = "margin: 0; padding: 11px 14px; font-size: 13px; color: #F02DCD;";
+      note.textContent = "Live streams can't be downloaded";
+      dropdown.appendChild(note);
+      dropdown.style.display = "block";
+      return;
+    }
+    const warning = degradedWarningTextFn(resolved);
+    if (warning) {
+      const note = document.createElement("p");
+      note.style.cssText =
+        "margin: 0; padding: 11px 14px; font-size: 12px; color: #F5C542; border-bottom: 1px solid rgba(255, 255, 255, 0.08);";
+      note.textContent = warning;
+      dropdown.appendChild(note);
+    }
+    const formats = filterResolvableFormatsFn(resolved.formats || []);
+    if (formats.length === 0) {
+      const note = document.createElement("p");
+      note.style.cssText = "margin: 0; padding: 11px 14px; font-size: 13px; color: #F02DCD;";
+      note.textContent = "No downloadable qualities were found for this video.";
+      dropdown.appendChild(note);
+      dropdown.style.display = "block";
+      return;
+    }
+    formats.forEach((format) => {
+      const row = document.createElement("button");
+      row.type = "button";
+      row._quality = true;
+      Object.assign(row.style, {
+        display: "flex",
+        width: "100%",
+        justifyContent: "space-between",
+        alignItems: "center",
+        padding: "11px 14px",
+        border: "0",
+        background: "none",
+        fontFamily: "inherit",
+        fontSize: "13.5px",
+        color: "#ffffff",
+        textAlign: "left",
+        cursor: "pointer",
+      });
+      const label = document.createElement("span");
+      label.textContent = qualityRowLabelFn(format);
+      row.appendChild(label);
+      const formatEl = document.createElement("span");
+      formatEl.textContent = String((format.ext || "mp4")).toUpperCase();
+      formatEl.style.cssText = "font-size: 12px; color: #8f9bbd;";
+      row.appendChild(formatEl);
+      row._label = label;
+      row.addEventListener("mouseenter", () => {
+        if (!row.disabled) row.style.background = ROW_HOVER_BG;
+      });
+      row.addEventListener("mouseleave", () => {
+        row.style.background = "none";
+      });
+      row.addEventListener("click", () => pickResolvedFormat(video, format, entry, row, label));
+      dropdown.appendChild(row);
+    });
+    dropdown.style.display = "block";
+  }
+
+  function startResolve(video, { withCookies, cookies, onResolved }) {
+    const requestId =
+      typeof crypto !== "undefined" && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `resolve-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    let port;
+    try {
+      port = chrome.runtime.connect({ name: "sonic-resolve" });
+    } catch {
+      renderResolveError(video, "Sonic Manager could not be reached.");
+      return;
+    }
+    if (!port || typeof port.postMessage !== "function") {
+      renderResolveError(video, "Sonic Manager could not be reached.");
+      return;
+    }
+    activeResolve = {
+      requestId,
+      port,
+      video,
+      withCookies: withCookies === true,
+      cookies: cookies || [],
+      onResolved: onResolved || null,
+    };
+    if (button) button.disabled = true;
+    if (port.onMessage && typeof port.onMessage.addListener === "function") {
+      port.onMessage.addListener((msg) => handleResolveMessage(msg, video));
+    }
+    if (port.onDisconnect && typeof port.onDisconnect.addListener === "function") {
+      port.onDisconnect.addListener(() => {
+        // The background went away mid-resolve: surface it,
+        // unless we cancelled it ourselves (then there is
+        // nothing to show — the dropdown is already closing).
+        if (activeResolve && activeResolve.requestId === requestId) {
+          activeResolve = null;
+          if (button) button.disabled = false;
+          renderResolveError(video, "Sonic Manager stopped answering.");
+        }
+      });
+    }
+    port.postMessage({
+      type: "resolve_video",
+      page_url: location.href,
+      request_id: requestId,
+      with_cookies: withCookies === true,
+      cookies: cookies || [],
+    });
+  }
+
+  function handleResolveMessage(msg, video) {
+    if (!msg || !activeResolve) return;
+    if (msg.request_id && msg.request_id !== activeResolve.requestId) return;
+    if (msg.type === "resolve_progress") {
+      updateResolveLoading(msg.elapsed_secs);
+      return;
+    }
+    if (msg.type === "resolved") {
+      const done = activeResolve;
+      activeResolve = null;
+      if (button) button.disabled = false;
+      const entry = { resolved: msg, cookies: done.cookies || [] };
+      resolveCache.set(normalizePageUrlFn(location.href), entry);
+      if (done.onResolved) {
+        done.onResolved(entry);
+        return;
+      }
+      renderResolved(video, entry);
+      return;
+    }
+    if (msg.type === "error") {
+      const done = activeResolve;
+      activeResolve = null;
+      if (button) button.disabled = false;
+      void handleResolveError(video, msg, done);
+    }
+  }
+
+  // Needs-login: ask once per site whether the browser login
+  // may be used. A stored grant re-sends with cookies silently;
+  // a denial is remembered for this session only, so the user
+  // is not asked on every click. The retry carries the cookies
+  // the background fetched for this page — and those same
+  // cookies are attached to the video_found pick later.
+  async function handleResolveError(video, err, done) {
+    if (err && err.needs_login && done && !done.withCookies) {
+      const host = hostOf(location.href);
+      const key = `ytdlp_cookie_consent:${host}`;
+      let granted = false;
+      try {
+        const stored = await chrome.storage.local.get([key]);
+        granted = !!(stored && stored[key] === true);
+      } catch {
+        granted = false;
+      }
+      if (!granted && !deniedConsentHosts.has(host)) {
+        if (typeof confirm === "function") {
+          granted = confirm(
+            "This video needs login. Allow Sonic Manager to use your browser login for this site to fetch its qualities?",
+          );
+        }
+        if (granted) {
+          try {
+            await chrome.storage.local.set({ [key]: true });
+          } catch {
+            // Consent not persisted: the retry still runs once.
+          }
+        } else {
+          deniedConsentHosts.add(host);
+        }
+      }
+      if (granted) {
+        const cookies = await requestCookies(location.href);
+        renderResolveLoading(video);
+        startResolve(video, {
+          withCookies: true,
+          cookies,
+          onResolved: done.onResolved || null,
+        });
+        return;
+      }
+    }
+    renderResolveError(
+      video,
+      (err && err.error) || "Sonic Manager could not fetch this video's qualities.",
+    );
+  }
+
+  // Content scripts cannot read chrome.cookies — the background
+  // fetches the page's cookies for us. Only ever called after
+  // the user granted the needs-login retry for this site.
+  function requestCookies(url) {
+    return new Promise((resolve) => {
+      try {
+        chrome.runtime.sendMessage({ type: "cookies_for", url }, (reply) => {
+          resolve(reply && Array.isArray(reply.cookies) ? reply.cookies : []);
+        });
+      } catch {
+        resolve([]);
+      }
+    });
+  }
+
+  // Picking a quality whose cached entry expired re-resolves
+  // first, then sends the same quality from the fresh list —
+  // the old URLs may be signed and dead by now.
+  function pickResolvedFormat(video, format, entry, row, label) {
+    const key = normalizePageUrlFn(location.href);
+    if (resolveCache.isStale(key)) {
+      renderResolveLoading(video);
+      startResolve(video, {
+        withCookies: !!(entry.cookies && entry.cookies.length > 0),
+        cookies: entry.cookies || [],
+        onResolved: (fresh) => {
+          const freshFormat = (fresh.resolved.formats || []).find(
+            (f) => f && f.format_id === format.format_id,
+          );
+          if (!freshFormat) {
+            renderResolveError(video, "That quality is no longer available for this video.");
+            return;
+          }
+          sendResolvedVariant(freshFormat, fresh, row, label);
+        },
+      });
+      return;
+    }
+    sendResolvedVariant(format, entry, row, label);
+  }
+
+  function sendResolvedVariant(format, entry, row, label) {
+    if (!buildResolvedVariantFn) {
+      showToast("Sonic Manager couldn't take this video: the extension needs an update.");
+      return;
+    }
+    const variant = buildResolvedVariantFn(format, entry.resolved, location.href);
+    sendVariant(variant, row, label, entry.cookies || []);
+  }
+
+  function sendVariant(variant, row, label, cookies) {
     // The dropdown closes on pick (like the approved preview);
     // the toast confirms the outcome, and the row is restored
     // for a retry if the send failed. The send itself is
@@ -553,8 +1034,14 @@
     const originalLabel = label.textContent;
     row.disabled = true;
     label.textContent = "Sending…";
+    // Round 78: a resolved pick carries its resolve's cookies
+    // (possibly []) as a top-level field; a direct pick sends
+    // no cookies field at all, and the background attaches the
+    // media URL's cookies as before.
+    const message = { type: "video_found", page_url: location.href, variants: [variant] };
+    if (cookies !== undefined) message.cookies = cookies;
     chrome.runtime.sendMessage(
-      { type: "video_found", page_url: location.href, variants: [variant] },
+      message,
       (reply) => {
         if (reply && reply.ok !== false) {
           showToast("Sent to Sonic Manager — it will appear in the download list.");
@@ -583,6 +1070,13 @@
         showButton(video);
         break;
       }
+    }
+    if (button && button.style.display !== "none") return;
+    // Round 78 — a platform video with no direct source shows
+    // the button too, even though it has no variants yet.
+    for (const video of resolveOnly) {
+      showButton(video);
+      break;
     }
   }
 
@@ -720,14 +1214,54 @@
       if (typeof MutationObserver !== "undefined" && MutationObserver) {
         const observer = new MutationObserver(() => scheduleRescan());
         const target = document.body || document.documentElement || document;
-        observer.observe(target, { childList: true, subtree: true });
+        // Round 78 — attributes: ["src"] is the SPA backstop:
+        // a player swapping its <video> src without navigating
+        // still triggers a rescan, which drops the cached
+        // qualities when the page URL moved with it.
+        observer.observe(target, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: ["src"],
+        });
       }
     } catch {
       // No MutationObserver in this context: loadedmetadata and
       // on-demand rescans still cover videos added later.
     }
+    // Round 78 — SPA navigation without a reload: wrap
+    // pushState/replaceState and watch popstate, so the cached
+    // qualities for the old video are dropped the moment the URL
+    // changes, never offered for the new video.
+    try {
+      if (window.history && typeof window.history.pushState === "function") {
+        const origPush = window.history.pushState.bind(window.history);
+        const origReplace = window.history.replaceState.bind(window.history);
+        window.history.pushState = (...args) => {
+          const result = origPush(...args);
+          notePageUrlChanged();
+          return result;
+        };
+        window.history.replaceState = (...args) => {
+          const result = origReplace(...args);
+          notePageUrlChanged();
+          return result;
+        };
+      }
+    } catch {
+      // History unwrappable here: rescans still catch the move.
+    }
+    window.addEventListener("popstate", () => notePageUrlChanged());
     for (const [video, variants] of byElement) {
       if (variants.length > 0) {
+        showButton(video);
+        break;
+      }
+    }
+    // Round 78 — show the button immediately for the first
+    // platform video with no direct source, too.
+    if (!button || button.style.display === "none") {
+      for (const video of resolveOnly) {
         showButton(video);
         break;
       }

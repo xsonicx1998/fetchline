@@ -2696,18 +2696,134 @@ fn resolve_pending_link(
 /// Round 67 — probe a URL for the Add URL dialog (file size and
 /// name, for the cyan size on the remember-path row). `cookies`
 /// is a browser capture's stored cookies JSON, or `None` — a
-/// cookie-gated link probes 401 without them.
+/// cookie-gated link probes 401 without them. `headers` is the
+/// resolved video's headers JSON (User-Agent / Referer from
+/// yt-dlp's `http_headers`), or `None` — a stream host that
+/// expects them answers the global "Fetchline/0.1" UA with 403.
 #[tauri::command]
 async fn probe_url(
     state: State<'_, AppState>,
     url: String,
     cookies: Option<String>,
+    headers: Option<String>,
 ) -> Result<ProbeInfo, String> {
     state
         .manager
-        .probe_url_for_capture(&url, cookies.as_deref())
+        .probe_url_for_capture_with_headers(&url, cookies.as_deref(), headers.as_deref())
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Round 78 — where the yt-dlp sidecars live for this app run:
+/// the AppData bin dir first (where updates install), then next
+/// to the app exe. The paths are returned through
+/// `clean_windows_path`, so the qjs path passed to
+/// `--js-runtimes` is one yt-dlp accepts (no `\\?\` prefix).
+fn ytdlp_paths() -> fetchline_engine::ytdlp::YtDlpPaths {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    fetchline_engine::ytdlp::locate_sidecars(&exe_dir)
+}
+
+/// Round 78 — what the Settings UI shows for the video
+/// component: the installed yt-dlp version (if any), its path,
+/// and whether the QuickJS solver and ffmpeg are present.
+#[derive(serde::Serialize)]
+struct YtdlpStatus {
+    version: Option<String>,
+    path: String,
+    qjs: bool,
+    ffmpeg: bool,
+}
+
+/// Round 78 — the installed yt-dlp's version and sidecar
+/// presence, for the Settings "Video downloads" section.
+#[tauri::command]
+async fn ytdlp_version() -> Result<YtdlpStatus, String> {
+    let paths = ytdlp_paths();
+    Ok(YtdlpStatus {
+        version: fetchline_engine::ytdlp::ytdlp_version(&paths).await,
+        path: clean_windows_path(&paths.ytdlp),
+        qjs: paths.qjs.is_some(),
+        // The merge tool is only whole when BOTH ffmpeg and
+        // ffprobe are present — yt-dlp's merge needs both.
+        ffmpeg: paths.ffmpeg.is_some() && paths.ffprobe.is_some(),
+    })
+}
+
+/// Round 78 — the result of resolving a platform video page
+/// from the app itself (a YouTube URL pasted into Add URL):
+/// the title and the trimmed quality list, exactly like the
+/// host's `resolved` reply. No cookies — the app has no browser
+/// session; a login-gated video resolves through the extension
+/// instead. The hidden extractor-args override from Settings is
+/// honoured when set.
+#[derive(serde::Serialize)]
+struct YtdlpResolveResult {
+    title: String,
+    is_live: bool,
+    degraded: bool,
+    warning: Option<String>,
+    formats: Vec<fetchline_engine::ytdlp::QualityRow>,
+}
+
+#[tauri::command]
+async fn ytdlp_resolve(
+    state: State<'_, AppState>,
+    url: String,
+) -> Result<YtdlpResolveResult, String> {
+    let settings = state
+        .manager
+        .store()
+        .get_settings()
+        .map_err(|e| e.to_string())?;
+    if !settings.platform_downloads_enabled {
+        return Err("Platform downloads are turned off in Fetchline settings".to_string());
+    }
+    let opts = fetchline_engine::ytdlp::ResolveOptions {
+        paths: ytdlp_paths(),
+        cookies: Vec::new(),
+        extractor_args: settings.ytdlp_extractor_args,
+        timeout_secs: fetchline_engine::ytdlp::RESOLVE_TIMEOUT_SECS,
+    };
+    let video = fetchline_engine::ytdlp::resolve(&url, &opts)
+        .await
+        .map_err(|e| e.user_message())?;
+    // The rows are computed before any field moves out of the
+    // video (a struct literal cannot borrow the whole value
+    // after a field has moved).
+    let formats = fetchline_engine::ytdlp::quality_rows(&video);
+    Ok(YtdlpResolveResult {
+        title: video.title,
+        is_live: video.is_live,
+        degraded: video.degraded,
+        warning: video.warnings.into_iter().next(),
+        formats,
+    })
+}
+
+/// Round 78 — download the newest yt-dlp.exe from its GitHub
+/// release into the AppData bin dir, verified against the
+/// release's published SHA-256 checksums (a failed checksum is
+/// refused, never installed). Returns the fresh status, so the
+/// Settings UI can show the new version at once.
+#[tauri::command]
+async fn ytdlp_update(state: State<'_, AppState>) -> Result<YtdlpStatus, String> {
+    let proxy = state.manager.proxy_config();
+    fetchline_engine::ytdlp::update_ytdlp(proxy.as_ref())
+        .await
+        .map_err(|e| e.user_message())?;
+    let paths = ytdlp_paths();
+    Ok(YtdlpStatus {
+        version: fetchline_engine::ytdlp::ytdlp_version(&paths).await,
+        path: clean_windows_path(&paths.ytdlp),
+        qjs: paths.qjs.is_some(),
+        // The merge tool is only whole when BOTH ffmpeg and
+        // ffprobe are present — yt-dlp's merge needs both.
+        ffmpeg: paths.ffmpeg.is_some() && paths.ffprobe.is_some(),
+    })
 }
 
 /// Round 67 — set the Add URL dialog's Description note on a
@@ -3783,6 +3899,9 @@ pub fn run() {
             list_pending_links,
             resolve_pending_link,
             probe_url,
+            ytdlp_version,
+            ytdlp_resolve,
+            ytdlp_update,
             set_download_description,
             confirm_pending_link,
         ])

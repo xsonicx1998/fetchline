@@ -65,14 +65,16 @@ pub fn classify_kind(filename: &str) -> LinkKind {
         .unwrap_or("")
         .to_ascii_lowercase();
     // A name with no dot (or a leading-dot name) has no extension.
-    let ext = if filename.contains('.') { ext.as_str() } else { "" };
+    let ext = if filename.contains('.') {
+        ext.as_str()
+    } else {
+        ""
+    };
     match ext {
         "mp4" | "mkv" | "avi" | "mov" | "webm" | "flv" | "wmv" | "mpg" | "mpeg" | "m4v"
         | "m3u8" | "mpd" => LinkKind::Video,
         "mp3" | "flac" | "wav" | "aac" | "ogg" | "m4a" | "wma" => LinkKind::Audio,
-        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "svg" | "ico" | "avif" => {
-            LinkKind::Image
-        }
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "svg" | "ico" | "avif" => LinkKind::Image,
         "pdf" | "doc" | "docx" | "txt" | "epub" | "md" | "rtf" | "xls" | "xlsx" | "ppt"
         | "pptx" | "csv" => LinkKind::Document,
         "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz" => LinkKind::Archive,
@@ -132,8 +134,8 @@ pub fn extract_links(html: &str, base_url: &str) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     for (tag, attr) in scan_link_attrs(html) {
         let is_href = attr.0 == "href" && matches!(tag.as_str(), "a" | "link");
-        let is_src = attr.0 == "src"
-            && matches!(tag.as_str(), "img" | "video" | "audio" | "source");
+        let is_src =
+            attr.0 == "src" && matches!(tag.as_str(), "img" | "video" | "audio" | "source");
         if !is_href && !is_src {
             continue;
         }
@@ -242,10 +244,7 @@ fn scan_link_attrs(html: &str) -> Vec<(String, (String, String))> {
                     v
                 } else {
                     let vstart = j;
-                    while j < bytes.len()
-                        && !bytes[j].is_ascii_whitespace()
-                        && bytes[j] != b'>'
-                    {
+                    while j < bytes.len() && !bytes[j].is_ascii_whitespace() && bytes[j] != b'>' {
                         j += 1;
                     }
                     html[vstart..j].to_string()
