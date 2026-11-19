@@ -452,7 +452,7 @@ function RowMenu({
       <MenuItem label="Open progress window" onClick={closeMenu(onOpenProgress)} />
       <MenuItem
         label="Redownload"
-        title="Delete this row and download the same link again from scratch"
+        title="Download the same link again from scratch (the row stays; downloaded bytes are discarded)"
         onClick={closeMenu(onRedownload)}
       />
       <MenuItem

@@ -23,6 +23,7 @@
     "dev": "vite",
     "preview": "vite preview",
     "test:extension": "python3 extension/tests/validate_manifest.py && python3 extension/tests/validate_host_manifest.py",
+    "test:extension-content": "node --test extension/tests/content.test.js",
     "test:extension-video": "node --test extension/tests/video-detect.test.js",
     "test:extension-popup": "node --test extension/tests/popup.test.js",
     "test:extension-background": "node --test extension/tests/background.test.js",

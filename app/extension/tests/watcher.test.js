@@ -32,7 +32,7 @@ const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
 // Test-only dummy cookie values, never real ones.
 const DUMMY_COOKIES = [{ name: "session", value: "test-dummy-value" }];
 
-function loadBackground({ seed = {}, cookiesForUrl = () => [], cancelThrows = false, hostError = null, failHandover = false } = {}) {
+function loadBackground({ seed = {}, cookiesForUrl = () => [], cancelThrows = false, hostError = null, failHandover = false, completeDuringPing = false, searchThrows = false } = {}) {
   const storage = { ...seed };
   const sentMessages = [];
   const cancelled = [];
@@ -40,6 +40,14 @@ function loadBackground({ seed = {}, cookiesForUrl = () => [], cancelThrows = fa
   const paused = [];
   const resumed = [];
   const listeners = {};
+  // Round 73 (Group 4) — simulated per-download state for
+  // chrome.downloads.search: fireDownload seeds it from the
+  // item's state (default in_progress); tests can flip it via
+  // setDownloadState, and completeDuringPing flips every tracked
+  // download to "complete" while the ping is in flight, so the
+  // already-finished race can be simulated.
+  const downloadStates = new Map();
+  const setDownloadState = (id, state) => { downloadStates.set(id, state); };
   const chrome = {
     storage: {
       local: {
@@ -61,6 +69,13 @@ function loadBackground({ seed = {}, cookiesForUrl = () => [], cancelThrows = fa
       onMessage: { addListener(fn) { listeners.message = fn; } },
       sendNativeMessage(_host, message, cb) {
         sentMessages.push(message);
+        // Round 73 (Group 4) — completeDuringPing: the download
+        // finishes while the ping is in flight. Flip the tracked
+        // state before resolving so the watcher's post-handover
+        // search sees "complete".
+        if (completeDuringPing && message.type === "ping") {
+          for (const id of downloadStates.keys()) downloadStates.set(id, "complete");
+        }
         // Round 71 (A4) — `failHandover` fails only the hand-off,
         // not the ping: the watcher pings first, so a host that
         // answers the ping but fails the hand-off must still
@@ -101,6 +116,13 @@ function loadBackground({ seed = {}, cookiesForUrl = () => [], cancelThrows = fa
         cancelled.push(id);
       },
       erase: async ({ id }) => { erased.push(id); },
+      // Round 73 (Group 4) — chrome.downloads.search: returns the
+      // simulated current state for the id (default in_progress
+      // when the test never seeded/flipped it).
+      search: async ({ id } = {}) => {
+        if (searchThrows) throw new Error("search failed");
+        return [{ id, state: downloadStates.get(id) || "in_progress" }];
+      },
     },
     cookies: {
       getAll: async ({ url }) => cookiesForUrl(url),
@@ -118,7 +140,10 @@ function loadBackground({ seed = {}, cookiesForUrl = () => [], cancelThrows = fa
     paused,
     resumed,
     listeners,
+    downloadStates,
+    setDownloadState,
     async fireDownload(item) {
+      downloadStates.set(item.id, item.state || "in_progress");
       await listeners.downloadCreated(item);
       await tick();
     },
@@ -361,4 +386,53 @@ test("watcher catches an http(s) download link on a file:// page (Round 72 B)", 
   assert.deepEqual(env.erased, [8]);
   assert.equal(env.sentMessages.length, 2);
   assert.equal(env.sentMessages[1].url, "http://127.0.0.1:62282/slow-a.mp4");
+});
+
+test("watcher erases without cancelling when the download completes during pingHost() (Round 73 Group 4)", async () => {
+  // The download finishes while the ping is in flight, so by the
+  // time the hand-off is confirmed the browser copy is complete:
+  // cancel() on a completed download throws in real Chrome, so
+  // the watcher must erase the finished copy from the list and
+  // NEVER call cancel. The hand-off itself still succeeds and
+  // nothing is resumed.
+  const env = loadBackground({ seed: { desktopIntegration: true }, completeDuringPing: true });
+  await env.fireDownload(zipDownload(1));
+  assert.deepEqual(env.cancelled, []);
+  assert.deepEqual(env.erased, [1]);
+  assert.deepEqual(env.resumed, []);
+  assert.equal(env.sentMessages.length, 2);
+  assert.equal(env.sentMessages[1].url, "http://127.0.0.1/file.zip");
+  assert.equal(env.storage.lastHandoff.ok, true);
+});
+
+test("watcher catches a download with an empty filename by falling back to the URL (Round 73 Group 4)", async () => {
+  // Chrome can fire onCreated before the filename is known
+  // (filename ""), so the watcher falls back to the URL's
+  // extension (extensionOfFilename("") || extensionOf(url)) —
+  // no onDeterminingFilename listener is needed.
+  const env = loadBackground({ seed: { desktopIntegration: true } });
+  await env.fireDownload({
+    id: 1,
+    url: "http://127.0.0.1/slow-a.mp4",
+    filename: "",
+    state: "in_progress",
+    referrer: "http://127.0.0.1/page.html",
+  });
+  assert.deepEqual(env.paused, [1]);
+  assert.deepEqual(env.cancelled, [1]);
+  assert.deepEqual(env.erased, [1]);
+  assert.equal(env.sentMessages.length, 2);
+  assert.equal(env.sentMessages[1].url, "http://127.0.0.1/slow-a.mp4");
+  assert.equal(env.storage.lastHandoff.ok, true);
+});
+
+test("watcher falls back to try-cancel when downloads.search rejects (Round 73 Group 4)", async () => {
+  // If the state lookup itself fails, the watcher must behave
+  // exactly as before: try cancel, erase only if cancelled.
+  const env = loadBackground({ seed: { desktopIntegration: true }, searchThrows: true });
+  await env.fireDownload(zipDownload(1));
+  assert.deepEqual(env.cancelled, [1]);
+  assert.deepEqual(env.erased, [1]);
+  assert.equal(env.sentMessages.length, 2);
+  assert.equal(env.storage.lastHandoff.ok, true);
 });

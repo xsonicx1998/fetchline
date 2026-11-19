@@ -494,6 +494,11 @@ export interface Settings {
   confirm_delete: boolean
   connection_timeout_secs: number
   max_retries: number
+  /** Patient tail (Round 73): minutes of zero byte progress
+   *  after which a patient tail gives up on a dead server
+   *  (1–120, default 10). No Settings control yet — the value
+   *  round-trips through the dialog so a save never resets it. */
+  tail_zero_progress_cap_minutes: number
   /** Download quota (S12): the on/off switch, the limit in MB
    *  every `quota_hours` hours (null = no quota configured). The
    *  live window (usage + window end) is not stored here — it

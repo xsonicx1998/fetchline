@@ -207,6 +207,8 @@ export default function App() {
   const [quotaStatus, setQuotaStatus] = useState<QuotaStatus | null>(null)
   const [showSettings, setShowSettings] = useState(false)
   const [confirmRemove, setConfirmRemove] = useState<DownloadRow | null>(null)
+  /** Round 73 — the Redownload warning dialog's row, if open. */
+  const [confirmRedownload, setConfirmRedownload] = useState<DownloadRow | null>(null)
   /** Round 51 — refresh download address: the row whose expired
    *  link is being replaced; null when the dialog is closed. */
   const [refreshTarget, setRefreshTarget] = useState<DownloadRow | null>(null)
@@ -567,6 +569,18 @@ export default function App() {
     setSelectedId(download.id)
   }
 
+  /** Round 73 — Redownload on a Failed/partial row discards the
+   *  bytes already downloaded and starts over; Resume keeps
+   *  them. Warn first so the user does not lose progress by
+   *  picking the wrong item. A Finished row needs no warning —
+   *  its file is on disk and nothing is lost. */
+  function redownloadNeedsWarning(download: DownloadRow) {
+    return (
+      download.status !== 'complete' &&
+      (download.status === 'error' || download.downloaded_bytes > 0)
+    )
+  }
+
   const selected = useMemo(
     () => downloads.find((d) => d.id === selectedId) ?? null,
     [downloads, selectedId],
@@ -598,10 +612,19 @@ export default function App() {
   const runningCount = downloads.filter((d) => d.status === 'downloading').length
   const hasComplete = downloads.some((d) => d.status === 'complete')
 
-  async function run(action: () => Promise<void>) {
+  async function run(action: () => Promise<void>, opts?: { immediate?: boolean }) {
     // Round 72 (C) — busy feedback, delayed so fast actions do
     // not flicker the status bar (see `actionBusy` above).
-    actionBusyTimerRef.current = setTimeout(() => setActionBusy(true), 400)
+    // Round 73 — `immediate` shows "Working…" at once (no 400 ms
+    // delay) for Redownload and Resume: on a Failed row the
+    // Round 72 retest showed no feedback at all while the probe
+    // retried, and the user read the silence as "nothing
+    // happened".
+    if (opts?.immediate) {
+      setActionBusy(true)
+    } else {
+      actionBusyTimerRef.current = setTimeout(() => setActionBusy(true), 400)
+    }
     try {
       await action()
       // A successful action clears a previous sticky error (the
@@ -880,7 +903,7 @@ export default function App() {
 
   const toolbarActions = {
     add: () => setShowAdd(true),
-    resume: () => selected && void run(() => resumeDownload(selected.id)),
+    resume: () => selected && void run(() => resumeDownload(selected.id), { immediate: true }),
     stop: () => selected && void run(() => pauseDownload(selected.id)),
     deleteSelected: () => selected && requestRemove(selected),
   }
@@ -889,7 +912,7 @@ export default function App() {
     add: () => setShowAdd(true),
     downloadAll: () => setShowDownloadAll(true),
     batch: () => setShowBatch(true),
-    resume: () => selected && void run(() => resumeDownload(selected.id)),
+    resume: () => selected && void run(() => resumeDownload(selected.id), { immediate: true }),
     stop: () => selected && void run(() => pauseDownload(selected.id)),
     stopAll: () => void handleStopAll(),
     deleteSelected: () => selected && requestRemove(selected),
@@ -1036,8 +1059,14 @@ export default function App() {
               onOpenFile={(id) => void run(() => openFile(id))}
               onOpenWith={(id) => void run(() => openFileWith(id))}
               onOpenFolder={(id) => void run(() => openFolder(id))}
-              onRedownload={(download) => void run(() => handleRedownload(download))}
-              onResume={(id) => void run(() => resumeDownload(id))}
+              onRedownload={(download) => {
+                if (redownloadNeedsWarning(download)) {
+                  setConfirmRedownload(download)
+                } else {
+                  void run(() => handleRedownload(download), { immediate: true })
+                }
+              }}
+              onResume={(id) => void run(() => resumeDownload(id), { immediate: true })}
               onPause={(id) => void run(() => pauseDownload(id))}
               onMoveToCategory={(id, categoryId) => void run(() => moveToCategory(id, categoryId))}
               onRefreshAddress={(download) => setRefreshTarget(download)}
@@ -1306,6 +1335,41 @@ export default function App() {
                 }}
               >
                 Remove
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {confirmRedownload ? (
+        <div
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="confirm-redownload-title"
+          className="fixed inset-0 z-20 flex items-center justify-center bg-black/50 p-4"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setConfirmRedownload(null)
+          }}
+        >
+          <div className="w-full max-w-md rounded-lg border border-border bg-surface-raised p-6 shadow-pop">
+            <h2 id="confirm-redownload-title" className="text-lg font-semibold">
+              Redownload from scratch?
+            </h2>
+            <p className="mt-2 text-sm text-text-muted">
+              “{confirmRedownload.filename}” starts over; Resume keeps your progress.
+            </p>
+            <div className="mt-6 flex justify-end gap-2">
+              <Button variant="ghost" onClick={() => setConfirmRedownload(null)}>
+                Keep it
+              </Button>
+              <Button
+                variant="danger"
+                onClick={() => {
+                  const row = confirmRedownload
+                  setConfirmRedownload(null)
+                  void run(() => handleRedownload(row), { immediate: true })
+                }}
+              >
+                Redownload
               </Button>
             </div>
           </div>

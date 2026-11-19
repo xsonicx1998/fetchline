@@ -29,7 +29,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::StreamExt;
 use reqwest::header::RANGE;
@@ -304,6 +304,17 @@ struct SegState {
     deferred_until: Option<Instant>,
     /// Round 71 (B2) — how many times this segment deferred.
     deferrals: u32,
+    /// Round 73 — is this segment CURRENTLY the only unfinished
+    /// one (the tail)? Set at spawn from the supervisor's count
+    /// and refreshed by the supervisor tick (every 250 ms): the
+    /// spawn-time value goes stale the moment a split creates a
+    /// sibling — a segment spawned as the tail that later splits
+    /// must NOT keep waiting in-loop as if it were still alone,
+    /// and a segment spawned as a worker that ends up last must
+    /// gain the in-loop patient wait. The task reads this live
+    /// flag (not its spawn-time `tail` argument) when deciding
+    /// whether a patient-eligible failure waits in place.
+    is_tail: bool,
 }
 
 impl SegState {
@@ -317,6 +328,9 @@ impl SegState {
             started_at: None,
             deferred_until: None,
             deferrals: 0,
+            // Set at spawn by `run_segment` (from the
+            // supervisor's count) and refreshed by the tick.
+            is_tail: false,
         }
     }
 }
@@ -577,6 +591,19 @@ pub struct DownloadManager {
     /// shorten it to prove the watchdog fires without waiting
     /// three minutes.
     run_watchdog_timeout: AtomicU64,
+    /// Patient tail (Round 73): seconds of zero byte progress
+    /// after which a patient tail gives up on a dead server
+    /// (settings `tail_zero_progress_cap_minutes`, default 10
+    /// min). The run watchdog is suppressed while a tail waits,
+    /// so this cap is the tail's own backstop — without it a
+    /// server that delivered bytes and then died would retry
+    /// forever.
+    tail_zero_progress_cap_secs: AtomicU64,
+    /// Per-host connection caps (Round 73): a host that answered
+    /// 429/503 is capped at `HOST_THROTTLE_CONNECTIONS` for the
+    /// rest of the session, so a later download to the same host
+    /// does not hammer it with the full connection count again.
+    host_caps: StdMutex<HashMap<String, usize>>,
 }
 
 impl DownloadManager {
@@ -634,6 +661,10 @@ impl DownloadManager {
             update_events,
             scanning: StdMutex::new(HashSet::new()),
             run_watchdog_timeout: AtomicU64::new(RUN_STALL_TIMEOUT.as_secs()),
+            tail_zero_progress_cap_secs: AtomicU64::new(
+                (Settings::default().tail_zero_progress_cap_minutes.max(1) as u64) * 60,
+            ),
+            host_caps: StdMutex::new(HashMap::new()),
         })
     }
 
@@ -682,6 +713,47 @@ impl DownloadManager {
             .store(secs.max(1), Ordering::SeqCst);
     }
 
+    /// Patient-tail zero-progress cap in seconds (Round 73).
+    pub fn tail_zero_progress_cap_secs(&self) -> u64 {
+        self.tail_zero_progress_cap_secs.load(Ordering::Relaxed)
+    }
+
+    /// Shorten (or restore) the patient-tail zero-progress cap.
+    /// A diagnostics/test knob only — production never calls it.
+    /// Clamped to >= 1 s so a zero can never make a tail give up
+    /// instantly on a healthy run.
+    pub fn set_tail_zero_progress_cap_secs(&self, secs: u64) {
+        self.tail_zero_progress_cap_secs
+            .store(secs.max(1), Ordering::SeqCst);
+    }
+
+    /// The per-host connection cap recorded for `host` after a
+    /// 429/503 (Round 73), if any.
+    pub fn host_connection_cap(&self, host: &str) -> Option<usize> {
+        self.host_caps.lock().unwrap().get(host).copied()
+    }
+
+    /// Round 73 — remember that `url`'s host answered 429/503:
+    /// cap it at `HOST_THROTTLE_CONNECTIONS` for the rest of the
+    /// session, and apply the cap to this run's effective
+    /// concurrency at once.
+    fn record_host_throttle(&self, url: &str, effective_cap: &mut usize) {
+        let Some(host) = url_host(url) else {
+            return;
+        };
+        self.host_caps
+            .lock()
+            .unwrap()
+            .insert(host.clone(), HOST_THROTTLE_CONNECTIONS);
+        let before = *effective_cap;
+        *effective_cap = (*effective_cap).min(HOST_THROTTLE_CONNECTIONS);
+        if before != *effective_cap {
+            self.store.log(&format!(
+                "host {host} answered 429/503 — capping connections to {HOST_THROTTLE_CONNECTIONS} for the rest of this session"
+            ));
+        }
+    }
+
     /// Read settings + the active proxy from the database and apply
     /// them live: connection count, retry count, speed cap, timeout
     /// and proxy. Call after `update_settings` / `save_proxy_config`
@@ -694,6 +766,12 @@ impl DownloadManager {
             .store(settings.max_connections.max(1) as usize, Ordering::Relaxed);
         self.max_retries
             .store(settings.max_retries.max(0) as u32, Ordering::Relaxed);
+        // Round 73 — the patient-tail zero-progress cap, in
+        // minutes in settings, seconds in the atomic.
+        self.tail_zero_progress_cap_secs.store(
+            (settings.tail_zero_progress_cap_minutes.max(1) as u64).saturating_mul(60),
+            Ordering::Relaxed,
+        );
         self.limiter.set_rate_bps(
             // BUG-008 defence in depth: the store rejects absurd caps,
             // but the multiply must never overflow even if a stored
@@ -1067,26 +1145,49 @@ impl DownloadManager {
         // startup.log instead of a silent Add-dialog spin. The
         // error is logged too: the caller still gets the Err, but
         // the log line is what survives a wedged UI.
+        //
+        // Round 73 — fast retries inside this shared path:
+        // transport errors and 429/503 retry up to three times
+        // (500 ms / 1.5 s / 3 s) before the failure is final.
+        // A dead link fails immediately on the first attempt.
         let start = Instant::now();
         let auth = self.site_auth_for_url(url);
         let auth_ref = auth.as_ref().map(|(u, p)| (u.as_str(), p.as_str()));
         let proxy = self.active_proxy();
-        let result = probe_with_proxy(&self.client(), url, auth_ref, proxy.as_ref()).await;
-        match &result {
-            Ok(info) => self.store.log(&format!(
-                "probe {} ok in {}ms (size {:?}, range {})",
-                url,
-                start.elapsed().as_millis(),
-                info.size,
-                info.accept_ranges
-            )),
-            Err(e) => self.store.log(&format!(
-                "probe {} failed in {}ms: {e}",
-                url,
-                start.elapsed().as_millis()
-            )),
+        let mut attempt: u32 = 0;
+        loop {
+            attempt += 1;
+            match probe_with_proxy(&self.client(), url, auth_ref, proxy.as_ref()).await {
+                Ok(info) => {
+                    self.store.log(&format!(
+                        "probe {} ok in {}ms (size {:?}, range {})",
+                        url,
+                        start.elapsed().as_millis(),
+                        info.size,
+                        info.accept_ranges
+                    ));
+                    return Ok(info);
+                }
+                Err(e) => {
+                    if is_probe_retryable(&e) && attempt < PROBE_MAX_ATTEMPTS {
+                        let backoff = PROBE_RETRY_BACKOFFS[(attempt - 1) as usize];
+                        self.store.log(&format!(
+                            "probe {url} attempt {attempt} failed in {}ms (retryable, retrying after {}ms): {e}",
+                            start.elapsed().as_millis(),
+                            backoff.as_millis()
+                        ));
+                        tokio::time::sleep(backoff).await;
+                        continue;
+                    }
+                    self.store.log(&format!(
+                        "probe {} failed in {}ms: {e}",
+                        url,
+                        start.elapsed().as_millis()
+                    ));
+                    return Err(e);
+                }
+            }
         }
-        result
     }
 
     /// Probe a URL with the browser's cookies for it, if any —
@@ -1101,8 +1202,28 @@ impl DownloadManager {
         let is_ftp = reqwest::Url::parse(url).map(|u| u.scheme() == "ftp").unwrap_or(false);
         match cookies {
             Some(header) if !header.is_empty() && !is_ftp => {
+                // Round 73 — same fast retries as probe_url
+                // (500 ms / 1.5 s / 3 s, transport + 429/503
+                // only), so a resume/redownload with cookies
+                // does not die on one dropped probe.
                 let proxy = self.active_proxy();
-                probe_with_cookies(&self.client(), url, Some(header), proxy.as_ref()).await
+                let mut attempt: u32 = 0;
+                loop {
+                    attempt += 1;
+                    match probe_with_cookies(&self.client(), url, Some(header), proxy.as_ref())
+                        .await
+                    {
+                        Ok(info) => return Ok(info),
+                        Err(e) => {
+                            if is_probe_retryable(&e) && attempt < PROBE_MAX_ATTEMPTS {
+                                tokio::time::sleep(PROBE_RETRY_BACKOFFS[(attempt - 1) as usize])
+                                    .await;
+                                continue;
+                            }
+                            return Err(e);
+                        }
+                    }
+                }
             }
             _ => self.probe_url(url).await,
         }
@@ -3583,10 +3704,48 @@ impl DownloadManager {
         // Browser cookies (S13 finish), like `resume_download`:
         // a cookie download re-probes with its cookies.
         let cookies = self.cookies.lock().unwrap().get(id).cloned();
-        let info = self
+        // Round 73 — the probe is retried in the shared path
+        // (probe_url_with_cookies), and a transient failure after
+        // retries falls back to the stored size: the row already
+        // knows it, so the redownload still restarts from zero
+        // as designed, just without needing a fresh probe. A dead
+        // link (404/…) refuses with the existing message, and the
+        // row survives.
+        let info = match self
             .probe_url_with_cookies(&row.url, cookies.as_deref())
             .await
-            .map_err(|e| {
+        {
+            Ok(info) => info,
+            Err(e) if is_probe_retryable(&e) => {
+                let Some(size) = row.size_bytes.filter(|s| *s > 0) else {
+                    // No stored size to fall back on: the link may
+                    // still work, but this redownload cannot start
+                    // without knowing the file's size.
+                    if row.status != "complete" {
+                        let _ = self
+                            .store
+                            .set_status(id, "error", Some(PROBE_UNREACHABLE_MSG));
+                    }
+                    return Err(EngineError::InvalidState(PROBE_UNREACHABLE_MSG.to_string()));
+                };
+                self.store.log(&format!(
+                    "redownload of {id}: probe failed transiently after retries ({e}) — restarting from the stored size ({size} bytes)"
+                ));
+                ProbeInfo {
+                    size: Some(size as u64),
+                    // The original download already ran with
+                    // ranges (its segments exist); a server that
+                    // ignores Range on the fresh request still
+                    // answers 200 for the single segment from
+                    // byte 0, which the segment path accepts.
+                    accept_ranges: true,
+                    etag: row.etag.clone(),
+                    last_modified: row.last_modified.clone(),
+                    filename: None,
+                    final_url: row.url.clone(),
+                }
+            }
+            Err(e) => {
                 // The row SURVIVES a failed probe — never
                 // delete-first. A complete row keeps its status
                 // (its file is on disk; the redownload just did
@@ -3595,8 +3754,9 @@ impl DownloadManager {
                 if row.status != "complete" {
                     let _ = self.store.set_status(id, "error", Some(&e.to_string()));
                 }
-                e
-            })?;
+                return Err(e);
+            }
+        };
         self.store.delete_segments(id)?;
         self.store.reset_download(
             id,
@@ -4401,30 +4561,56 @@ impl DownloadManager {
         // resumes with its cookies — without them the re-probe
         // would fail with 401 and the resume could never work.
         let cookies = self.cookies.lock().unwrap().get(id).cloned();
-        let info = self
+        // Round 73 — the probe is retried in the shared path
+        // (probe_url_with_cookies), but a transient failure after
+        // retries must NOT block a resume or set the row to
+        // error: the row already knows its size and segment map,
+        // and the engine verifies the bytes at the end. A dead
+        // link (404/…) still refuses.
+        let info = match self
             .probe_url_with_cookies(&row.url, cookies.as_deref())
             .await
-            .map_err(|e| {
+        {
+            Ok(info) => Some(info),
+            Err(e) if is_probe_retryable(&e) => {
+                self.store.log(&format!(
+                    "resume of {id}: probe failed transiently after retries ({e}) — continuing from the stored info"
+                ));
+                None
+            }
+            Err(e) => {
                 let _ = self.store.set_status(id, "error", Some(&e.to_string()));
-                e
-            })?;
-        let changed = info.size.map(|s| s as i64) != row.size_bytes
-            || (info.etag.is_some()
-                && row.etag.is_some()
-                && info.etag != row.etag);
-        if changed {
-            // The remote file changed: never stitch old bytes onto new content.
-            let part = part_path(&row.save_path);
-            let _ = std::fs::remove_file(&part);
-            self.store.delete_segments(id)?;
-            self.store.reset_download(
-                id,
-                info.size.map(|s| s as i64),
-                info.etag.as_deref(),
-                info.last_modified.as_deref(),
-            )?;
-            let ranges = initial_ranges(&info);
-            self.store.create_segments(id, &ranges)?;
+                return Err(e);
+            }
+        };
+        // Continuing from stored info needs stored segments: a
+        // row with none cannot resume without a probe.
+        if info.is_none() {
+            let segments = self.store.get_segments(id)?;
+            if segments.is_empty() {
+                let _ = self
+                    .store
+                    .set_status(id, "error", Some(PROBE_UNREACHABLE_MSG));
+                return Err(EngineError::InvalidState(PROBE_UNREACHABLE_MSG.to_string()));
+            }
+        }
+        if let Some(info) = &info {
+            let changed = info.size.map(|s| s as i64) != row.size_bytes
+                || (info.etag.is_some() && row.etag.is_some() && info.etag != row.etag);
+            if changed {
+                // The remote file changed: never stitch old bytes onto new content.
+                let part = part_path(&row.save_path);
+                let _ = std::fs::remove_file(&part);
+                self.store.delete_segments(id)?;
+                self.store.reset_download(
+                    id,
+                    info.size.map(|s| s as i64),
+                    info.etag.as_deref(),
+                    info.last_modified.as_deref(),
+                )?;
+                let ranges = initial_ranges(info);
+                self.store.create_segments(id, &ranges)?;
+            }
         }
         self.start_download(id).await
     }
@@ -5006,6 +5192,16 @@ impl DownloadManager {
         // connections at a server that only accepts 3.
         let mut effective_cap = self.max_connections();
 
+        // Round 73 — a host that answered 429/503 in an earlier
+        // run of this session starts capped: the server already
+        // proved it throttles this IP, so a fresh download does
+        // not hammer it with the full connection count again.
+        if let Some(host) = url_host(&row.url) {
+            if let Some(cap) = self.host_connection_cap(&host) {
+                effective_cap = effective_cap.min(cap);
+            }
+        }
+
         // Round 55: checkpoint on the first progress tick, not
         // after a full interval — a download that finishes in ~1 s
         // used to report nothing at all. Pre-age the clock so the
@@ -5173,6 +5369,11 @@ impl DownloadManager {
                                 })
                                 .count();
                             effective_cap = effective_cap.min(working.max(1));
+                            // Round 73 — a 429/503 throttles the
+                            // host for the rest of the session.
+                            if is_rate_limited(&e) {
+                                self.record_host_throttle(&row.url, &mut effective_cap);
+                            }
                             self.store.log(&format!(
                                 "segment deferred (effective connections now {effective_cap}): {}",
                                 error_chain_text(&e),
@@ -5195,49 +5396,135 @@ impl DownloadManager {
                             .await;
                         }
                         Some(Ok(Ok(SegOutcome::TailRetryable(seg_id, e)))) => {
-                            // Round 72 (C) — a solo segment
-                            // exhausted its retries on a
-                            // patient-eligible failure. If it is
-                            // the only unfinished segment left (the
-                            // tail), respawn it as a patient tail
-                            // task (20 s connects, unbounded
-                            // growing backoff) instead of failing
-                            // the download; otherwise fail exactly
-                            // as before.
-                            let is_tail = unfinished_count(&states) == 1;
+                            // Round 73 — the gate decision, ALWAYS
+                            // logged: a silent `Err(e)` here used
+                            // to be undiagnosable from startup.log
+                            // (the Round 72 OVH 92% failure, where
+                            // the tail gave up with no trace of why
+                            // it never engaged).
+                            let unfinished = unfinished_count(&states);
+                            let total = total_done(&states);
+                            let is_tail = unfinished == 1;
                             let state = states
                                 .iter()
                                 .find(|s| s.lock().unwrap().row.id == seg_id)
                                 .cloned();
-                            let Some(state) = state.filter(|_| is_tail) else {
+                            let Some(state) = state else {
                                 tasks.abort_all();
                                 while tasks.join_next().await.is_some() {}
                                 self.checkpoint(id, &states, 0).await;
                                 retry.clear_wait();
                                 return Err(e);
                             };
+                            let seg_index = state.lock().unwrap().row.segment_index;
                             self.store.log(&format!(
-                                "segment {} failed solo on a retryable error and is the last unfinished segment — respawning as a patient tail (20 s connects, retrying until it succeeds or the download is paused/cancelled)",
-                                state.lock().unwrap().row.segment_index,
+                                "tail gate: unfinished_count={unfinished} tasks={} total_done={total} is_tail={is_tail} (segment {seg_index}): {}",
+                                tasks.len(),
+                                error_chain_text(&e),
                             ));
-                            tasks.spawn(run_segment(
-                                self.tail_segment_client(),
-                                Arc::clone(&self.limiter),
-                                Arc::clone(per_download_limiter),
-                                quota_gate.clone(),
-                                self.max_retries.load(Ordering::Relaxed).max(1),
-                                row.url.clone(),
-                                site_auth.clone(),
-                                proxy.clone(),
-                                cookies.clone(),
-                                state,
-                                Arc::clone(&file),
-                                Arc::clone(pause),
-                                Arc::clone(retry),
-                                Arc::clone(&self.store),
-                                true,
-                                true,
-                            ));
+                            // A 429/503 throttles the host for the
+                            // rest of the session.
+                            if is_rate_limited(&e) {
+                                self.record_host_throttle(&row.url, &mut effective_cap);
+                            }
+                            if is_tail {
+                                self.store.log(&format!(
+                                    "segment {seg_index} failed solo on a retryable error and is the last unfinished segment — respawning as a patient tail (20 s connects, retrying until it succeeds or the download is paused/cancelled)",
+                                ));
+                                tasks.spawn(run_segment(
+                                    self.tail_segment_client(),
+                                    Arc::clone(&self.limiter),
+                                    Arc::clone(per_download_limiter),
+                                    quota_gate.clone(),
+                                    self.max_retries.load(Ordering::Relaxed).max(1),
+                                    row.url.clone(),
+                                    site_auth.clone(),
+                                    proxy.clone(),
+                                    cookies.clone(),
+                                    state,
+                                    Arc::clone(&file),
+                                    Arc::clone(pause),
+                                    Arc::clone(retry),
+                                    Arc::clone(&self.store),
+                                    true,
+                                    true,
+                                ));
+                            } else if tasks.is_empty() && total > 0 {
+                                // Round 73 — no task is running and
+                                // the download has made progress:
+                                // coalesce the unstarted pending
+                                // segments into this one so the tail
+                                // gate sees a single unfinished
+                                // segment (the Round 72 OVH 92%
+                                // shape: a failing segment at 0 B
+                                // plus a pending one), or — when the
+                                // other unfinished segments already
+                                // hold bytes — park them and tail
+                                // this one alone.
+                                match self.coalesce_pending_into(&mut states, &seg_id) {
+                                    Some(n) => {
+                                        self.store.log(&format!(
+                                            "coalesced {n} unstarted pending segment(s) into segment {seg_index} — respawning as a patient tail (20 s connects, retrying until it succeeds or the download is paused/cancelled)"
+                                        ));
+                                    }
+                                    None => {
+                                        self.store.log(&format!(
+                                            "segment {seg_index} is the only running segment left — respawning as a patient tail (other unfinished segments parked; 20 s connects, retrying until it succeeds or the download is paused/cancelled)"
+                                        ));
+                                    }
+                                }
+                                tasks.spawn(run_segment(
+                                    self.tail_segment_client(),
+                                    Arc::clone(&self.limiter),
+                                    Arc::clone(per_download_limiter),
+                                    quota_gate.clone(),
+                                    self.max_retries.load(Ordering::Relaxed).max(1),
+                                    row.url.clone(),
+                                    site_auth.clone(),
+                                    proxy.clone(),
+                                    cookies.clone(),
+                                    state,
+                                    Arc::clone(&file),
+                                    Arc::clone(pause),
+                                    Arc::clone(retry),
+                                    Arc::clone(&self.store),
+                                    true,
+                                    true,
+                                ));
+                            } else if !tasks.is_empty() {
+                                // Other workers are still running:
+                                // park this segment as deferred and
+                                // let the run continue — the gate is
+                                // re-evaluated when the next segment
+                                // reports. A TailRetryable never
+                                // fails the run while work is still
+                                // in flight.
+                                let backoff_secs = {
+                                    let mut st = state.lock().unwrap();
+                                    st.deferrals += 1;
+                                    let secs = 1u64 << st.deferrals.min(3);
+                                    let retry_after = retry_after_secs(&e).unwrap_or(0);
+                                    let wait = Duration::from_secs(secs.max(retry_after))
+                                        + deferred_jitter();
+                                    st.deferred_until = Some(Instant::now() + wait);
+                                    secs.max(retry_after)
+                                };
+                                self.store.log(&format!(
+                                    "segment {seg_index} deferred after a TailRetryable while other workers run (retry after {backoff_secs} s): {}",
+                                    error_chain_text(&e),
+                                ));
+                            } else {
+                                // No task running and no byte ever
+                                // arrived: a genuinely dead server
+                                // fails visibly instead of spinning
+                                // on a patient tail that can never
+                                // deliver (the `total > 0` guard).
+                                tasks.abort_all();
+                                while tasks.join_next().await.is_some() {}
+                                self.checkpoint(id, &states, 0).await;
+                                retry.clear_wait();
+                                return Err(e);
+                            }
                         }
                         None => break,
                     }
@@ -5291,6 +5578,20 @@ impl DownloadManager {
                     // for the 30 s stall timeout instead of
                     // stealing it at 5 s. `try_split` is a no-op
                     // when no slot is free or nothing is ready.
+                    //
+                    // Round 73 — refresh the live tail flags
+                    // first: the only unfinished segment is the
+                    // tail. A segment spawned as the tail that
+                    // later split loses the flag here (within one
+                    // tick), and a worker that ends up last gains
+                    // it — so the in-loop patient wait always
+                    // matches the run's real shape.
+                    let unfinished_now = unfinished_count(&states);
+                    for s in &states {
+                        let mut st = s.lock().unwrap();
+                        st.is_tail =
+                            unfinished_now == 1 && st.done < segment_len_of(&st);
+                    }
                     if tasks.len() < effective_cap {
                         self.try_split(
                             id,
@@ -5344,6 +5645,34 @@ impl DownloadManager {
                         return Err(EngineError::InvalidState(format!(
                             "No data arrived for {} seconds — the connection appears to have stalled",
                             RUN_STALL_TIMEOUT.as_secs()
+                        )));
+                    }
+                    // Round 73 — the patient tail's zero-progress
+                    // cap: the watchdogs above are suppressed
+                    // while a tail waits, so without this a server
+                    // that delivered bytes and then died would
+                    // retry forever. The clock runs from the last
+                    // byte (`last_byte_at`, stamped above), so a
+                    // tail that IS receiving bytes never trips it.
+                    if retry.is_patient_tail()
+                        && last_byte_at.elapsed()
+                            >= Duration::from_secs(self.tail_zero_progress_cap_secs())
+                    {
+                        tasks.abort_all();
+                        while tasks.join_next().await.is_some() {}
+                        self.checkpoint(id, &states, 0).await;
+                        retry.clear_wait();
+                        let cap_secs = self.tail_zero_progress_cap_secs();
+                        let cap_text = if cap_secs >= 60 {
+                            format!("{} minute(s)", cap_secs / 60)
+                        } else {
+                            format!("{cap_secs} second(s)")
+                        };
+                        self.store.log(&format!(
+                            "patient tail gave up for {id} after {cap_text} without progress"
+                        ));
+                        return Err(EngineError::InvalidState(format!(
+                            "No data arrived for {cap_text} while retrying — the server appears to be down"
                         )));
                     }
                 }
@@ -5407,6 +5736,124 @@ impl DownloadManager {
         }
         self.emit(id, &row, &states, 0, "complete", Some(retry)).await;
         Ok(())
+    }
+
+    /// Round 73 — merge the unstarted pending segments that are
+    /// contiguous with the failing segment into it, so the tail
+    /// gate sees one unfinished segment instead of two (the
+    /// Round 72 OVH 92% shape: a failing segment at 0 B plus a
+    /// pending one). Returns the number of segments merged, or
+    /// `None` when the other unfinished segments cannot be
+    /// merged — they already hold bytes, or they are not adjacent
+    /// to the failing segment — and the caller should park them
+    /// and tail the failing segment alone instead.
+    ///
+    /// Preconditions (checked by the caller): no task is running,
+    /// the download has made progress. Successors merge always;
+    /// predecessors merge only when the failing segment holds no
+    /// bytes yet (`done == 0`), because `done` counts from
+    /// `row.start_byte` and moving the start would miscount it.
+    /// The merged rows are deleted from SQLite first and the
+    /// survivor's range is widened in the same step, so a later
+    /// pause/resume sees clean non-overlapping ranges; the
+    /// in-memory row is widened to match, so the next checkpoint
+    /// cannot write the old range back over it.
+    fn coalesce_pending_into(
+        &self,
+        states: &mut Vec<Arc<StdMutex<SegState>>>,
+        failing_id: &str,
+    ) -> Option<usize> {
+        let failing_idx = states
+            .iter()
+            .position(|s| s.lock().unwrap().row.id == failing_id)?;
+        // Every OTHER unfinished segment must be unstarted
+        // (done == 0) and unclaimed (not running): a segment
+        // that already holds bytes cannot be absorbed without
+        // losing the record of those bytes.
+        for (i, s) in states.iter().enumerate() {
+            if i == failing_idx {
+                continue;
+            }
+            let st = s.lock().unwrap();
+            if st.done < segment_len_of(&st) && (st.done != 0 || st.running) {
+                return None;
+            }
+        }
+        let (mut merged_start, mut merged_end) = {
+            let st = states[failing_idx].lock().unwrap();
+            (st.row.start_byte, st.row.end_byte?)
+        };
+        let failing_done = states[failing_idx].lock().unwrap().done;
+        // Walk the successors, chaining: a segment whose start is
+        // exactly the merged end + 1 joins the merge.
+        let mut merged_ids: Vec<String> = Vec::new();
+        loop {
+            let next = states.iter().enumerate().find(|(i, s)| {
+                *i != failing_idx && !merged_ids.contains(&s.lock().unwrap().row.id) && {
+                    let st = s.lock().unwrap();
+                    st.done < segment_len_of(&st)
+                        && st.row.start_byte == merged_end + 1
+                        && st.row.end_byte.is_some()
+                }
+            });
+            let Some((_, s)) = next else { break };
+            let st = s.lock().unwrap();
+            merged_end = st.row.end_byte.unwrap();
+            merged_ids.push(st.row.id.clone());
+        }
+        // Walk the predecessors the same way — only when the
+        // failing segment holds no bytes yet (see the doc comment).
+        if failing_done == 0 {
+            loop {
+                let prev = states.iter().enumerate().find(|(i, s)| {
+                    *i != failing_idx && !merged_ids.contains(&s.lock().unwrap().row.id) && {
+                        let st = s.lock().unwrap();
+                        st.done < segment_len_of(&st) && st.row.end_byte == Some(merged_start - 1)
+                    }
+                });
+                let Some((_, s)) = prev else { break };
+                let st = s.lock().unwrap();
+                merged_start = st.row.start_byte;
+                merged_ids.push(st.row.id.clone());
+            }
+        }
+        if merged_ids.is_empty() {
+            return None;
+        }
+        // SQLite first: delete the merged rows (the no-overlap
+        // trigger would reject widening the survivor while they
+        // still exist), then widen the survivor's range.
+        for id in &merged_ids {
+            if let Err(e) = self.store.delete_segment(id) {
+                self.store
+                    .log(&format!("coalesce: could not delete segment {id}: {e}"));
+                return None;
+            }
+        }
+        if let Err(e) = self
+            .store
+            .update_segment_range(failing_id, merged_start, Some(merged_end))
+        {
+            self.store.log(&format!(
+                "coalesce: could not widen segment {failing_id}: {e}"
+            ));
+            return None;
+        }
+        // In-memory: widen the survivor's row and drop the merged
+        // states, so the run and the next checkpoint see the merge.
+        // The live stop byte (`st.end`, what the segment task
+        // actually downloads up to) moves with the row's end —
+        // without this the merged task would stop at its old end
+        // and the run would fail verification short of the size.
+        {
+            let mut st = states[failing_idx].lock().unwrap();
+            st.row.start_byte = merged_start;
+            st.row.end_byte = Some(merged_end);
+            st.end = Some(merged_end as u64);
+        }
+        let count = merged_ids.len();
+        states.retain(|s| !merged_ids.contains(&s.lock().unwrap().row.id));
+        Some(count)
     }
 
     /// Halve the largest unfinished segment when a connection is idle.
@@ -5825,6 +6272,86 @@ const SEND_STALL_MSG_PREFIX: &str = "No response headers for ";
 
 /// Round 71 (B2) — is this failure a "could not even start"
 /// failure that may be deferred instead of failing the download?
+/// Round 73 — the message shown when a probe fails transiently
+/// after its fast retries (transport error, 429, 503) instead of
+/// the dead-link message: the link may still work, so the user is
+/// pointed at Resume rather than told the link is dead.
+const PROBE_UNREACHABLE_MSG: &str =
+    "Could not reach the server; the link may still work. Try Resume.";
+
+/// Round 73 — the per-host connection cap recorded after a
+/// host answers 429/503: 2 connections for the rest of the
+/// session, so a throttled host is not hammered again.
+const HOST_THROTTLE_CONNECTIONS: usize = 2;
+
+/// Round 73 — the probe's fast retries: an initial attempt plus
+/// three retries (four attempts total), for transport errors and
+/// 429/503 only. A dead link (404/410/401/403/416, invalid URL)
+/// fails immediately — retrying it would only waste the user's
+/// time and the server's patience.
+const PROBE_MAX_ATTEMPTS: u32 = 4;
+const PROBE_RETRY_BACKOFFS: [Duration; 3] = [
+    Duration::from_millis(500),
+    Duration::from_millis(1500),
+    Duration::from_secs(3),
+];
+
+/// Round 73 — is this probe failure worth a fast retry? Only
+/// transport errors (the request never reached the server, or
+/// the response was cut off) and the two retryable statuses.
+fn is_probe_retryable(e: &EngineError) -> bool {
+    match e {
+        EngineError::Http(_) => true,
+        EngineError::Status(code, _) => *code == 429 || *code == 503,
+        _ => false,
+    }
+}
+
+/// Round 73 — did this failure come from a rate-limit status
+/// (429/503)? Used for the per-host connection cap.
+fn is_rate_limited(e: &EngineError) -> bool {
+    matches!(e, EngineError::Status(code, _) if *code == 429 || *code == 503)
+}
+
+/// Round 73 — 250–500 ms of stagger for deferred respawns, from
+/// the wall clock (no new dependency for randomness): several
+/// deferred segments waking at once would otherwise fire a
+/// synchronized SYN burst at a server that just throttled us.
+fn deferred_jitter() -> Duration {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    Duration::from_millis(250 + nanos % 251)
+}
+
+/// Round 73 — parse a `Retry-After` header that carries an
+/// integer number of seconds. HTTP-date values are ignored
+/// (no date parser in the tree) and treated as "no header".
+fn parse_retry_after_seconds(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+}
+
+/// Round 73 — the Retry-After seconds carried by a 429/503
+/// status error (see `download_segment_once`), if any. The
+/// seconds ride in the error message itself, so the deferral
+/// and patient-tail backoffs can read them back without
+/// plumbing a new field through `SegOutcome`.
+fn retry_after_secs(e: &EngineError) -> Option<u64> {
+    if let EngineError::Status(_, m) = e {
+        let rest = m.split("[retry-after ").nth(1)?;
+        rest.split('s').next()?.trim().parse::<u64>().ok()
+    } else {
+        None
+    }
+}
+
 /// Only when the attempt received NO bytes: a connect failure
 /// (dropped SYN, refused), a connect timeout, a rate-limit
 /// (429 / 503), or a send-phase stall. A failure AFTER bytes
@@ -5887,7 +6414,21 @@ fn is_tail_patient(e: &EngineError) -> bool {
         // (a fast-retry path publishes no countdown), so a dropped
         // connection keeps its slow backoffs and only escapes
         // into patient retry here, after `max_attempts`.
-        return re.is_connect() || re.is_timeout() || re.is_body() || re.is_request();
+        //
+        // Round 73 — `is_decode()` is the mid-BODY close: the
+        // server sent headers and some bytes, then closed the
+        // socket ("error decoding response body ... end of file
+        // before message length reached"). It is the same dropped
+        // connection one chunk later, and without it a segment
+        // cut off mid-transfer fails the whole run instead of
+        // tailing — the mock's `drop_get` cuts exactly this way,
+        // and the Round 73 coalesce test caught it. Same rule as
+        // `is_request()`: patient only, never deferrable.
+        return re.is_connect()
+            || re.is_timeout()
+            || re.is_body()
+            || re.is_request()
+            || re.is_decode();
     }
     if let EngineError::InvalidState(m) = e {
         if m.starts_with(SEND_STALL_MSG_PREFIX) {
@@ -6005,8 +6546,11 @@ async fn patient_tail_wait(
         ));
     }
     *tail_waits += 1;
+    // Round 73 — honor Retry-After: a 429/503 that asked for Ns
+    // waits at least that long, like the deferral backoff.
     let backoff = Duration::from_secs(
-        TAIL_BACKOFFS_SECS[(*tail_waits as usize - 1).min(TAIL_BACKOFFS_SECS.len() - 1)],
+        TAIL_BACKOFFS_SECS[(*tail_waits as usize - 1).min(TAIL_BACKOFFS_SECS.len() - 1)]
+            .max(retry_after_secs(e).unwrap_or(0)),
     );
     retry.set_wait(*tail_waits, 0, &e.to_string(), backoff);
     let paused = sleep_backoff(pause, retry, backoff).await;
@@ -6048,6 +6592,10 @@ async fn run_segment(
         st.done_at_start = st.done;
         st.started_at = Some(Instant::now());
         st.deferred_until = None;
+        // Round 73 — the spawn-time tail value (the supervisor
+        // recomputes it at every spawn); the tick refreshes it
+        // live afterwards, so a split cannot leave it stale.
+        st.is_tail = tail;
     }
     // The guard clears `running` on every exit, panic included.
     let _guard = RunningGuard {
@@ -6090,7 +6638,12 @@ async fn run_segment_inner(
     retry: Arc<RetrySlot>,
     store: &Store,
     solo: bool,
-    tail: bool,
+    // Round 73 — the spawn-time tail value is kept for the
+    // signature (callers pass the supervisor's count at spawn)
+    // but the patient-wait decisions read the LIVE `is_tail`
+    // flag on the state instead: a split can make it stale
+    // within one tick.
+    _tail: bool,
 ) -> std::result::Result<SegOutcome, EngineError> {
     let mut attempt: u32 = 0;
     // Round 72 (C) — how many patient waits this tail has taken:
@@ -6166,8 +6719,12 @@ async fn run_segment_inner(
                     // backoff (5 s / 15 s / 30 s / 60 s). A tail
                     // never defers — there is nobody left to pick
                     // it up — so this check comes before the
-                    // deferral below.
-                    if tail && is_tail_patient(&e) {
+                    // deferral below. Round 73 — the tail-ness is
+                    // read LIVE from the state (refreshed by the
+                    // supervisor tick), not from the spawn-time
+                    // argument: a segment spawned as the tail that
+                    // later split must not wait here.
+                    if state.lock().unwrap().is_tail && is_tail_patient(&e) {
                         let segment_index = state.lock().unwrap().row.segment_index;
                         if patient_tail_wait(
                             &pause,
@@ -6197,8 +6754,19 @@ async fn run_segment_inner(
                             let mut st = state.lock().unwrap();
                             st.deferrals += 1;
                             let secs = 1u64 << st.deferrals.min(3);
-                            st.deferred_until = Some(Instant::now() + Duration::from_secs(secs));
-                            secs
+                            // Round 73 — honor Retry-After: a
+                            // 429/503 that asked for Ns waits at
+                            // least that long. And stagger deferred
+                            // respawns with 250–500 ms of jitter
+                            // so several deferred segments waking
+                            // at once do not fire a synchronized
+                            // SYN burst at a server that just
+                            // throttled us.
+                            let retry_after = retry_after_secs(&e).unwrap_or(0);
+                            let wait =
+                                Duration::from_secs(secs.max(retry_after)) + deferred_jitter();
+                            st.deferred_until = Some(Instant::now() + wait);
+                            secs.max(retry_after)
                         };
                         store.log(&format!(
                             "segment {} deferred after {} attempts (retry after {} s): {}",
@@ -6229,7 +6797,9 @@ async fn run_segment_inner(
                     // still patient-eligible (a transport error)
                     // gets the patient wait when this is the tail,
                     // and a TailRetryable report when it ran solo.
-                    if tail && is_tail_patient(&e) {
+                    // Round 73 — tail-ness is read live from the
+                    // state, as above.
+                    if state.lock().unwrap().is_tail && is_tail_patient(&e) {
                         let segment_index = state.lock().unwrap().row.segment_index;
                         if patient_tail_wait(
                             &pause,
@@ -6494,7 +7064,21 @@ async fn download_segment_once(
         ));
     }
     if !status.is_success() && status.as_u16() != 206 {
-        return Err(EngineError::Status(status.as_u16(), format!("{status}")));
+        // Round 73 — honor Retry-After on 429/503: the seconds
+        // ride in the error message (parsed back by
+        // `retry_after_secs`), so the deferral and patient-tail
+        // backoffs wait at least that long instead of hammering
+        // a server that just asked us to back off.
+        let retry_after = if status.as_u16() == 429 || status.as_u16() == 503 {
+            parse_retry_after_seconds(resp.headers())
+        } else {
+            None
+        };
+        let message = match retry_after {
+            Some(secs) => format!("{status} [retry-after {secs}s]"),
+            None => format!("{status}"),
+        };
+        return Err(EngineError::Status(status.as_u16(), message));
     }
     let mut stream = resp.bytes_stream();
     // Round 55: each chunk must arrive within the stall timeout —

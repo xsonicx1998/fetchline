@@ -65,6 +65,16 @@ CREATE TABLE IF NOT EXISTS downloads (
     CHECK (status IN ('queued','downloading','paused','complete','error','deleted')),
   speed_bps INTEGER NOT NULL DEFAULT 0,
   eta_seconds INTEGER,
+  -- Round 72 (2026-11-18): live connection/part counts for the
+  -- main window, written by the ~1 s checkpoint while a download
+  -- runs — `active_connections` is how many connections are
+  -- transferring right now, `segment_count` how many parts the
+  -- file is split into. Parts grow past connections as splits
+  -- happen (6 parts on 2 connections), so the table shows both
+  -- ("2 connections · 6 parts") instead of one number that looks
+  -- like the setting is ignored. 0 when not downloading.
+  active_connections INTEGER NOT NULL DEFAULT 0,
+  segment_count INTEGER NOT NULL DEFAULT 0,
   -- Per-download speed cap (S12, 2026-11-15): KB/s, NULL = no
   -- per-download cap (the global cap still applies). 0 is stored
   -- as NULL by the engine.
@@ -230,6 +240,10 @@ CREATE TABLE IF NOT EXISTS settings (
     CHECK (connection_timeout_secs BETWEEN 1 AND 300),
   max_retries INTEGER NOT NULL DEFAULT 5
     CHECK (max_retries BETWEEN 0 AND 10),
+  -- Patient tail (Round 73): minutes of zero byte progress
+  -- after which a patient tail gives up on a dead server.
+  tail_zero_progress_cap_minutes INTEGER NOT NULL DEFAULT 10
+    CHECK (tail_zero_progress_cap_minutes BETWEEN 1 AND 120),
   -- Dial-Up tab (S09 finish, 2026-11-15): legacy settings, stored
   -- here. Only "hang up after completion" has an engine behaviour
   -- (it maps onto the on-completion action path); auto-dial and

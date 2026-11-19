@@ -79,6 +79,13 @@ pub struct MockServer {
     /// body, so the client sees a dropped connection, not an HTTP
     /// error. HEAD still works.
     drop_get: Arc<AtomicBool>,
+    /// Round 73 — drop the next N probe-like requests (HEAD, or
+    /// a GET with `Range: bytes=0-0`): the socket just goes away
+    /// with no response, so the client sees a transport error.
+    /// Segment GETs are untouched, so a test can prove the probe's
+    /// fast retries and the resume/redownload stored-info
+    /// fallbacks without breaking the download itself.
+    drop_probe_attempts: Arc<AtomicUsize>,
     /// When set, GET requests send their headers and then nothing
     /// for two minutes (Round 55): the body never comes, so the
     /// client's stream waits forever. HEAD still works, so the
@@ -118,6 +125,7 @@ impl MockServer {
         let etag_version = Arc::new(AtomicU64::new(1));
         let fail_get = Arc::new(AtomicBool::new(false));
         let drop_get = Arc::new(AtomicBool::new(false));
+        let drop_probe_attempts = Arc::new(AtomicUsize::new(0));
         let stall_get = Arc::new(AtomicBool::new(false));
         let ignore_range = Arc::new(AtomicBool::new(false));
         let gone = Arc::new(AtomicBool::new(false));
@@ -135,6 +143,7 @@ impl MockServer {
         let so = Arc::clone(&size_override);
         let fg = Arc::clone(&fail_get);
         let dg0 = Arc::clone(&drop_get);
+        let dpa0 = Arc::clone(&drop_probe_attempts);
         let sg0 = Arc::clone(&stall_get);
         let ir = Arc::clone(&ignore_range);
         let g = Arc::clone(&gone);
@@ -155,6 +164,7 @@ impl MockServer {
                         let oo = Arc::clone(&so);
                         let ff = Arc::clone(&fg);
                         let dg = Arc::clone(&dg0);
+                        let dpa = Arc::clone(&dpa0);
                         let sg = Arc::clone(&sg0);
                         let ii = Arc::clone(&ir);
                         let gg = Arc::clone(&g);
@@ -173,6 +183,7 @@ impl MockServer {
                                 oo.load(Ordering::SeqCst),
                                 ff.load(Ordering::SeqCst),
                                 Arc::clone(&dg),
+                                Arc::clone(&dpa),
                                 Arc::clone(&sg),
                                 ii.load(Ordering::SeqCst),
                                 gg.load(Ordering::SeqCst),
@@ -193,6 +204,7 @@ impl MockServer {
             etag_version,
             fail_get,
             drop_get,
+            drop_probe_attempts,
             stall_get,
             ignore_range,
             gone,
@@ -252,6 +264,15 @@ impl MockServer {
     /// path under test.
     pub fn set_drop_get(&self, drop: bool) {
         self.drop_get.store(drop, Ordering::SeqCst);
+    }
+
+    /// Drop the next `n` probe-like requests (Round 73): HEAD, or
+    /// a GET with `Range: bytes=0-0`. Each dropped request
+    /// decrements the count, so `n` counts requests, not probe
+    /// attempts — one probe attempt that falls back from HEAD to
+    /// a ranged GET consumes two. Segment GETs are never dropped.
+    pub fn set_drop_probe_attempts(&self, n: usize) {
+        self.drop_probe_attempts.store(n, Ordering::SeqCst);
     }
 
     /// Stall GET responses from now on (Round 55): a GET that
@@ -331,6 +352,7 @@ pub fn handle(
     size_override: usize,
     fail_get: bool,
     drop_get: Arc<AtomicBool>,
+    drop_probe_attempts: Arc<AtomicUsize>,
     stall_get: Arc<AtomicBool>,
     ignore_range: bool,
     gone: bool,
@@ -364,6 +386,20 @@ pub fn handle(
         get_requests.fetch_add(1, Ordering::SeqCst);
     } else if method == "HEAD" {
         head_requests.fetch_add(1, Ordering::SeqCst);
+    }
+    // Round 73 — drop the next N probe-like requests: a HEAD, or
+    // a GET for the first byte only (`Range: bytes=0-0`, the
+    // probe's ranged fallback). The socket just goes away, so the
+    // client sees a transport error. Segment GETs (any other
+    // range) are untouched.
+    let is_probe_like = method == "HEAD"
+        || req.lines().any(|l| {
+            let lower = l.to_ascii_lowercase();
+            lower.starts_with("range:") && lower.contains("bytes=0-0")
+        });
+    if is_probe_like && drop_probe_attempts.load(Ordering::SeqCst) > 0 {
+        drop_probe_attempts.fetch_sub(1, Ordering::SeqCst);
+        return;
     }
     // Round 71 (B5) — concurrency limit (OVH): the (max+1)th
     // concurrent GET is refused with 429. HEAD is never counted

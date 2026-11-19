@@ -7,10 +7,10 @@
 //  * Auto-injects the video detector into every http(s) page
 //    (manifest.json `content_scripts`, Round 72): the floating
 //    Download button appears next to any video without a click.
-//    The detector asks this worker (`video_allowed`) whether the
-//    page may show the button (integration on, site not opted
-//    out) before it scans — the opt-out check moved there when
-//    injection stopped being a user gesture.
+//    The detector reads the integration preference and the
+//    excluded-sites list directly from chrome.storage.local
+//    (Round 73) — no service-worker round-trip on its critical
+//    path, so the button can scan the moment it is injected.
 //  * Watches downloads the browser starts. When catching is on, the
 //    site is not opted out and the file type is in the catch list,
 //    it pauses the browser download, hands the URL to the desktop
@@ -454,6 +454,36 @@ chrome.downloads.onCreated.addListener(async (item) => {
       return;
     }
     if (!handedOver) return;
+    // Round 73 (Group 4) — already-finished hardening: a small
+    // download can finish while the hand-off is in flight, and
+    // cancel() on a completed download throws in real Chrome.
+    // Ask for the download's CURRENT state first: if it is
+    // complete, erase the browser's finished copy from the list
+    // and do NOT call cancel; if it is still in progress, cancel
+    // then erase as before. If the state lookup itself is
+    // unavailable or rejects, fall back to the old behavior (try
+    // cancel; erase only if it was cancelled). A cancel failure
+    // on an in-progress download still leaves the browser copy
+    // alone (BUG-049) — it is never erased uncancelled.
+    let currentState = null;
+    let searchOk = false;
+    try {
+      if (chrome.downloads && typeof chrome.downloads.search === "function") {
+        const results = await chrome.downloads.search({ id: item.id });
+        const found =
+          (results || []).find((d) => d && d.id === item.id) || (results || [])[0];
+        if (found && typeof found.state === "string") {
+          currentState = found.state;
+          searchOk = true;
+        }
+      }
+    } catch {
+      // Search unavailable/rejected: fall through to try cancel.
+    }
+    if (searchOk && currentState === "complete") {
+      await chrome.downloads.erase({ id: item.id }).catch(() => {});
+      return;
+    }
     let cancelled = false;
     try {
       await chrome.downloads.cancel(item.id);
@@ -546,22 +576,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       .catch((err) => sendResponse({ ok: false, error: String(err) }));
     return true;
   }
-  // Round 72 (A) — the auto-injected content script asks once
-  // whether its page may show the button (integration on, site
-  // not opted out). A state-read failure defaults to allowed —
-  // the button must not vanish on a storage hiccup; the opt-out
-  // is a preference, not a security boundary.
-  if (message && message.type === "video_allowed") {
-    loadState()
-      .then((state) => {
-        const allowed =
-          state[STORE_KEYS.desktopIntegration] !== false &&
-          !isExcluded(hostOf(message.page_url || ""), state);
-        sendResponse({ ok: allowed });
-      })
-      .catch(() => sendResponse({ ok: true }));
-    return true;
-  }
+  // Round 73 — the `video_allowed` gate is gone: the content
+  // script reads the integration preference and the excluded
+  // sites directly from chrome.storage.local, so nothing here
+  // answers that message type any more.
   // Video grabber (S08): the content script reports one chosen
   // variant, and this worker is the only path to the host — the
   // content script never talks to Native Messaging itself.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate app/extension/manifest.json (S13 + S08 + S13 finish + Round 72).
+"""Validate app/extension/manifest.json (S13 + S08 + S13 finish + Round 72 + Round 73).
 
 Checks the Manifest V3 shape and that the permission set stays
 minimal: no host permissions, no tabs. `scripting` is allowed
@@ -13,9 +13,14 @@ any video without a click, like IDM — the menu-only injection was
 the Round 71 video-button root cause (nobody clicked the menu,
 so nothing was ever injected). The entry is pinned exactly:
 http(s) matches only, `document_idle`, `video-detect.js` +
-`content.js` — nothing broader. The per-site opt-out /
-switched-off integration check moved into content.js
-(`video_allowed`), so an opted-out page still shows no button.
+`content.js` — nothing broader.
+Round 73 (2026-11-19): the entry also pins `all_frames` and
+`match_about_blank` (both true), so the detector runs inside
+iframes and about:blank frames where players embed videos.
+The per-site opt-out / switched-off integration check moved
+into content.js (a direct chrome.storage.local read, Round 73
+— no service-worker round-trip), so an opted-out page still
+shows no button.
 `cookies` is allowed since the S13 finish, and only for one
 thing — reading the cookies for the exact URL being handed over,
 so a login-only link can download (see background.js
@@ -82,6 +87,9 @@ def main() -> int:
     # entry, http(s) matches only, document_idle, video-detect.js
     # + content.js. Anything else (another match pattern, another
     # file, another run_at) fails the validation.
+    # Round 73 — also pinned: all_frames + match_about_blank,
+    # both true, so the detector runs inside iframes and
+    # about:blank frames where players embed videos.
     content_scripts = manifest.get("content_scripts")
     if not isinstance(content_scripts, list) or len(content_scripts) != 1:
         problems.append("content_scripts must be exactly one entry (Round 72 auto-injection)")
@@ -93,6 +101,10 @@ def main() -> int:
             problems.append("content_scripts js must be exactly video-detect.js + content.js")
         if entry.get("run_at") != "document_idle":
             problems.append("content_scripts run_at must be document_idle")
+        if entry.get("all_frames") is not True:
+            problems.append("content_scripts all_frames must be true (Round 73)")
+        if entry.get("match_about_blank") is not True:
+            problems.append("content_scripts match_about_blank must be true (Round 73)")
 
     icons = manifest.get("icons", {})
     for size in REQUIRED_ICON_SIZES:

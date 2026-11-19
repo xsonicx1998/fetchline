@@ -215,19 +215,12 @@ test("scan_page_for_videos refuses an opted-out site (Round 72 A)", async () => 
   assert.deepEqual(env.injected, []);
 });
 
-test("video_allowed answers the content script's gate (Round 72 A)", async () => {
+test("video_allowed is no longer answered (Round 73 — the content script reads storage directly)", async () => {
   const env = loadBackground();
-  env.storage.desktopExcluded = ["ads.example.com"];
-  const ask = async (pageUrl) => {
-    let reply = null;
-    env.listeners.message({ type: "video_allowed", page_url: pageUrl }, {}, (r) => { reply = r; });
-    await tick(20);
-    return reply;
-  };
-  assert.equal(JSON.stringify(await ask("http://127.0.0.1/page.html")), JSON.stringify({ ok: true }));
-  assert.equal(JSON.stringify(await ask("http://ads.example.com/page.html")), JSON.stringify({ ok: false }));
-  env.storage.desktopIntegration = false;
-  assert.equal(JSON.stringify(await ask("http://127.0.0.1/page.html")), JSON.stringify({ ok: false }));
+  let reply = "unanswered";
+  env.listeners.message({ type: "video_allowed", page_url: "http://127.0.0.1/page.html" }, {}, (r) => { reply = r; });
+  await tick(20);
+  assert.equal(reply, "unanswered");
 });
 
 test("Find videos menu rescans the active tab (Round 72 A)", async () => {

@@ -164,6 +164,16 @@ pub struct Settings {
     pub confirm_delete: bool,
     pub connection_timeout_secs: i64,
     pub max_retries: i64,
+    /// Patient tail (Round 73): minutes of zero byte progress
+    /// after which a patient tail gives up instead of retrying
+    /// forever on a dead server (1–120, default 10). The run
+    /// watchdogs are suppressed while a tail waits, so without
+    /// this cap a server that delivered 92% and then died would
+    /// spin forever. A tail that IS receiving bytes never trips
+    /// it — the clock runs from the last byte, not from the
+    /// tail's start.
+    #[serde(default = "default_tail_zero_progress_cap_minutes")]
+    pub tail_zero_progress_cap_minutes: i64,
     /// Dial-Up tab (S09 finish): legacy settings. The connection
     /// name may be empty; auto-dial and redial are honoured only
     /// where a dial-up connection exists (Windows RAS); hang-up
@@ -182,6 +192,16 @@ pub struct Settings {
     pub quota_enabled: bool,
     pub quota_mb: Option<i64>,
     pub quota_hours: Option<i64>,
+}
+
+/// Round 73 — default for `Settings::tail_zero_progress_cap_minutes`.
+/// Also the serde default, so a settings payload from an older UI
+/// (which never sends the field) still deserialises instead of
+/// failing the whole save.
+pub const DEFAULT_TAIL_ZERO_PROGRESS_CAP_MINUTES: i64 = 10;
+
+fn default_tail_zero_progress_cap_minutes() -> i64 {
+    DEFAULT_TAIL_ZERO_PROGRESS_CAP_MINUTES
 }
 
 impl Default for Settings {
@@ -212,6 +232,7 @@ impl Default for Settings {
             confirm_delete: true,
             connection_timeout_secs: 30,
             max_retries: 5,
+            tail_zero_progress_cap_minutes: DEFAULT_TAIL_ZERO_PROGRESS_CAP_MINUTES,
             dialup_connection_name: None,
             dialup_auto_dial: false,
             dialup_hangup_after_completion: false,
@@ -778,6 +799,13 @@ impl Store {
             ("settings", "confirm_delete", "INTEGER NOT NULL DEFAULT 1"),
             ("settings", "connection_timeout_secs", "INTEGER NOT NULL DEFAULT 30"),
             ("settings", "max_retries", "INTEGER NOT NULL DEFAULT 5"),
+            // Patient tail (Round 73): zero-progress cap in
+            // minutes, default 10.
+            (
+                "settings",
+                "tail_zero_progress_cap_minutes",
+                "INTEGER NOT NULL DEFAULT 10",
+            ),
             ("settings", "dialup_connection_name", "TEXT"),
             ("settings", "dialup_auto_dial", "INTEGER NOT NULL DEFAULT 0"),
             (
@@ -1455,7 +1483,8 @@ impl Store {
              update_url, last_update_check_at, \
              quota_enabled, quota_mb, quota_hours, \
              antivirus_enabled, antivirus_timeout_secs, show_progress_window, \
-             clipboard_monitoring, show_download_complete_dialog, sounds_enabled \
+             clipboard_monitoring, show_download_complete_dialog, sounds_enabled, \
+             tail_zero_progress_cap_minutes \
              FROM settings WHERE id = 1",
             [],
             |r| {
@@ -1505,6 +1534,9 @@ impl Store {
                     clipboard_monitoring: r.get::<_, i64>(29)? != 0,
                     show_download_complete_dialog: r.get::<_, i64>(30)? != 0,
                     sounds_enabled: r.get::<_, i64>(31)? != 0,
+                    tail_zero_progress_cap_minutes: r
+                        .get::<_, Option<i64>>(32)?
+                        .unwrap_or(DEFAULT_TAIL_ZERO_PROGRESS_CAP_MINUTES),
                 })
             },
         );
@@ -1559,6 +1591,13 @@ impl Store {
         if !(0..=10).contains(&s.max_retries) {
             return Err(EngineError::InvalidState(
                 "Retries must be between 0 and 10".to_string(),
+            ));
+        }
+        // Patient tail (Round 73): the zero-progress cap is
+        // 1–120 minutes, rejected not clamped (the BUG-008 rule).
+        if !(1..=120).contains(&s.tail_zero_progress_cap_minutes) {
+            return Err(EngineError::InvalidState(
+                "The patient-tail zero-progress cap must be between 1 and 120 minutes".to_string(),
             ));
         }
         if s.language.trim().is_empty() {
@@ -1638,6 +1677,7 @@ impl Store {
              antivirus_enabled = ?27, antivirus_timeout_secs = ?28, \
              show_progress_window = ?29, clipboard_monitoring = ?30, \
              show_download_complete_dialog = ?31, sounds_enabled = ?32, \
+             tail_zero_progress_cap_minutes = ?33, \
              updated_at = datetime('now') WHERE id = 1",
             params![
                 s.default_download_folder.trim(),
@@ -1675,6 +1715,7 @@ impl Store {
                 if s.clipboard_monitoring { 1 } else { 0 },
                 if s.show_download_complete_dialog { 1 } else { 0 },
                 if s.sounds_enabled { 1 } else { 0 },
+                s.tail_zero_progress_cap_minutes,
             ],
         )?;
         drop(conn);
@@ -2879,6 +2920,38 @@ impl Store {
     pub fn delete_segments(&self, download_id: &str) -> Result<()> {
         let conn = self.lock_conn();
         conn.execute("DELETE FROM segments WHERE download_id = ?1", params![download_id])?;
+        Ok(())
+    }
+
+    /// Delete ONE segment row (Round 73 — patient-tail coalesce):
+    /// the row is an unstarted pending segment that was merged
+    /// into its neighbour's range, so it must not survive to a
+    /// later pause/resume (which would reload it alongside the
+    /// merged range and overlap it).
+    pub fn delete_segment(&self, id: &str) -> Result<()> {
+        let conn = self.lock_conn();
+        conn.execute("DELETE FROM segments WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Change one segment's byte range in place (Round 73 —
+    /// patient-tail coalesce): the surviving segment absorbs the
+    /// ranges of the pending segments merged into it. Callers
+    /// delete those rows first, so the widened range never
+    /// overlaps a live row (the schema's no-overlap trigger
+    /// would abort the update otherwise).
+    pub fn update_segment_range(
+        &self,
+        id: &str,
+        start_byte: i64,
+        end_byte: Option<i64>,
+    ) -> Result<()> {
+        let conn = self.lock_conn();
+        conn.execute(
+            "UPDATE segments SET start_byte = ?1, end_byte = ?2, updated_at = datetime('now') \
+             WHERE id = ?3",
+            params![start_byte, end_byte, id],
+        )?;
         Ok(())
     }
 
