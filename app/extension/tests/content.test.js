@@ -1000,6 +1000,39 @@ test("needs_login: a stored grant sends cookies on the FIRST resolve — no cook
   );
 });
 
+test("video_unavailable: a removed video says so, with no Try again and no cookie retry (Round 82)", async () => {
+  const env = loadContent({ pageUrl: YT_PAGE, confirmFn: () => true });
+  const video = env.makeVideo(YT_BLOB, { videoWidth: 1280, videoHeight: 720, source: false });
+  env.addVideo(video);
+  env.fireDocumentEvent("loadedmetadata", { target: video });
+  await tick();
+  env.click(env.findButton());
+  await tick();
+  const port = env.ports[0];
+  // Tom & Jerry (MUyWv16cGys): the video is gone from YouTube
+  // itself, and the host used to report it as login_required —
+  // telling a signed-in user to sign in. The kind is now
+  // video_unavailable, which is terminal: no consent ask, no
+  // retry, no "Try again".
+  env.deliver(port, {
+    type: "error",
+    ok: false,
+    request_id: port.messages[0].request_id,
+    error: "This video is unavailable — it may have been removed from YouTube.",
+    needs_login: false,
+    error_kind: "video_unavailable",
+  });
+  await tick(30);
+  assert.equal(env.confirmCalls.length, 0, "no consent ask for a removed video");
+  assert.equal(env.ports.length, 1, "no retry: a removed video cannot be fixed by retrying");
+  assert.match(dropdownText(env), /unavailable/);
+  assert.equal(
+    env.findDropdown().children.filter((c) => c.tagName === "BUTTON").length,
+    0,
+    "no Try again on a terminal failure",
+  );
+});
+
 test("needs_login: a denial shows the error and is not asked again this session", async () => {
   const env = loadContent({ pageUrl: YT_PAGE, confirmFn: () => false });
   const video = env.makeVideo(YT_BLOB, { videoWidth: 1280, videoHeight: 720, source: false });

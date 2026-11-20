@@ -1049,6 +1049,13 @@
     if (err && err.error_kind === "bot_blocked") {
       return err.error || "YouTube is blocking this video on this connection.";
     }
+    // Round 82 — a removed video is terminal too: retrying it
+    // can never succeed, and it is NOT a sign-in problem, so
+    // the message says the video itself is gone — with no
+    // "Try again" and no cookie-consent retry.
+    if (err && err.error_kind === "video_unavailable") {
+      return err.error || "This video is unavailable — it may have been removed.";
+    }
     if (err && err.needs_login && withCookies) {
       return "You're already signed in, but this video is still blocked on this connection.";
     }

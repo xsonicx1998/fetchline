@@ -268,6 +268,82 @@ fn host_video_found_enqueues_a_video() {
     assert_eq!(pending[0].source, "video");
 }
 
+// -- Round 82 — the quality-pick payload, old and new --------------------
+// The pre-Round-81 extension sent the resolved variant's headers
+// as a raw JSON map, and the host refused the WHOLE video_found
+// message with "invalid type: map, expected a string" — a picked
+// quality silently created no download (Round 81 reproduction,
+// and the Round 80+81 VPS retest, where the extension on the VPS
+// was never reloaded after git pull). The payloads below are the
+// exact bytes the extension sends, built by the real
+// buildResolvedVariant in app/extension/video-detect.js (see
+// /tmp/r82-payload-current.json and /tmp/r82-payload-old.json
+// from the live host-binary reproduction): the current form
+// (headers a JSON string) and the old form (headers a map).
+// Both must parse AND enqueue now — the host tolerates the map
+// (video.rs de_string_or_map) so a stale extension's pick still
+// creates a download row. A genuinely wrong headers type (a
+// number) must still fail to parse.
+
+fn video_found_payload(headers: serde_json::Value) -> serde_json::Value {
+    json!({
+        "type": "video_found",
+        "page_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "variants": [{
+            "url": "https://rr1---sn-xyz.googlevideo.com/videoplayback?itag=137",
+            "quality": "1080p",
+            "format": "MP4",
+            "live": false,
+            "drm": false,
+            "resolved": true,
+            "filename": "Rick Astley - Never Gonna Give You Up (Official Video) (4K Remaster).mp4",
+            "headers": headers,
+            "audio_url": "https://rr1---sn-xyz.googlevideo.com/videoplayback?itag=140",
+            "source_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "format_id": "137",
+            "fragmented": false
+        }],
+        "cookies": []
+    })
+}
+
+#[test]
+fn host_video_found_accepts_headers_as_string_or_map() {
+    for (label, headers) in [
+        (
+            "current extension (string)",
+            json!("{\"User-Agent\": \"Mozilla/5.0\", \"Referer\": \"https://www.youtube.com/\"}"),
+        ),
+        (
+            "old extension (raw map)",
+            json!({"User-Agent": "Mozilla/5.0", "Referer": "https://www.youtube.com/"}),
+        ),
+    ] {
+        let dir = tmpdir();
+        let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+        let value = video_found_payload(headers);
+        let msg: HostMessage = serde_json::from_value(value).unwrap_or_else(|e| {
+            panic!("{label}: video_found must parse: {e}");
+        });
+        let reply = handle_host_message(&store, &msg);
+        assert!(reply.ok, "{label}: video_found must succeed: {:?}", reply);
+        assert_eq!(reply.enqueued, Some(1), "{label}: one video enqueued");
+        let pending = store.list_pending_links(Some("pending")).unwrap();
+        assert_eq!(pending.len(), 1, "{label}: one pending row");
+    }
+}
+
+#[test]
+fn host_video_found_rejects_a_non_string_non_map_headers() {
+    let value = video_found_payload(json!(42));
+    let err = serde_json::from_value::<HostMessage>(value).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("headers must be a JSON string or an object"),
+        "a number headers must still fail to parse: {err}"
+    );
+}
+
 #[test]
 fn host_download_all_with_links_enqueues_each() {
     let dir = tmpdir();

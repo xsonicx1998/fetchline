@@ -750,5 +750,21 @@ mod tests {
         );
         assert_eq!(timeout["needs_login"], false);
         assert_eq!(timeout["error_kind"], "timeout");
+
+        // Round 82 — a removed video is NOT a login wall either:
+        // the reply must not offer the cookie retry
+        // (needs_login false) and must carry the
+        // video_unavailable kind with the "video itself is gone"
+        // message.
+        let gone = resolve_to_reply(
+            "req-4",
+            Err(ytdlp::YtDlpError::new(
+                ytdlp::YtDlpErrorKind::VideoUnavailable,
+                "This video is unavailable — it may have been removed from YouTube.".to_string(),
+            )),
+        );
+        assert_eq!(gone["needs_login"], false);
+        assert_eq!(gone["error_kind"], "video_unavailable");
+        assert!(gone["error"].as_str().unwrap().contains("unavailable"));
     }
 }

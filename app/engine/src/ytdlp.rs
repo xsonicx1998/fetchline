@@ -209,6 +209,18 @@ pub enum YtDlpErrorKind {
     /// LoginRequired told the user to sign in when he already
     /// was — and "Try again" just repeated the same refusal.
     BotBlocked,
+    /// Round 82 — the video itself is gone from YouTube
+    /// ("This video is unavailable"): NOT a sign-in problem and
+    /// NOT a bot block. YouTube's player can report a removed
+    /// video with a LOGIN_REQUIRED playability status, and an
+    /// older yt-dlp prints that alongside the unavailable
+    /// reason — so this check runs BEFORE the login needles in
+    /// `map_error`, or a removed video is misreported as
+    /// "needs you to be signed in" (Tom & Jerry MUyWv16cGys,
+    /// Round 81 retest: host.log said login_required 9 times
+    /// for a video the watch page says isn't available
+    /// anymore). `needs_login` is false for this kind.
+    VideoUnavailable,
     Private,
     GeoBlocked,
     Unsupported,
@@ -244,6 +256,7 @@ impl YtDlpError {
         match self.kind {
             YtDlpErrorKind::LoginRequired => "login_required",
             YtDlpErrorKind::BotBlocked => "bot_blocked",
+            YtDlpErrorKind::VideoUnavailable => "video_unavailable",
             YtDlpErrorKind::Private => "private",
             YtDlpErrorKind::GeoBlocked => "geo_blocked",
             YtDlpErrorKind::Unsupported => "unsupported",
@@ -272,6 +285,9 @@ impl YtDlpError {
             YtDlpErrorKind::BotBlocked => {
                 "YouTube is blocking this video on this connection. It plays in your browser, but the download can't reach it right now."
                     .to_string()
+            }
+            YtDlpErrorKind::VideoUnavailable => {
+                "This video is unavailable — it may have been removed from YouTube.".to_string()
             }
             YtDlpErrorKind::Private => "This video is private or has been removed.".to_string(),
             YtDlpErrorKind::GeoBlocked => {
@@ -355,13 +371,32 @@ pub fn map_error(stderr: &str) -> YtDlpError {
             "YouTube is blocking this video on this connection.",
         );
     }
+    // Round 82 — an unavailable video is checked BEFORE the
+    // login needles: YouTube can report a removed video with a
+    // LOGIN_REQUIRED playability status, and an older yt-dlp
+    // prints that next to the unavailable reason — checking
+    // login first misreported a removed video (MUyWv16cGys) as
+    // "needs you to be signed in" while the user was signed in.
+    // The needle is "video is unavailable" (with "is") as well
+    // as the short "video unavailable": the real stderr is
+    // "This video is unavailable", which does NOT contain the
+    // substring "video unavailable".
+    // "has been removed" stays Private (a removed-by-uploader
+    // video reads as private in the UI); only the explicit
+    // "video unavailable" phrasing is VideoUnavailable.
+    if has("video is unavailable") || has("video unavailable") {
+        return err(
+            YtDlpErrorKind::VideoUnavailable,
+            "This video is unavailable — it may have been removed from YouTube.",
+        );
+    }
     if has("login_required") || has("playability status") {
         return err(
             YtDlpErrorKind::LoginRequired,
             "This video needs you to be signed in.",
         );
     }
-    if has("private") || has("has been removed") || has("video unavailable") {
+    if has("private") || has("has been removed") {
         return err(
             YtDlpErrorKind::Private,
             "This video is private or has been removed.",
@@ -1845,7 +1880,23 @@ mod tests {
                 "ERROR: This video has been removed by the uploader",
                 YtDlpErrorKind::Private,
             ),
-            ("ERROR: Video unavailable", YtDlpErrorKind::Private),
+            ("ERROR: Video unavailable", YtDlpErrorKind::VideoUnavailable),
+            // Round 82 — a removed video is its own kind now
+            // (VideoUnavailable), not Private and never
+            // LoginRequired: YouTube can report it with a
+            // LOGIN_REQUIRED playability status, so the
+            // unavailable check runs before the login needles.
+            // The MUyWv16cGys stderr is the exact text yt-dlp
+            // 2026.10.26 prints for it (verified live on this
+            // VM); the host used to log it as login_required.
+            (
+                "ERROR: [youtube] MUyWv16cGys: This video is unavailable",
+                YtDlpErrorKind::VideoUnavailable,
+            ),
+            (
+                "WARNING: [youtube] MUyWv16cGys: Playability status: LOGIN_REQUIRED\nERROR: [youtube] MUyWv16cGys: This video is unavailable",
+                YtDlpErrorKind::VideoUnavailable,
+            ),
             // Round 79 — a genuinely private video that also
             // mentions signing in still maps to Private: the
             // bot-check needles above are specific ("not a bot",

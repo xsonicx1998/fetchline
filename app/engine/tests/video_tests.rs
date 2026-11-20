@@ -1173,7 +1173,12 @@ async fn resolved_video_download_probe_403_dash_pair_falls_back_merged() {
     row.format_id = "137".to_string();
     let (id, _) = mgr
         .add_resolved_video_download(
-            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            // Round 82 — the probe-403 fallback is TikTok-only:
+            // a YouTube DASH pair with a refused probe must NOT
+            // fall back (it used to, and the yt-dlp download
+            // failed with exit code 1 on the VPS). This test
+            // keeps proving the merged fallback, on a TikTok page.
+            "https://www.tiktok.com/@user/video/123",
             &row,
             Some("video.mp4".to_string()),
             None,
@@ -1228,5 +1233,45 @@ async fn resolved_video_download_probe_404_still_fails_with_no_row() {
     assert!(
         store.list_downloads().unwrap().is_empty(),
         "a 404 add must leave no download row behind: {err}"
+    );
+}
+
+// -- Round 82 — the probe-403 fallback is TikTok-only ---------
+// A YouTube stream whose probe is refused with 403 must surface
+// the real probe error with no row — exactly like Round 79.
+// The unscoped Round 80 fallback switched it to a direct yt-dlp
+// download instead, and yt-dlp on the VPS fails that with exit
+// code 1, so a manual YouTube download that worked in Round 79
+// broke in Round 80+81 ("yt-dlp exited with exit code: 1", 0 B).
+
+#[tokio::test]
+async fn resolved_video_download_probe_403_youtube_does_not_fall_back() {
+    let server = MockServer::start(MockConfig {
+        fail_status: Some(403),
+        ..Default::default()
+    });
+    let dir = tmpdir();
+    let mgr = test_mgr(&dir);
+    let store = mgr.store();
+    let err = mgr
+        .add_resolved_video_download(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            &resolved_row(&server.url),
+            Some("video.mp4".to_string()),
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("403"),
+        "the real 403 must surface, not a yt-dlp fallback: {err}"
+    );
+    assert!(
+        store.list_downloads().unwrap().is_empty(),
+        "a refused YouTube probe must leave no download row behind: {err}"
     );
 }

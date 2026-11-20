@@ -2399,6 +2399,15 @@ impl DownloadManager {
         // real error). A DASH pair falls back with the combined
         // "video+audio" selector, so yt-dlp merges the pair
         // itself instead of the video half losing its audio.
+        // Round 82 — the fallback is TikTok-only (the PAGE is a
+        // tiktok.com page): it was unscoped, so a transient
+        // YouTube probe 403 also switched a working segmented
+        // stream download to a direct yt-dlp download — and
+        // yt-dlp on the VPS fails that with exit code 1, so a
+        // manual YouTube download that worked in Round 79 broke
+        // in Round 80+81 with "yt-dlp exited with exit code: 1",
+        // 0 B. For any other host a probe 401/403 surfaces the
+        // real probe error (no row), exactly like Round 79.
         let mut use_direct = row.fragmented;
         let mut effective_format_id = row.format_id.clone();
         let (download_id, probe) = if row.fragmented {
@@ -2430,7 +2439,10 @@ impl DownloadManager {
                 .await
             {
                 Ok(created) => created,
-                Err(e) if matches!(e, EngineError::Status(401 | 403, _)) => {
+                Err(e)
+                    if matches!(e, EngineError::Status(401 | 403, _))
+                        && is_tiktok_page(page_url) =>
+                {
                     let _ = self.store.log(&format!(
                         "resolved add: probe of {} refused ({e}) — falling back to the direct yt-dlp download",
                         row.url
@@ -9490,6 +9502,20 @@ pub(crate) fn url_host(url: &str) -> Option<String> {
     reqwest::Url::parse(url)
         .ok()
         .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+}
+
+/// Round 82 — is this page a TikTok page (tiktok.com or any
+/// subdomain)? The Round 80 probe-403 → yt-dlp fallback exists
+/// for TikTok's CDN, which refuses our raw probe; scoping it by
+/// the PAGE host (not the stream host — TikTok stream hosts
+/// vary) keeps a transient YouTube probe 403 on the working
+/// segmented-download path instead of switching it to a yt-dlp
+/// download that fails on the VPS.
+pub(crate) fn is_tiktok_page(url: &str) -> bool {
+    match url_host(url) {
+        Some(host) => host == "tiktok.com" || host.ends_with(".tiktok.com"),
+        None => false,
+    }
 }
 
 pub(crate) fn filename_from_url(url: &str) -> Option<String> {

@@ -512,6 +512,18 @@ function videoPageUrlIfVideoPage(href) {
 // page there is no such anchor and this returns null, so the
 // caller falls back to the page URL. Plain parentElement walk
 // (no closest): testable with plain objects in Node.
+// Round 82 — the link is not always an ANCESTOR of the
+// <video>: on TikTok's feed it can be a sibling overlay inside
+// the same slide, so the ancestor walk alone returns null and
+// the resolve runs for the feed URL (Round 80+81 retest). The
+// second pass walks the same ancestors and, at each one, looks
+// for video-page anchors among its descendants — accepting one
+// only when it is the SOLE such anchor in that subtree, so a
+// neighbour slide's link can never be picked. A subtree with
+// none, or with several, is skipped; once a level has several,
+// every level above it has at least as many, so the search
+// stops. Nodes without querySelectorAll (the plain-object test
+// doubles) skip the second pass entirely.
 function videoPageUrlFromElement(video) {
   let el = video;
   for (let i = 0; i < 12 && el; i++) {
@@ -521,6 +533,24 @@ function videoPageUrlFromElement(video) {
     }
     // parentNode as well as parentElement: the test harness
     // (and some shadow hosts) only set parentNode.
+    el = el.parentElement || el.parentNode;
+  }
+  el = video;
+  for (let i = 0; i < 12 && el; i++) {
+    if (typeof el.querySelectorAll === "function") {
+      let found = null;
+      let count = 0;
+      const anchors = el.querySelectorAll("a[href]") || [];
+      for (const a of anchors) {
+        const url = videoPageUrlIfVideoPage((a && a.href) || "");
+        if (url) {
+          count++;
+          found = url;
+          if (count > 1) return null;
+        }
+      }
+      if (count === 1) return found;
+    }
     el = el.parentElement || el.parentNode;
   }
   return null;

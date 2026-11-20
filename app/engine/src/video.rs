@@ -46,7 +46,33 @@
 //! downloadable. A DASH `.mpd` manifest is offered the same way:
 //! as-is, labelled a manifest, never merged.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// Round 82 — `headers` accepts a JSON-encoded string OR a raw
+/// map: the current extension sends a string (Round 81), but an
+/// older extension sends the map, and the host used to refuse
+/// the whole `video_found` message with "invalid type: map,
+/// expected a string" — a picked quality silently created no
+/// download (Round 81 reproduction + Round 80+81 VPS retest,
+/// where the extension on the VPS was never reloaded after the
+/// pull). A map is serialised back to a JSON string, so
+/// `headers_from_json` sees exactly what the string form
+/// carries. Anything else (a number, a list) is still a hard
+/// error — only the known old shape is tolerated.
+fn de_string_or_map<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        None => Ok(None),
+        Some(serde_json::Value::String(s)) => Ok(Some(s)),
+        Some(v @ serde_json::Value::Object(_)) => Ok(Some(v.to_string())),
+        Some(_) => Err(serde::de::Error::custom(
+            "headers must be a JSON string or an object",
+        )),
+    }
+}
 
 use crate::links::{classify_kind, extract_links, filename_from_link_url, LinkKind};
 use crate::store::Settings;
@@ -423,7 +449,10 @@ pub struct VideoVariantInput {
     /// extension once sent the raw map and the host refused the
     /// whole message with "invalid type: map, expected a
     /// string" (Round 81 — a picked quality silently created no
-    /// download). `audio_url` is the DASH pair's audio
+    /// download). Round 82: the field now ALSO accepts the raw
+    /// map (`de_string_or_map`) so an older extension's pick
+    /// still creates a download row instead of failing.
+    /// `audio_url` is the DASH pair's audio
     /// stream; `source_url` the page URL (for re-resolve);
     /// `format_id` the yt-dlp format id; `fragmented` marks a
     /// (B)-fallback download (yt-dlp downloads it itself). All
@@ -433,7 +462,7 @@ pub struct VideoVariantInput {
     pub resolved: bool,
     #[serde(default)]
     pub filename: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_string_or_map")]
     pub headers: Option<String>,
     #[serde(default)]
     pub audio_url: Option<String>,
@@ -685,8 +714,13 @@ mod tests {
     /// expected a string", so no download row was ever created.
     /// The extension's `buildResolvedVariant` sent `headers` as
     /// a JSON map, but this struct takes a JSON-encoded STRING
-    /// (see `headers_from_json` in manager.rs) — the map form
-    /// must keep failing, and the string form must parse.
+    /// (see `headers_from_json` in manager.rs).
+    /// Round 82 — the map form is now ACCEPTED as well: an
+    /// older extension sends it, and the host serialises it
+    /// back to the JSON string, so a stale extension's pick
+    /// creates a download row instead of failing the message.
+    /// The string form must parse, and any non-string,
+    /// non-map headers must still fail (see extension_tests).
     #[test]
     fn resolved_variant_headers_is_a_json_string() {
         let json = serde_json::json!({
@@ -706,10 +740,20 @@ mod tests {
             "url": "https://cdn.example.com/v360.mp4",
             "headers": { "User-Agent": "x" },
         });
-        assert!(
-            serde_json::from_value::<VideoVariantInput>(map_form).is_err(),
-            "a map headers must not parse as a string"
-        );
+        // Round 82 — the map form now ALSO parses (an older
+        // extension sends it): it is serialised back to the
+        // JSON string, so headers_from_json sees exactly what
+        // the string form carries — a stale extension's pick
+        // creates a download row instead of failing the whole
+        // message.
+        let v: VideoVariantInput =
+            serde_json::from_value(map_form).expect("map headers parse as a string");
+        assert_eq!(v.headers.as_deref(), Some("{\"User-Agent\":\"x\"}"));
+        // The serialised string must round-trip through the
+        // header parser exactly like the string form does.
+        let back: serde_json::Value =
+            serde_json::from_str(v.headers.as_deref().unwrap()).expect("headers round-trip");
+        assert_eq!(back["User-Agent"].as_str(), Some("x"));
     }
 
     #[test]

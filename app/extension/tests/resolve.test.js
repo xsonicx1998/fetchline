@@ -277,3 +277,48 @@ test("videoPageUrlFromElement: a feed video resolves to its own page, a watch pa
   assert.equal(videoPageUrlFromElement({ tagName: "VIDEO", parentElement: null }), null);
   assert.equal(videoPageUrlFromElement(null), null);
 });
+
+test("videoPageUrlFromElement: a sibling overlay link inside the same slide is found, a neighbour slide's link is not", () => {
+  // Round 82 — on TikTok's feed the link to the video's own
+  // page is not always an ANCESTOR of the <video>: it can be a
+  // sibling overlay inside the same slide. The doubles below
+  // implement querySelectorAll like a real element (returning
+  // the anchors in that subtree).
+  const videoHref = "https://www.tiktok.com/@someone/video/7551233954129399053";
+  const slide = {
+    tagName: "DIV",
+    parentElement: null,
+    querySelectorAll: () => [{ href: videoHref }],
+  };
+  const video = { tagName: "VIDEO", parentElement: slide };
+  assert.equal(videoPageUrlFromElement(video), videoHref);
+
+  // Two video-page anchors in one subtree (this slide's link
+  // plus a neighbour's) must NOT resolve to either one — the
+  // caller falls back to the page URL instead of risking the
+  // wrong video.
+  const feed = {
+    tagName: "DIV",
+    parentElement: null,
+    querySelectorAll: () => [
+      { href: videoHref },
+      { href: "https://www.tiktok.com/@other/video/7551233954129399000" },
+    ],
+  };
+  assert.equal(
+    videoPageUrlFromElement({ tagName: "VIDEO", parentElement: feed }),
+    null,
+  );
+
+  // A subtree whose only anchor is a profile link is not a
+  // video page either.
+  const profileSlide = {
+    tagName: "DIV",
+    parentElement: null,
+    querySelectorAll: () => [{ href: "https://www.tiktok.com/@someone" }],
+  };
+  assert.equal(
+    videoPageUrlFromElement({ tagName: "VIDEO", parentElement: profileSlide }),
+    null,
+  );
+});
