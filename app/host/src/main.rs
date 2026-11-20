@@ -724,6 +724,23 @@ mod tests {
         assert_eq!(login["error_kind"], "login_required");
         assert!(login["error"].as_str().unwrap().contains("signed in"));
 
+        // Round 81 — a bot block is NOT a login wall: the
+        // reply must not offer the cookie retry (needs_login
+        // false) and must carry the bot_blocked kind.
+        let blocked = resolve_to_reply(
+            "req-2b",
+            Err(ytdlp::YtDlpError::new(
+                ytdlp::YtDlpErrorKind::BotBlocked,
+                "YouTube is blocking this video on this connection.".to_string(),
+            )),
+        );
+        assert_eq!(blocked["needs_login"], false);
+        assert_eq!(blocked["error_kind"], "bot_blocked");
+        assert!(blocked["error"]
+            .as_str()
+            .unwrap()
+            .contains("blocking this video"));
+
         let timeout = resolve_to_reply(
             "req-3",
             Err(ytdlp::YtDlpError::new(

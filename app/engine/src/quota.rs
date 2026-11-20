@@ -161,7 +161,10 @@ mod tests {
 
     #[test]
     fn window_end_is_start_plus_hours() {
-        assert_eq!(window_end_unix(Some(1_000_000), 5), Some(1_000_000 + 18_000));
+        assert_eq!(
+            window_end_unix(Some(1_000_000), 5),
+            Some(1_000_000 + 18_000)
+        );
         assert_eq!(window_end_unix(None, 5), None);
     }
 

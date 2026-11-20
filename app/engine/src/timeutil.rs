@@ -28,7 +28,13 @@ pub fn parse_iso_to_unix(value: &str) -> Option<i64> {
         None => without_z,
     };
     let b = main.as_bytes();
-    if b.len() != 19 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':' || b[16] != b':' {
+    if b.len() != 19
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+    {
         return None;
     }
     let num = |from: usize, to: usize| -> Option<i64> {
@@ -105,7 +111,10 @@ mod tests {
     #[test]
     fn round_trips_known_dates() {
         assert_eq!(parse_iso_to_unix("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(parse_iso_to_unix("2026-11-14T20:30:00Z"), Some(1_794_688_200));
+        assert_eq!(
+            parse_iso_to_unix("2026-11-14T20:30:00Z"),
+            Some(1_794_688_200)
+        );
         assert_eq!(unix_to_iso(0), "1970-01-01T00:00:00Z");
         assert_eq!(unix_to_iso(1_794_688_200), "2026-11-14T20:30:00Z");
         // Leap day survives the round trip.
@@ -118,8 +127,14 @@ mod tests {
     #[test]
     fn accepts_fractional_seconds_like_js_to_iso_string() {
         // JavaScript Date.toISOString() output.
-        assert_eq!(parse_iso_to_unix("2026-11-14T20:30:00.000Z"), Some(1_794_688_200));
-        assert_eq!(parse_iso_to_unix("2026-11-14T20:30:00.5Z"), Some(1_794_688_200));
+        assert_eq!(
+            parse_iso_to_unix("2026-11-14T20:30:00.000Z"),
+            Some(1_794_688_200)
+        );
+        assert_eq!(
+            parse_iso_to_unix("2026-11-14T20:30:00.5Z"),
+            Some(1_794_688_200)
+        );
     }
 
     #[test]

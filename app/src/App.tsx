@@ -17,6 +17,7 @@ import {
   getQueueFiles,
   getQuotaStatus,
   getSettings,
+  enqueueClipboardCapture,
   listDownloads,
   listGrabberProjects,
   listPendingLinks,
@@ -494,19 +495,28 @@ export default function App() {
     }).then((fn) => {
       unlistenUpdate = fn
     })
-    // Round 52, reworked Round 75 — clipboard monitoring: a
-    // download link was copied. The offer opens the Add URL
-    // dialog DIRECTLY in capture mode (file name on top, URL
-    // locked) — the small intermediate ClipboardOfferDialog is
-    // gone. While the dialog is already open for a capture, new
-    // offers wait: one at a time, and never a second window for
-    // the same URL. A fresh copy re-offers (new clipboard
-    // sequence), so nothing is lost by dismissing.
+    // Round 52, reworked Round 75 and Round 81 — clipboard
+    // monitoring: a download link was copied. Round 81: the
+    // offer is enqueued as a pending capture, so it opens in
+    // its own standalone Add URL window, popped in front over
+    // whatever the user has open — the main window's 1 s
+    // pending-captures poll picks the new row up. Until now the
+    // offer opened the Add URL dialog directly inside the MAIN
+    // window, and when that window was hidden to the tray the
+    // user saw nothing on top and had to "go into the program"
+    // to find it. A fresh copy re-offers (new clipboard
+    // sequence), so nothing is lost by dismissing; the
+    // standalone window resolves the capture itself on close.
+    // Only when the enqueue itself fails (a real refusal) does
+    // the offer fall back to the in-window dialog, so it is
+    // never lost.
     void onClipboardLink((offer) => {
-      if (clipboardCaptureRef.current !== null) return
-      clipboardCaptureRef.current = offer
-      setClipboardCapture(offer)
-      setShowAdd(true)
+      void enqueueClipboardCapture(offer.url).catch(() => {
+        if (clipboardCaptureRef.current !== null) return
+        clipboardCaptureRef.current = offer
+        setClipboardCapture(offer)
+        setShowAdd(true)
+      })
     }).then((fn) => {
       unlistenClipboard = fn
     })

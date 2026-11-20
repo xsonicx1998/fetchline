@@ -2389,6 +2389,18 @@ impl DownloadManager {
             Some(headers)
         };
         let probe_filename = filename.clone();
+        // Round 80 — a resolved stream URL whose probe is refused
+        // with 401/403 (TikTok's CDN answers 403 to our raw client
+        // even with the format's headers) falls back to yt-dlp's
+        // own downloader — the (B) path — which re-extracts the
+        // page for the same format id with the format's full
+        // header set. Only 401/403 fall back: a 404, a timeout or
+        // an unreachable URL keeps today's behaviour (no row, the
+        // real error). A DASH pair falls back with the combined
+        // "video+audio" selector, so yt-dlp merges the pair
+        // itself instead of the video half losing its audio.
+        let mut use_direct = row.fragmented;
+        let mut effective_format_id = row.format_id.clone();
         let (download_id, probe) = if row.fragmented {
             let id = self
                 .add_direct_ytdlp_download(&row.url, filename, folder, category_id, queue_id)
@@ -2405,22 +2417,63 @@ impl DownloadManager {
                 },
             )
         } else {
-            self.add_download_with_cookies_and_headers(
-                &row.url,
-                filename,
-                folder,
-                category_id,
-                queue_id,
-                None,
-                headers,
-            )
-            .await?
+            match self
+                .add_download_with_cookies_and_headers(
+                    &row.url,
+                    filename.clone(),
+                    folder.clone(),
+                    category_id.clone(),
+                    queue_id.clone(),
+                    None,
+                    headers,
+                )
+                .await
+            {
+                Ok(created) => created,
+                Err(e) if matches!(e, EngineError::Status(401 | 403, _)) => {
+                    let _ = self.store.log(&format!(
+                        "resolved add: probe of {} refused ({e}) — falling back to the direct yt-dlp download",
+                        row.url
+                    ));
+                    use_direct = true;
+                    if row.needs_merge {
+                        if let Some(audio_format_id) = row
+                            .audio_format_id
+                            .as_deref()
+                            .filter(|s| !s.trim().is_empty())
+                        {
+                            effective_format_id = format!("{}+{}", row.format_id, audio_format_id);
+                        }
+                    }
+                    let id = self
+                        .add_direct_ytdlp_download(
+                            &row.url,
+                            filename,
+                            folder,
+                            category_id,
+                            queue_id,
+                        )
+                        .await?;
+                    (
+                        id,
+                        ProbeInfo {
+                            size: None,
+                            accept_ranges: false,
+                            etag: None,
+                            last_modified: None,
+                            filename: probe_filename,
+                            final_url: row.url.clone(),
+                        },
+                    )
+                }
+                Err(e) => return Err(e),
+            }
         };
         let _ = self.store.set_download_ytdlp_meta(
             &download_id,
             Some(page_url),
-            Some(&row.format_id),
-            row.fragmented,
+            Some(&effective_format_id),
+            use_direct,
         );
         if let Some(kbps) = speed_limit_kbps.filter(|k| *k > 0) {
             let _ = self.set_download_speed_limit(&download_id, Some(kbps));
@@ -2428,9 +2481,10 @@ impl DownloadManager {
         // A DASH pair saved for later keeps its audio: create
         // the children eagerly (linked, merge pending) so a
         // later start finds the pair instead of downloading the
-        // video half alone.
+        // video half alone. A fallback (B) row skips this —
+        // yt-dlp merges the pair itself.
         let audio_url = row.audio_url.as_deref().filter(|u| !u.trim().is_empty());
-        if !row.fragmented {
+        if !use_direct {
             if let Some(audio_url) = audio_url {
                 if let Err(e) = self.ensure_dash_children(&download_id, audio_url).await {
                     let _ = self.store.log(&format!(
@@ -2440,7 +2494,7 @@ impl DownloadManager {
             }
         }
         if start_now {
-            if row.fragmented {
+            if use_direct {
                 let _ = self.start_direct_ytdlp(&download_id).await;
             } else if let Some(audio_url) = audio_url {
                 let _ = self.start_dash_download(&download_id, audio_url).await;

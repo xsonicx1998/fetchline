@@ -198,6 +198,10 @@
     typeof qualityRowLabel === "function" ? qualityRowLabel : VD.qualityRowLabel || ((f) => (f && f.label) || "Unknown quality");
   const buildResolvedVariantFn =
     typeof buildResolvedVariant === "function" ? buildResolvedVariant : VD.buildResolvedVariant || null;
+  const videoPageUrlFromElementFn =
+    typeof videoPageUrlFromElement === "function"
+      ? videoPageUrlFromElement
+      : VD.videoPageUrlFromElement || null;
   const createResolveCacheFn =
     typeof createResolveCache === "function" ? createResolveCache : VD.createResolveCache || null;
 
@@ -665,7 +669,7 @@
         row.addEventListener("mouseleave", () => {
           row.style.background = "none";
         });
-        row.addEventListener("click", () => sendVariant(v, row, label));
+        row.addEventListener("click", () => sendVariant(video, v, row, label));
       }
       row.appendChild(format);
       row._label = label;
@@ -715,9 +719,24 @@
   // dropdown shows "Checking…" first; if the user closes it
   // while the read is in flight, no resolve starts at all (a
   // late reply would otherwise pop the dropdown back open).
+  // Round 81 — the URL a resolve runs for: the playing
+  // video's own page when the element sits inside a link to
+  // one (a TikTok feed slide links to its video page), else
+  // the page URL itself (a YouTube watch page already is the
+  // video page). The resolve cache, the consent host and the
+  // cookie fetch all use this URL, so two feed videos never
+  // share one cached list.
+  function pageUrlForResolve(video) {
+    if (videoPageUrlFromElementFn) {
+      return videoPageUrlFromElementFn(video) || location.href;
+    }
+    return location.href;
+  }
+
   async function openResolveDropdown(video) {
     if (activeResolve && activeResolve.video === video) return;
-    const cached = resolveCache.get(normalizePageUrlFn(location.href));
+    const resolveUrl = pageUrlForResolve(video);
+    const cached = resolveCache.get(normalizePageUrlFn(resolveUrl));
     if (cached) {
       renderResolved(video, cached);
       return;
@@ -725,13 +744,13 @@
     renderResolveLoading(video);
     let withCookies = false;
     let cookies = [];
-    const host = hostOf(location.href);
+    const host = hostOf(resolveUrl);
     if (host) {
       try {
         const stored = await chrome.storage.local.get([`ytdlp_cookie_consent:${host}`]);
         if (stored && stored[`ytdlp_cookie_consent:${host}`] === true) {
           withCookies = true;
-          cookies = await requestCookies(location.href);
+          cookies = await requestCookies(resolveUrl);
         }
       } catch {
         // Storage/cookie read failed: fall back to cookieless.
@@ -775,7 +794,12 @@
     loadingNote.textContent = `Checking… ${secs} s`;
   }
 
-  function renderResolveError(video, message) {
+  // Round 81 — `allowRetry` false hides the "Try again"
+  // button: some failures no retry can fix in this session
+  // (a bot block, a login wall that already had the browser's
+  // cookies), and a retry button there would only repeat the
+  // identical failing request.
+  function renderResolveError(video, message, allowRetry = true) {
     ensureDropdown(video);
     dropdown.innerHTML = "";
     loadingNote = null;
@@ -784,6 +808,10 @@
     note.style.cssText = "margin: 0; padding: 11px 14px; font-size: 13px; color: #F02DCD;";
     note.textContent = message;
     dropdown.appendChild(note);
+    if (allowRetry === false) {
+      dropdown.style.display = "block";
+      return;
+    }
     const retry = document.createElement("button");
     retry.type = "button";
     retry.textContent = "Try again";
@@ -907,6 +935,7 @@
       requestId,
       port,
       video,
+      pageUrl: pageUrlForResolve(video),
       withCookies: withCookies === true,
       cookies: cookies || [],
       onResolved: onResolved || null,
@@ -929,7 +958,7 @@
     }
     port.postMessage({
       type: "resolve_video",
-      page_url: location.href,
+      page_url: pageUrlForResolve(video),
       request_id: requestId,
       with_cookies: withCookies === true,
       cookies: cookies || [],
@@ -948,7 +977,7 @@
       activeResolve = null;
       if (button) button.disabled = false;
       const entry = { resolved: msg, cookies: done.cookies || [] };
-      resolveCache.set(normalizePageUrlFn(location.href), entry);
+      resolveCache.set(normalizePageUrlFn(done.pageUrl || location.href), entry);
       if (done.onResolved) {
         done.onResolved(entry);
         return;
@@ -1008,6 +1037,24 @@
     return granted;
   }
 
+  // Round 81 — the message for a resolve failure no retry
+  // can fix in this session, or null when the failure is
+  // retryable. A bot block is terminal even with a fresh
+  // resolve (same connection, same refusal); a login wall
+  // that already had the browser's cookies is terminal too —
+  // signing in again cannot help, and "Try again" would only
+  // repeat the identical request (Tom & Jerry, Round 81
+  // reproduction: three identical failures in a row).
+  function terminalResolveMessage(err, withCookies) {
+    if (err && err.error_kind === "bot_blocked") {
+      return err.error || "YouTube is blocking this video on this connection.";
+    }
+    if (err && err.needs_login && withCookies) {
+      return "You're already signed in, but this video is still blocked on this connection.";
+    }
+    return null;
+  }
+
   // Round 79 — "Try again" after a failed resolve. It never
   // repeats the identical failing request: a needs_login
   // failure on a cookieless attempt runs the consent flow
@@ -1017,6 +1064,16 @@
   // (a cookied attempt that failed stays cookied).
   async function retryResolve(video) {
     const last = lastResolveAttempt;
+    // Round 81 — a terminal failure re-renders its message
+    // instead of starting a resolve: there is nothing new to
+    // try in this session.
+    if (last && last.video === video && last.error) {
+      const terminal = terminalResolveMessage(last.error, last.withCookies);
+      if (terminal !== null) {
+        renderResolveError(video, terminal, false);
+        return;
+      }
+    }
     if (last && last.video === video && last.error && last.error.needs_login && !last.withCookies) {
       const granted = await askCookieConsent(hostOf(location.href));
       if (granted) {
@@ -1047,10 +1104,14 @@
   // (done.withCookies is false): a cookied attempt that ALSO
   // fails with needs_login never reaches it — the cookies
   // didn't help, so the error is shown, with no loop and no
-  // second consent ask.
+  // second consent ask. Round 81 — a cookieless bot block gets
+  // the same one consent retry (cookies change the request);
+  // a cookied bot block is terminal, like a cookied login
+  // wall (see terminalResolveMessage).
   async function handleResolveError(video, err, done) {
     recordResolveFailure(video, err, done && done.withCookies, done && done.cookies);
-    if (err && err.needs_login && done && !done.withCookies) {
+    const cookied = !!(done && done.withCookies);
+    if (err && (err.needs_login || err.error_kind === "bot_blocked") && !cookied) {
       const granted = await askCookieConsent(hostOf(location.href));
       if (granted) {
         const cookies = await requestCookies(location.href);
@@ -1062,6 +1123,11 @@
         });
         return;
       }
+    }
+    const terminal = terminalResolveMessage(err, cookied);
+    if (terminal !== null) {
+      renderResolveError(video, terminal, false);
+      return;
     }
     renderResolveError(
       video,
@@ -1088,7 +1154,7 @@
   // first, then sends the same quality from the fresh list —
   // the old URLs may be signed and dead by now.
   function pickResolvedFormat(video, format, entry, row, label) {
-    const key = normalizePageUrlFn(location.href);
+    const key = normalizePageUrlFn(pageUrlForResolve(video));
     if (resolveCache.isStale(key)) {
       renderResolveLoading(video);
       startResolve(video, {
@@ -1102,24 +1168,27 @@
             renderResolveError(video, "That quality is no longer available for this video.");
             return;
           }
-          sendResolvedVariant(freshFormat, fresh, row, label);
+          sendResolvedVariant(video, freshFormat, fresh, row, label);
         },
       });
       return;
     }
-    sendResolvedVariant(format, entry, row, label);
+    sendResolvedVariant(video, format, entry, row, label);
   }
 
-  function sendResolvedVariant(format, entry, row, label) {
+  function sendResolvedVariant(video, format, entry, row, label) {
     if (!buildResolvedVariantFn) {
       showToast("Sonic Manager couldn't take this video: the extension needs an update.");
       return;
     }
-    const variant = buildResolvedVariantFn(format, entry.resolved, location.href);
-    sendVariant(variant, row, label, entry.cookies || []);
+    // Round 81 — the variant's page URL is the video's own
+    // page (a TikTok feed video's page, not the feed URL), so
+    // a re-resolve after a stale cache hits the right video.
+    const variant = buildResolvedVariantFn(format, entry.resolved, pageUrlForResolve(video));
+    sendVariant(video, variant, row, label, entry.cookies || []);
   }
 
-  function sendVariant(variant, row, label, cookies) {
+  function sendVariant(video, variant, row, label, cookies) {
     // The dropdown closes on pick (like the approved preview);
     // the toast confirms the outcome, and the row is restored
     // for a retry if the send failed. The send itself is
@@ -1133,7 +1202,11 @@
     // (possibly []) as a top-level field; a direct pick sends
     // no cookies field at all, and the background attaches the
     // media URL's cookies as before.
-    const message = { type: "video_found", page_url: location.href, variants: [variant] };
+    // Round 81 — the pick's page is the video's own page
+    // (a TikTok feed video's page, not the feed URL): it is
+    // the pending link's referrer, and a re-resolve must hit
+    // the right video.
+    const message = { type: "video_found", page_url: pageUrlForResolve(video), variants: [variant] };
     if (cookies !== undefined) message.cookies = cookies;
     chrome.runtime.sendMessage(
       message,
@@ -1141,9 +1214,15 @@
         if (reply && reply.ok !== false) {
           showToast("Sent to Sonic Manager — it will appear in the download list.");
         } else {
-          showToast(
-            `Sonic Manager couldn't take this video: ${reply && reply.error ? reply.error : "the desktop app did not answer"}`,
-          );
+          // Round 81 — a failed pick must not fail silently:
+          // the toast hides after 2.6 s and the Round 81
+          // reproduction saw nothing on screen at all, so the
+          // error is also re-rendered in the dropdown, where it
+          // stays until the user closes it or retries.
+          const error =
+            reply && reply.error ? reply.error : "the desktop app did not answer";
+          showToast(`Sonic Manager couldn't take this video: ${error}`);
+          renderResolveError(video, `Sonic Manager couldn't take this video: ${error}`);
         }
         row.disabled = false;
         label.textContent = originalLabel;

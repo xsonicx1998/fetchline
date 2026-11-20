@@ -202,6 +202,13 @@ pub struct ResolvedVideo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum YtDlpErrorKind {
     LoginRequired,
+    /// Round 81 — YouTube refusing the request itself (a bot
+    /// check / SABR block on this connection), NOT a missing
+    /// sign-in: the video plays in the browser, and the
+    /// browser's cookies were already sent. Mapping it to
+    /// LoginRequired told the user to sign in when he already
+    /// was — and "Try again" just repeated the same refusal.
+    BotBlocked,
     Private,
     GeoBlocked,
     Unsupported,
@@ -236,6 +243,7 @@ impl YtDlpError {
     pub fn kind_str(&self) -> &'static str {
         match self.kind {
             YtDlpErrorKind::LoginRequired => "login_required",
+            YtDlpErrorKind::BotBlocked => "bot_blocked",
             YtDlpErrorKind::Private => "private",
             YtDlpErrorKind::GeoBlocked => "geo_blocked",
             YtDlpErrorKind::Unsupported => "unsupported",
@@ -259,6 +267,10 @@ impl YtDlpError {
         match self.kind {
             YtDlpErrorKind::LoginRequired => {
                 "This video needs you to be signed in. Sign in in your browser and try again."
+                    .to_string()
+            }
+            YtDlpErrorKind::BotBlocked => {
+                "YouTube is blocking this video on this connection. It plays in your browser, but the download can't reach it right now."
                     .to_string()
             }
             YtDlpErrorKind::Private => "This video is private or has been removed.".to_string(),
@@ -322,24 +334,28 @@ pub fn map_error(stderr: &str) -> YtDlpError {
     let lower = stderr.to_ascii_lowercase();
     let has = |needle: &str| lower.contains(needle);
     let err = |kind: YtDlpErrorKind, message: &str| YtDlpError::new(kind, message.to_string());
-    // Round 79 — a YouTube bot check is a login wall, not a
-    // removed video: yt-dlp prints "Sign in to confirm you're
-    // not a bot" (and the player reports playability
-    // LOGIN_REQUIRED) on a datacenter IP, and the page itself
-    // also says "Video unavailable" — so this check runs BEFORE
-    // the Private rule below, or the bot block maps to Private
-    // and the extension never offers the cookie retry (the
-    // Round 78 retest: "Couldn't load download formats" with
-    // no consent prompt, even signed in). The needles are
-    // bot-specific ("not a bot", "login_required"), so a
-    // genuinely private video — "Private video. Sign in if
-    // you've been granted access…" — still maps to Private
-    // below, exactly as before.
-    if has("confirm you're not a bot")
-        || has("not a bot")
-        || has("login_required")
-        || has("playability status")
-    {
+    // Round 81 — the explicit bot check ("Sign in to confirm
+    // you're not a bot") is YouTube refusing the request on
+    // this connection, NOT a missing sign-in: the video plays
+    // in the browser, and the browser's cookies were already
+    // sent (Tom & Jerry, Round 81 reproduction — Rick Astley
+    // resolves fine with the same cookies). It gets its own
+    // kind now, so the UI says "blocked" instead of telling a
+    // signed-in user to sign in. The check runs BEFORE the
+    // Private rule below, or the bot block maps to Private.
+    // A cookieless bot-block still gets the one cookie retry
+    // (the extension offers it, like a login wall); a cookied
+    // one never repeats. "login_required" / "playability
+    // status" stay LoginRequired: the player genuinely wants a
+    // login there, and the extension's cookied-failure message
+    // covers the case where cookies didn't help.
+    if has("confirm you're not a bot") || has("not a bot") {
+        return err(
+            YtDlpErrorKind::BotBlocked,
+            "YouTube is blocking this video on this connection.",
+        );
+    }
+    if has("login_required") || has("playability status") {
         return err(
             YtDlpErrorKind::LoginRequired,
             "This video needs you to be signed in.",
@@ -1052,8 +1068,20 @@ async fn resolve_once(
             ));
         }
     };
-    let stdout_bytes = stdout_task.await.unwrap_or_default();
-    let stderr_bytes = stderr_task.await.unwrap_or_default();
+    // Round 80 — a yt-dlp grandchild (JS runtime / ffmpeg) can
+    // hold a pipe open after the child exits or is killed, so the
+    // drain must never wait forever: bound it and continue with
+    // what arrived. Without this bound a lingering grandchild
+    // hangs the resolve even though the child itself is gone
+    // (the timeout kill above reaps only the child).
+    let stdout_bytes = match tokio::time::timeout(Duration::from_secs(5), stdout_task).await {
+        Ok(bytes) => bytes.unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    let stderr_bytes = match tokio::time::timeout(Duration::from_secs(5), stderr_task).await {
+        Ok(bytes) => bytes.unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
     let stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
     if !status.success() {
         return Err(map_error(&stderr));
@@ -1826,18 +1854,19 @@ mod tests {
                 "ERROR: [youtube] Private video. Sign in if you've been granted access to view this video",
                 YtDlpErrorKind::Private,
             ),
-            // Round 79 — the YouTube bot check maps to
-            // LoginRequired (not Private), even though the page
-            // also says the video is unavailable: the bot-check
-            // needles run before the Private rule, so the
-            // extension offers the cookie retry for these.
+            // Round 81 — the explicit bot check is its own
+            // kind now (BotBlocked), not LoginRequired: it is
+            // YouTube refusing the request on this connection,
+            // not a missing sign-in. The bot-check needles
+            // still run before the Private rule, so a blocked
+            // video never maps to Private.
             (
                 "ERROR: [youtube] dQw4w9WgXcQ: Sign in to confirm you're not a bot. This helps protect our community.",
-                YtDlpErrorKind::LoginRequired,
+                YtDlpErrorKind::BotBlocked,
             ),
             (
                 "ERROR: [youtube] dQw4w9WgXcQ: Video unavailable. Sign in to confirm you're not a bot",
-                YtDlpErrorKind::LoginRequired,
+                YtDlpErrorKind::BotBlocked,
             ),
             (
                 "WARNING: [youtube] dQw4w9WgXcQ: Playability status: LOGIN_REQUIRED",

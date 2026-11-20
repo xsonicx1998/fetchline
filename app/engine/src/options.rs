@@ -183,7 +183,12 @@ pub fn validate_sound_setting(input: &SoundSettingInput) -> Result<Option<String
             input.event
         )));
     }
-    match input.file.as_deref().map(str::trim).filter(|f| !f.is_empty()) {
+    match input
+        .file
+        .as_deref()
+        .map(str::trim)
+        .filter(|f| !f.is_empty())
+    {
         None => Ok(None),
         Some(f) => {
             if !f.to_ascii_lowercase().ends_with(".wav") {
@@ -237,7 +242,10 @@ mod tests {
             clean_site_host("https://Example.COM:8080/some/path"),
             Some("example.com".to_string())
         );
-        assert_eq!(clean_site_host("  files.example.org. "), Some("files.example.org".to_string()));
+        assert_eq!(
+            clean_site_host("  files.example.org. "),
+            Some("files.example.org".to_string())
+        );
         assert_eq!(clean_site_host(""), None);
         assert_eq!(clean_site_host("https://"), None);
     }
@@ -269,7 +277,10 @@ mod tests {
 
     #[test]
     fn effective_action_prefers_the_queue_action_over_hangup() {
-        assert_eq!(effective_completion_action("shutdown", true), Some("shutdown"));
+        assert_eq!(
+            effective_completion_action("shutdown", true),
+            Some("shutdown")
+        );
         assert_eq!(effective_completion_action("none", true), Some("hangup"));
         assert_eq!(effective_completion_action("none", false), None);
     }

@@ -13,7 +13,7 @@
 
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { AddDownloadDialog, bestQualityRow, isVideoPageUrl } from './AddDownloadDialog'
+import { AddDownloadDialog, bestQualityRow, isHttpUrl, isVideoPageUrl, normalizeUrlScheme } from './AddDownloadDialog'
 import * as api from '../lib/api'
 import type { ProbeInfo, QualityRow, YtdlpResolveResult } from '../lib/types'
 
@@ -158,6 +158,49 @@ describe('bestQualityRow', () => {
   })
 })
 
+// -- Round 80 — URL validation --------------------------------------------
+// The Round 79 retest rejected the valid Instagram reel URL
+// https://www.instagram.com/reel/DdwixbhzY3_/ ("Enter a link
+// starting with http:// or https://"). The rule itself was
+// already correct — these URLs pass it — so the tests lock the
+// rule in with the exact retest URLs, and cover the `https;//`
+// scheme typo an unreliable Shift key produces when a URL is
+// typed through RDP (the typed text had `;` for `:`).
+
+describe('isHttpUrl', () => {
+  test('accepts the exact Round 79 retest URLs', () => {
+    expect(isHttpUrl('https://www.instagram.com/reel/DdwixbhzY3_/')).toBe(true)
+    expect(isHttpUrl('https://www.instagram.com/reel/DdwixbhzY3_')).toBe(true)
+    expect(isHttpUrl('https://www.tiktok.com/@sabrinacarpenter/video/7551233954129399053')).toBe(true)
+    expect(isHttpUrl('https://www.facebook.com/watch/')).toBe(true)
+    expect(isHttpUrl('http://127.0.0.1:55443/small.zip')).toBe(true)
+  })
+
+  test('rejects non-http URLs and the semicolon scheme typo', () => {
+    expect(isHttpUrl('https;//www.instagram.com/reel/DdwixbhzY3_/')).toBe(false)
+    expect(isHttpUrl('ftp://example.com/file.zip')).toBe(false)
+    expect(isHttpUrl('not a url')).toBe(false)
+    expect(isHttpUrl('')).toBe(false)
+  })
+})
+
+describe('normalizeUrlScheme', () => {
+  test('repairs only the semicolon-for-colon scheme typo', () => {
+    expect(normalizeUrlScheme('https;//www.instagram.com/reel/DdwixbhzY3_/')).toBe(
+      'https://www.instagram.com/reel/DdwixbhzY3_/',
+    )
+    expect(normalizeUrlScheme('http;//example.com/file.zip')).toBe('http://example.com/file.zip')
+  })
+
+  test('leaves good URLs untouched', () => {
+    expect(normalizeUrlScheme('https://www.instagram.com/reel/DdwixbhzY3_/')).toBe(
+      'https://www.instagram.com/reel/DdwixbhzY3_/',
+    )
+    expect(normalizeUrlScheme('https://example.com/file.zip')).toBe('https://example.com/file.zip')
+    expect(normalizeUrlScheme('')).toBe('')
+  })
+})
+
 // -- submit: the resolved stream URLs, never the page URL ------------------
 
 describe('video URL submit', () => {
@@ -250,5 +293,49 @@ describe('non-video URL submit', () => {
     )
     expect(vi.mocked(api.addResolvedVideoDownload)).not.toHaveBeenCalled()
     expect(vi.mocked(api.startDownload)).toHaveBeenCalledWith('dl-2')
+  })
+})
+
+// -- Round 81 (ex-Round 77 item a) — double title ---------------------------
+// The standalone Add URL window's own TitleBar already shows the
+// captured file name, so the dialog's inner header showed it a
+// second time, stacked (the user's 2026-11-20 screenshots). In
+// standalone mode the dialog must render NO inner header; the
+// in-window dialog keeps its own.
+describe('standalone header', () => {
+  const MOVIE_URL = 'https://s203d1.downet.net/download/1795262560/El%20Kalam.mp4'
+  const MOVIE_TITLE = 'El Kalam Ala Eh Awwel Layla.2026.1080p.mp4'
+
+  test('standalone: no inner header, the file name shows once (in the window title bar)', () => {
+    render(
+      <AddDownloadDialog
+        open
+        standalone
+        captureMode
+        categories={[]}
+        initialUrl={MOVIE_URL}
+        captureTitle={MOVIE_TITLE}
+        onClose={() => {}}
+        onAdded={() => {}}
+        onLateError={() => {}}
+      />,
+    )
+    expect(screen.queryByRole('heading')).toBeNull()
+  })
+
+  test('in-window: the header is the only title', () => {
+    render(
+      <AddDownloadDialog
+        open
+        captureMode
+        categories={[]}
+        initialUrl={MOVIE_URL}
+        captureTitle={MOVIE_TITLE}
+        onClose={() => {}}
+        onAdded={() => {}}
+        onLateError={() => {}}
+      />,
+    )
+    expect(screen.getByRole('heading').textContent).toBe(MOVIE_TITLE)
   })
 })

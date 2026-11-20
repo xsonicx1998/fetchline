@@ -418,8 +418,12 @@ pub struct VideoVariantInput {
     /// already ran yt-dlp, so this variant carries the resolver's
     /// metadata instead of a plain page-scraped URL. `filename`
     /// is the sanitized video title (never videoplayback.mp4);
-    /// `headers` is a JSON map of User-Agent/Referer (Cookie
-    /// keys stripped); `audio_url` is the DASH pair's audio
+    /// `headers` is a JSON-encoded STRING of a User-Agent/Referer
+    /// map (Cookie keys stripped) — NOT a map object: the
+    /// extension once sent the raw map and the host refused the
+    /// whole message with "invalid type: map, expected a
+    /// string" (Round 81 — a picked quality silently created no
+    /// download). `audio_url` is the DASH pair's audio
     /// stream; `source_url` the page URL (for re-resolve);
     /// `format_id` the yt-dlp format id; `fragmented` marks a
     /// (B)-fallback download (yt-dlp downloads it itself). All
@@ -673,6 +677,38 @@ mod tests {
         assert_eq!(
             quality_for("http://x/clip-720p.mp4", 1920, 1080),
             "1920 × 1080"
+        );
+    }
+
+    /// Round 81 — the exact failure the user hit: a resolved
+    /// quality pick failed in the host with "invalid type: map,
+    /// expected a string", so no download row was ever created.
+    /// The extension's `buildResolvedVariant` sent `headers` as
+    /// a JSON map, but this struct takes a JSON-encoded STRING
+    /// (see `headers_from_json` in manager.rs) — the map form
+    /// must keep failing, and the string form must parse.
+    #[test]
+    fn resolved_variant_headers_is_a_json_string() {
+        let json = serde_json::json!({
+            "url": "https://cdn.example.com/v360.mp4",
+            "quality": "360p",
+            "format": "MP4",
+            "resolved": true,
+            "filename": "Big Buck Bunny.mp4",
+            "headers": "{\"User-Agent\": \"x\"}",
+            "format_id": "18",
+        });
+        let v: VideoVariantInput = serde_json::from_value(json).expect("string headers parse");
+        assert_eq!(v.headers.as_deref(), Some("{\"User-Agent\": \"x\"}"));
+        assert_eq!(v.format_id.as_deref(), Some("18"));
+
+        let map_form = serde_json::json!({
+            "url": "https://cdn.example.com/v360.mp4",
+            "headers": { "User-Agent": "x" },
+        });
+        assert!(
+            serde_json::from_value::<VideoVariantInput>(map_form).is_err(),
+            "a map headers must not parse as a string"
         );
     }
 

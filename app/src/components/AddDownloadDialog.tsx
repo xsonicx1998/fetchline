@@ -156,6 +156,27 @@ export function bestQualityRow(result: YtdlpResolveResult | null): QualityRow | 
   return result.formats[result.formats.length - 1]
 }
 
+/** Round 80 — the Add URL field accepts an http(s) link. The
+ *  rule itself was already correct — it accepts the Round 79
+ *  retest's Instagram reel URL with and without a trailing slash
+ *  (verified by direct evaluation); the retest rejection came
+ *  from the typed text, not the rule (see `normalizeUrlScheme`).
+ *  Exported so the rule is locked in by tests. */
+export function isHttpUrl(rawUrl: string): boolean {
+  return /^https?:\/\/.+/i.test(rawUrl.trim())
+}
+
+/** Round 80 — a `https;//…` scheme (a semicolon for the colon)
+ *  is what an unreliable Shift key produces when a URL is typed
+ *  through RDP (the Round 79 retest's Instagram rejection: the
+ *  validation rule accepts the real `https://…` URL, but the
+ *  typed text had `;` for `:`). Repair just that typo at input
+ *  time so the field self-corrects instead of rejecting a link
+ *  the user meant. Anything else passes through untouched. */
+export function normalizeUrlScheme(raw: string): string {
+  return raw.replace(/^(\s*https?);\/\//i, '$1://')
+}
+
 /** S02 — add a new download (components.md: Dialog, TextInput, Dropdown).
  *  URL, file name, save folder and category. "Start now" begins the
  *  download at once; "Save for later" only queues it.
@@ -342,6 +363,20 @@ export function AddDownloadDialog({
             setResolveError("Live streams can't be downloaded")
             return
           }
+          if (result.formats.length === 0) {
+            // Round 80 — a resolve that succeeds with no formats
+            // (a feed page, not a video — the Round 79 retest's
+            // Facebook watch/ URL) used to show nothing at all:
+            // no quality line, no error, so the dialog looked
+            // hung. Say so plainly instead.
+            resolvedForUrl.current = ''
+            setResolved(null)
+            setFileSize(null)
+            setResolveError(
+              'No downloadable video was found on this page — it may be a feed or a page, not a video.',
+            )
+            return
+          }
           resolvedForUrl.current = target
           setResolved(result)
           setResolveError(null)
@@ -473,7 +508,7 @@ export function AddDownloadDialog({
 
   if (!open) return null
 
-  const urlValid = url.trim() === '' || /^https?:\/\/.+/i.test(url.trim())
+  const urlValid = url.trim() === '' || isHttpUrl(url)
 
   const formatBytes = (bytes: number): string => {
     if (bytes < 1024) return `${bytes} B`
@@ -699,7 +734,7 @@ export function AddDownloadDialog({
     <div
       role="dialog"
       aria-modal="true"
-      aria-labelledby="add-download-title"
+      aria-labelledby={standalone ? undefined : 'add-download-title'}
       className={
         standalone
           ? 'flex h-full flex-col'
@@ -713,27 +748,39 @@ export function AddDownloadDialog({
             : 'w-full max-w-[620px] overflow-hidden rounded-xl border border-[#8B20FF]/45 bg-bg text-text shadow-[0_0_0_1px_rgba(0,200,255,0.12),0_24px_70px_rgba(0,0,0,0.65),0_0_44px_rgba(139,32,255,0.22)]'
         }
       >
-        {/* Title bar — the real logo, "Add URL", X. */}
-        <div className="flex items-center gap-2.5 px-3.5 py-3">
-          <img
-            src="/icon.png"
-            alt="Sonic Manager logo"
-            className="h-7 w-7 rounded-full shadow-[0_0_12px_rgba(139,32,255,0.6)]"
-          />
-          <h2 id="add-download-title" className="flex-1 truncate text-[15px] font-semibold" title={displayTitle}>
-            {displayTitle}
-          </h2>
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={busy}
-            aria-label="Close"
-            className="rounded-md p-1 text-text-muted transition-colors hover:bg-[#F02DCD]/20 hover:text-text"
-          >
-            <X className="h-4 w-4" aria-hidden="true" />
-          </button>
-        </div>
-        <div className="h-[2px] bg-gradient-to-r from-accent to-[#F02DCD]" />
+        {/* Round 81 (double title, ex-Round 77 item a) — in the
+            standalone window the file name is ALREADY the
+            window's own TitleBar (StandaloneAddUrlWindow), so
+            this dialog's inner header (logo + file name + X)
+            showed it a second time, stacked. Hide the whole
+            inner header here — title, close and divider — and
+            keep it for the in-window dialog only, where it is
+            the only title. */}
+        {standalone ? null : (
+          <>
+            {/* Title bar — the real logo, "Add URL", X. */}
+            <div className="flex items-center gap-2.5 px-3.5 py-3">
+              <img
+                src="/icon.png"
+                alt="Sonic Manager logo"
+                className="h-7 w-7 rounded-full shadow-[0_0_12px_rgba(139,32,255,0.6)]"
+              />
+              <h2 id="add-download-title" className="flex-1 truncate text-[15px] font-semibold" title={displayTitle}>
+                {displayTitle}
+              </h2>
+              <button
+                type="button"
+                onClick={onClose}
+                disabled={busy}
+                aria-label="Close"
+                className="rounded-md p-1 text-text-muted transition-colors hover:bg-[#F02DCD]/20 hover:text-text"
+              >
+                <X className="h-4 w-4" aria-hidden="true" />
+              </button>
+            </div>
+            <div className="h-[2px] bg-gradient-to-r from-accent to-[#F02DCD]" />
+          </>
+        )}
 
         {/* Body — IDM field order, tightened spacing. In the
             standalone window it scrolls inside the fixed-size
@@ -759,7 +806,7 @@ export function AddDownloadDialog({
               id="add-url"
               type="url"
               value={url}
-              onChange={(e) => setUrl(e.target.value)}
+              onChange={(e) => setUrl(normalizeUrlScheme(e.target.value))}
               placeholder="https://example.com/file.zip"
               disabled={captureMode}
               title={
@@ -873,7 +920,7 @@ export function AddDownloadDialog({
                 className="shrink-0 truncate text-[12px] text-text-muted"
                 title={probeError}
               >
-                Could not check this link — Start will try again
+                {probeError}
               </span>
             )}
             {fileSize === null && resolveError !== null && (
@@ -881,7 +928,7 @@ export function AddDownloadDialog({
                 className="shrink-0 truncate text-[12px] text-text-muted"
                 title={resolveError}
               >
-                Could not resolve this video — Start will try again
+                {resolveError}
               </span>
             )}
           </div>

@@ -24,6 +24,8 @@ const {
   qualityRowLabel,
   sanitizeTitleFilename,
   buildResolvedVariant,
+  videoPageUrlIfVideoPage,
+  videoPageUrlFromElement,
 } = globalThis.FetchlineVideoDetect;
 
 const RESOLVED = {
@@ -196,7 +198,12 @@ test("buildResolvedVariant: the video_found variant for a picked quality", () =>
   assert.equal(v.source_url, page);
   assert.equal(v.format_id, "137");
   assert.equal(v.fragmented, false);
-  assert.deepEqual(v.headers, { "User-Agent": "x" });
+  // Round 81 — headers is a JSON-encoded STRING, not the raw
+  // map: the engine's VideoVariantInput takes Option<String>,
+  // and the raw map made the host refuse the whole pick with
+  // "invalid type: map, expected a string".
+  assert.equal(typeof v.headers, "string");
+  assert.deepEqual(JSON.parse(v.headers), { "User-Agent": "x" });
 
   // A combined format has no audio_url and needs no merge note.
   const combined = buildResolvedVariant(RESOLVED.formats[2], RESOLVED, page);
@@ -217,4 +224,56 @@ test("buildResolvedVariant: the video_found variant for a picked quality", () =>
   const live = buildResolvedVariant(RESOLVED.formats[0], { ...RESOLVED, is_live: true, title: "Live: show?" }, page);
   assert.equal(live.live, true);
   assert.equal(live.filename, "Live show.mp4");
+});
+
+test("videoPageUrlIfVideoPage: only real video pages, never feeds or profiles", () => {
+  assert.equal(
+    videoPageUrlIfVideoPage("https://www.tiktok.com/@user/video/7551233954129399053"),
+    "https://www.tiktok.com/@user/video/7551233954129399053",
+  );
+  assert.equal(videoPageUrlIfVideoPage("https://www.tiktok.com/foryou?lang=en"), null);
+  assert.equal(videoPageUrlIfVideoPage("https://www.tiktok.com/@user"), null);
+  assert.equal(videoPageUrlIfVideoPage("https://www.tiktok.com/"), null);
+  assert.equal(
+    videoPageUrlIfVideoPage("https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+    "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  );
+  assert.equal(
+    videoPageUrlIfVideoPage("https://www.youtube.com/shorts/abc123"),
+    "https://www.youtube.com/shorts/abc123",
+  );
+  assert.equal(videoPageUrlIfVideoPage("https://www.youtube.com/feed/trending"), null);
+  assert.equal(videoPageUrlIfVideoPage("https://example.com/video/123"), null);
+});
+
+test("videoPageUrlFromElement: a feed video resolves to its own page, a watch page to null", () => {
+  // A TikTok feed slide: the video sits inside the slide's link
+  // to its own video page. Plain objects stand in for DOM nodes
+  // (the walk uses tagName / href / parentElement only).
+  const anchor = {
+    tagName: "A",
+    href: "https://www.tiktok.com/@someone/video/7551233954129399053",
+    parentElement: null,
+  };
+  const slide = { tagName: "DIV", parentElement: anchor };
+  const video = { tagName: "VIDEO", parentElement: slide };
+  assert.equal(
+    videoPageUrlFromElement(video),
+    "https://www.tiktok.com/@someone/video/7551233954129399053",
+  );
+
+  // A feed link that is NOT a video page (profile) is skipped,
+  // and with no video anchor at all the answer is null — the
+  // caller falls back to the page URL.
+  const profileAnchor = {
+    tagName: "A",
+    href: "https://www.tiktok.com/@someone",
+    parentElement: null,
+  };
+  assert.equal(
+    videoPageUrlFromElement({ tagName: "VIDEO", parentElement: profileAnchor }),
+    null,
+  );
+  assert.equal(videoPageUrlFromElement({ tagName: "VIDEO", parentElement: null }), null);
+  assert.equal(videoPageUrlFromElement(null), null);
 });

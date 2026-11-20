@@ -1566,6 +1566,31 @@ fn get_pending_link(
         .map_err(|e| e.to_string())
 }
 
+/// Round 81 — enqueue a clipboard-copied link as a pending
+/// capture (`source = "browser"`), so it opens in its own
+/// standalone Add URL window like an extension capture. Until
+/// now the frontend opened the Add URL dialog directly inside
+/// the MAIN window for a clipboard offer — and when the main
+/// window was hidden to the tray, the user saw nothing on top
+/// and had to "go into the program" to find it. The main
+/// window's 1 s pending-captures poll picks the new row up and
+/// the capture queue opens the standalone window, which pops
+/// in front (see `show_window_ready`). The URL was already
+/// validated by the clipboard offer check
+/// (`check_clipboard_offer`); the enqueue re-validates scheme
+/// and excluded sites, so a failure here is a real refusal.
+#[tauri::command]
+fn enqueue_clipboard_capture(
+    state: State<'_, AppState>,
+    url: String,
+) -> Result<PendingLinkRow, String> {
+    state
+        .manager
+        .store()
+        .enqueue_pending_link(&url, None, "browser")
+        .map_err(|e| e.to_string())
+}
+
 /// Round 62 — per-download completion options (progress window
 /// Options tab): "Close program after download" and "Shut down
 /// computer after download". Stored in memory in AppState; the
@@ -3991,6 +4016,7 @@ pub fn run() {
             open_complete_dialog,
             open_error_dialog,
             open_add_url_window,
+            enqueue_clipboard_capture,
             get_pending_link,
             window_ready,
             set_download_completion_options,

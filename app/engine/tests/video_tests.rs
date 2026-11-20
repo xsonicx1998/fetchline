@@ -1099,3 +1099,134 @@ async fn resolved_video_download_failure_creates_no_download() {
         "a failed add must leave no download row behind: {err}"
     );
 }
+
+// -- Round 80 — a probe refused with 403 falls back to yt-dlp -----
+// TikTok's CDN answers 403 to our raw probe even with the
+// format's headers (Round 79 retest: resolve OK, Start 403, and
+// the retry repeated the identical 403). The add must fall back
+// to yt-dlp's own downloader — the (B) path — instead of failing
+// with no row. Only 401/403 fall back: a 404 keeps today's
+// behaviour (no row, the real error).
+
+#[tokio::test]
+async fn resolved_video_download_probe_403_falls_back_to_direct_ytdlp() {
+    let server = MockServer::start(MockConfig {
+        fail_status: Some(403),
+        ..Default::default()
+    });
+    let dir = tmpdir();
+    let mgr = test_mgr(&dir);
+    let page_url = "https://www.tiktok.com/@user/video/123";
+    let (id, probe) = mgr
+        .add_resolved_video_download(
+            page_url,
+            &resolved_row(&server.url),
+            Some("video.mp4".to_string()),
+            None,
+            None,
+            None,
+            None,
+            false, // not started — no yt-dlp binary on this VM
+        )
+        .await
+        .unwrap();
+    let dl = mgr.get_download(&id).unwrap().unwrap();
+    assert!(
+        dl.direct_ytdlp,
+        "a 403 probe must fall back to the direct yt-dlp path"
+    );
+    assert_eq!(dl.url, server.url);
+    assert_eq!(dl.source_url.as_deref(), Some(page_url));
+    assert_eq!(dl.format_id.as_deref(), Some("18"));
+    assert_eq!(
+        probe.size, None,
+        "the fallback creates no probe size — yt-dlp downloads it"
+    );
+}
+
+#[tokio::test]
+async fn resolved_video_download_probe_403_dash_pair_falls_back_merged() {
+    // A DASH pair whose video probe is refused must fall back
+    // with the combined "video+audio" selector, so yt-dlp merges
+    // the pair itself — and must NOT create DASH children (the
+    // (B) runner owns the merge; orphan children would sit
+    // pending forever).
+    let video = MockServer::start(MockConfig {
+        fail_status: Some(403),
+        ..Default::default()
+    });
+    let audio = MockServer::start(MockConfig {
+        size_bytes: Some(32 * 1024),
+        ..Default::default()
+    });
+    let dir = tmpdir();
+    let mgr = test_mgr(&dir);
+    let store = mgr.store();
+    let mut row = resolved_row(&video.url);
+    row.height = 1080;
+    row.label = "1080p".to_string();
+    row.has_audio = false;
+    row.needs_merge = true;
+    row.filesize = Some(64 * 1024);
+    row.audio_url = Some(audio.url.clone());
+    row.audio_format_id = Some("140".to_string());
+    row.format_id = "137".to_string();
+    let (id, _) = mgr
+        .add_resolved_video_download(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            &row,
+            Some("video.mp4".to_string()),
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+    let dl = mgr.get_download(&id).unwrap().unwrap();
+    assert!(dl.direct_ytdlp);
+    assert_eq!(
+        dl.format_id.as_deref(),
+        Some("137+140"),
+        "the fallback must carry the combined selector so yt-dlp merges"
+    );
+    assert!(
+        store.list_child_downloads(&id).unwrap().is_empty(),
+        "a fallback (B) row must not gain DASH children"
+    );
+}
+
+#[tokio::test]
+async fn resolved_video_download_probe_404_still_fails_with_no_row() {
+    // The fallback is scoped to 401/403: a genuinely dead stream
+    // URL (404) must still fail with no row behind it.
+    let server = MockServer::start(MockConfig {
+        fail_status: Some(404),
+        ..Default::default()
+    });
+    let dir = tmpdir();
+    let mgr = test_mgr(&dir);
+    let store = mgr.store();
+    let err = mgr
+        .add_resolved_video_download(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            &resolved_row(&server.url),
+            Some("video.mp4".to_string()),
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("404"),
+        "the real 404 must surface: {err}"
+    );
+    assert!(
+        store.list_downloads().unwrap().is_empty(),
+        "a 404 add must leave no download row behind: {err}"
+    );
+}

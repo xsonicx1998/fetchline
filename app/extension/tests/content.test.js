@@ -733,6 +733,62 @@ test("picking a resolved quality sends one video_found variant with the resolve'
   assert.equal(toast.textContent, "Sent to Sonic Manager — it will appear in the download list.");
 });
 
+test("a failed pick shows the error in the dropdown, not just a toast (Round 81)", async () => {
+  const env = loadContent({
+    pageUrl: YT_PAGE,
+    sendMessageImpl: (msg, cb) => {
+      if (msg.type === "video_found") {
+        cb({
+          ok: false,
+          error:
+            "Could not understand the message from the browser: invalid type: map, expected a string",
+        });
+      } else if (typeof cb === "function") {
+        cb({ ok: true });
+      }
+    },
+  });
+  const video = env.makeVideo(YT_BLOB, { videoWidth: 1280, videoHeight: 720, source: false });
+  env.addVideo(video);
+  env.fireDocumentEvent("loadedmetadata", { target: video });
+  await tick();
+  await resolveVideo(env, video);
+  const rows = qualityRows(env);
+  env.click(rows[0]);
+  await tick();
+  // The dropdown re-opens with the error, visible until the
+  // user closes it or retries — the toast alone hides after
+  // 2.6 s, and the Round 81 reproduction saw nothing on screen
+  // at all.
+  const dropdown = env.findDropdown();
+  assert.equal(dropdown.style.display, "block");
+  assert.match(dropdownText(env), /couldn't take this video/);
+  assert.match(dropdownText(env), /invalid type: map/);
+  const toast = env.document.body.children.find((c) => c.tagName === "DIV" && c !== dropdown);
+  assert.ok(toast);
+  assert.match(toast.textContent, /couldn't take this video/);
+});
+
+test("a TikTok feed video resolves its own page, not the feed URL (Round 81)", async () => {
+  const FEED = "https://www.tiktok.com/foryou?lang=en";
+  const VIDEO_PAGE = "https://www.tiktok.com/@someone/video/7551233954129399053";
+  const env = loadContent({ pageUrl: FEED });
+  const video = env.makeVideo("", { videoWidth: 720, videoHeight: 1280, source: false });
+  // The feed slide links to the video's own page.
+  const anchor = env.makeElement("a");
+  anchor.href = VIDEO_PAGE;
+  anchor.appendChild(video);
+  env.addVideo(video);
+  env.fireDocumentEvent("loadedmetadata", { target: video });
+  await tick();
+  env.click(env.findButton());
+  await tick();
+  assert.equal(env.ports.length, 1, "one resolve port opened on click");
+  const request = env.ports[0].messages[0];
+  assert.equal(request.type, "resolve_video");
+  assert.equal(request.page_url, VIDEO_PAGE);
+});
+
 test("a fragmented pick sends the manifest URL with fragmented:true", async () => {
   const env = loadContent({ pageUrl: YT_PAGE });
   const video = env.makeVideo(YT_BLOB, { videoWidth: 1280, videoHeight: 720, source: false });
@@ -932,7 +988,16 @@ test("needs_login: a stored grant sends cookies on the FIRST resolve — no cook
   await tick(30);
   assert.equal(env.confirmCalls.length, 0, "no second consent ask after a cookied failure");
   assert.equal(env.ports.length, 1, "no retry: the cookies already failed");
-  assert.match(dropdownText(env), /needs login/);
+  // Round 81 — the error is now honest about it: the user IS
+  // signed in and the cookies were already sent, so "needs
+  // login" would be a lie — and there is no "Try again" to
+  // repeat the identical request.
+  assert.match(dropdownText(env), /already signed in, but this video is still blocked/);
+  assert.equal(
+    env.findDropdown().children.filter((c) => c.tagName === "BUTTON").length,
+    0,
+    "no Try again on a terminal failure",
+  );
 });
 
 test("needs_login: a denial shows the error and is not asked again this session", async () => {

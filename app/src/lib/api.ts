@@ -246,6 +246,16 @@ export async function openAddUrlWindow(linkId: string): Promise<void> {
   return invoke('open_add_url_window', { linkId })
 }
 
+/** Round 81 — enqueue a clipboard-copied link as a pending
+ *  capture, so it opens in its own standalone Add URL window
+ *  (popped in front) instead of the dialog inside the main
+ *  window, which stayed invisible while the main window was
+ *  hidden to the tray. The main window's 1 s poll picks the
+ *  new row up. */
+export async function enqueueClipboardCapture(url: string): Promise<PendingLinkRow> {
+  return invoke<PendingLinkRow>('enqueue_clipboard_capture', { url })
+}
+
 /** Round 67 — set the Add URL dialog's Description note on a
  *  download (null / empty clears it). */
 export async function setDownloadDescription(id: string, description?: string | null): Promise<void> {

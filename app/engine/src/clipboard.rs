@@ -43,8 +43,8 @@ pub struct ClipboardOffer {
 /// not catch is not offered here either, and vice versa.
 pub const CAPTURE_EXTENSIONS: &[&str] = &[
     "zip", "rar", "7z", "tar", "gz", "exe", "msi", "dmg", "iso", "apk", "pdf", "epub", "mp4",
-    "mkv", "avi", "mov", "webm", "mp3", "flac", "wav", "aac", "ogg", "doc", "docx", "xls",
-    "xlsx", "ppt", "pptx",
+    "mkv", "avi", "mov", "webm", "mp3", "flac", "wav", "aac", "ogg", "doc", "docx", "xls", "xlsx",
+    "ppt", "pptx",
 ];
 
 /// Maximum clipboard text considered: a longer paste is not one link.

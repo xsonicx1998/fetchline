@@ -464,12 +464,66 @@ function buildResolvedVariant(format, resolved, pageUrl) {
     drm: false,
     resolved: true,
     filename: sanitizeTitleFilename(resolved && resolved.title, ext),
-    headers: (format && format.headers) || {},
+    // Round 81 — headers is a JSON-encoded STRING, not the raw
+    // map: the engine's VideoVariantInput takes Option<String>
+    // (parsed by headers_from_json), and sending the map made
+    // the host refuse the whole video_found message with
+    // "invalid type: map, expected a string" — a picked quality
+    // silently created no download.
+    headers: JSON.stringify((format && format.headers) || {}),
     audio_url: (format && format.audio_url) || null,
     source_url: pageUrl,
     format_id: (format && format.format_id) || null,
     fragmented: !!(format && format.fragmented),
   };
+}
+
+// Round 81 — the URL a resolve should run for: a video page,
+// never a feed. A TikTok /foryou page HAS videos but is not a
+// video page — yt-dlp answers "not a supported video page"
+// for it — so the resolve must run for the playing video's own
+// page instead. Returns the video-page URL for an anchor href,
+// or null when the href is not a video page (a feed, a profile,
+// a channel). Relative hrefs resolve against the current page.
+function videoPageUrlIfVideoPage(href) {
+  let u;
+  try {
+    u = new URL(href, typeof location !== "undefined" ? location.href : "https://example.invalid");
+  } catch {
+    return null;
+  }
+  const host = (u.hostname || "").toLowerCase();
+  if (/(^|\.)tiktok\.com$/.test(host)) {
+    if (/^\/@[^/]+\/video\/\d+\/?$/.test(u.pathname)) return u.toString();
+    return null;
+  }
+  if (/(^|\.)youtube\.com$/.test(host) || /(^|\.)youtu\.be$/.test(host)) {
+    if (u.pathname === "/watch" && u.searchParams.get("v")) return u.toString();
+    if (/^\/(shorts|embed)\/[^/]+/.test(u.pathname)) return u.toString();
+    return null;
+  }
+  return null;
+}
+
+// Round 81 — the playing video's page URL: walk up from the
+// video element to the nearest ancestor anchor that points at
+// a video page (see above). On a TikTok feed the video sits
+// inside the slide's link to its own page; on a YouTube watch
+// page there is no such anchor and this returns null, so the
+// caller falls back to the page URL. Plain parentElement walk
+// (no closest): testable with plain objects in Node.
+function videoPageUrlFromElement(video) {
+  let el = video;
+  for (let i = 0; i < 12 && el; i++) {
+    if ((el.tagName || "").toUpperCase() === "A" && el.href) {
+      const url = videoPageUrlIfVideoPage(el.href);
+      if (url) return url;
+    }
+    // parentNode as well as parentElement: the test harness
+    // (and some shadow hosts) only set parentNode.
+    el = el.parentElement || el.parentNode;
+  }
+  return null;
 }
 
 // Shared with the content script (same JS world when injected as
@@ -506,6 +560,8 @@ if (typeof globalThis !== "undefined") {
     qualityRowLabel,
     sanitizeTitleFilename,
     buildResolvedVariant,
+    videoPageUrlIfVideoPage,
+    videoPageUrlFromElement,
   };
 }
 if (typeof module !== "undefined" && module.exports) {
