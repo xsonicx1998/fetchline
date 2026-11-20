@@ -1275,3 +1275,246 @@ async fn resolved_video_download_probe_403_youtube_does_not_fall_back() {
         "a refused YouTube probe must leave no download row behind: {err}"
     );
 }
+
+// -- Round 83 — the direct yt-dlp runner ----------------------
+// A fake yt-dlp next to the test binary (sidecar_exe_dir
+// resolves to the test binary's dir) records its argv, prints
+// a [download] line to STDOUT and an ERROR to stderr, then
+// exits 1. Unix only: a fake Windows yt-dlp would need a batch
+// file with different mechanics, and the VPS retest covers the
+// Windows path. The fake is installed for one test and removed
+// on drop — no other test in this binary starts a direct
+// download, so it cannot leak into one. The two fake tests
+// share the one install path, so they take turns on the lock
+// below — a parallel run would let one test's Drop delete the
+// fake under the other's version check.
+#[cfg(unix)]
+static FAKE_YTDLP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(unix)]
+struct FakeYtDlp {
+    dir: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl FakeYtDlp {
+    fn install(argv_path: &std::path::Path) -> Self {
+        let dir = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let script = dir.join("yt-dlp");
+        let body = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"2026.10.26\"; exit 0; fi\necho \"$@\" >> \"{}\"\necho \"[download]  42.1% of 10.00MiB at  1.00MiB/s ETA 00:10\"\nsleep 1\necho \"ERROR: [TikTok] 123: Requested format is not available\" >&2\nexit 1\n",
+            argv_path.display()
+        );
+        std::fs::write(&script, body).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        Self { dir }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for FakeYtDlp {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.dir.join("yt-dlp"));
+    }
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn direct_ytdlp_failure_surfaces_stderr_tail_and_logs_argv() {
+    // Round 83 — the R82 retest's TikTok failure ("yt-dlp
+    // exited with exit code: 1", 0 B, no reason anywhere) must
+    // never happen again: the run reports the real stderr
+    // reason, logs the redacted argv + yt-dlp version + tail,
+    // passes the format's headers and the fallback selector,
+    // and parses the stdout progress into a checkpoint.
+    let _fake_guard = FAKE_YTDLP_LOCK.lock().unwrap();
+    let server = MockServer::start(MockConfig {
+        fail_status: Some(403),
+        ..Default::default()
+    });
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let log_path = dir.join("startup.log");
+    store.set_log_path(log_path.clone());
+    let mut settings = store.get_settings().unwrap();
+    settings.default_download_folder = dir.to_string_lossy().to_string();
+    store.update_settings(&settings).unwrap();
+    let mgr = DownloadManager::new(store, 4);
+    let mut row = resolved_row(&server.url);
+    row.headers = [
+        (
+            "User-Agent".to_string(),
+            "Mozilla/5.0 TestAgent".to_string(),
+        ),
+        ("Referer".to_string(), "https://www.tiktok.com/".to_string()),
+    ]
+    .into_iter()
+    .collect();
+    let (id, _) = mgr
+        .add_resolved_video_download(
+            "https://www.tiktok.com/@user/video/123",
+            &row,
+            Some("video.mp4".to_string()),
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+    let dl = mgr.get_download(&id).unwrap().unwrap();
+    assert!(dl.direct_ytdlp, "the 403 probe must fall back to direct");
+    let argv_path = dir.join("fake-argv.txt");
+    let _fake = FakeYtDlp::install(&argv_path);
+    mgr.start_direct_ytdlp(&id).await.unwrap();
+    assert!(
+        wait_for_status(&mgr, &id, "error", 30).await,
+        "the direct run must fail, last status: {}",
+        mgr.get_download(&id).unwrap().unwrap().status
+    );
+    let dl = mgr.get_download(&id).unwrap().unwrap();
+    let err = dl.error_message.clone().unwrap_or_default();
+    assert!(
+        err.contains("yt-dlp exited with"),
+        "the exit status must stay in the message: {err}"
+    );
+    assert!(
+        err.contains("Requested format is not available"),
+        "the stderr tail must surface in the message, not just the exit code: {err}"
+    );
+    assert!(
+        dl.downloaded_bytes > 0,
+        "the stdout [download] line must checkpoint bytes, got {}",
+        dl.downloaded_bytes
+    );
+    let argv = std::fs::read_to_string(&argv_path).unwrap();
+    assert!(
+        argv.contains("18/b[ext=mp4]/b"),
+        "the selector must fall back when the id changes: {argv}"
+    );
+    assert!(
+        argv.contains("User-Agent: Mozilla/5.0 TestAgent"),
+        "the format's User-Agent must reach yt-dlp: {argv}"
+    );
+    assert!(
+        argv.contains("Referer: https://www.tiktok.com/"),
+        "the format's Referer must reach yt-dlp: {argv}"
+    );
+    assert!(argv.contains("-P"), "the output must go through -P: {argv}");
+    assert!(
+        argv.contains("video.mp4"),
+        "the output name must reach yt-dlp: {argv}"
+    );
+    assert!(
+        !argv.contains("--cookies"),
+        "the manual Add URL flow has no cookies to forward: {argv}"
+    );
+    let log = std::fs::read_to_string(&log_path).unwrap();
+    assert!(
+        log.contains("direct yt-dlp download") && log.contains("Requested format is not available"),
+        "the failure must be logged with its tail, got: {log}"
+    );
+    assert!(
+        log.contains("2026.10.26"),
+        "the log must name the yt-dlp version, got: {log}"
+    );
+    assert!(
+        log.contains("18/b[ext=mp4]/b"),
+        "the log must carry the redacted argv, got: {log}"
+    );
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn direct_ytdlp_download_forwards_capture_cookies_and_headers() {
+    // Round 83 — a direct download created from a browser
+    // capture must run yt-dlp WITH the capture's cookies and
+    // the format's headers: the old code created the row with
+    // neither, so a cookie-gated format failed with exit code 1.
+    // The temp cookie file is deleted when the run returns.
+    let _fake_guard = FAKE_YTDLP_LOCK.lock().unwrap();
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let log_path = dir.join("startup.log");
+    store.set_log_path(log_path.clone());
+    let mut settings = store.get_settings().unwrap();
+    settings.default_download_folder = dir.to_string_lossy().to_string();
+    store.update_settings(&settings).unwrap();
+    let mgr = DownloadManager::new(store, 4);
+    let store = mgr.store();
+    let cookies_json = r#"[{"name":"session","value":"abc123"},{"name":"consent","value":"yes"}]"#;
+    let pending = store
+        .enqueue_pending_link_resolved(
+            "https://cdn.example.com/video.mp4",
+            Some("https://www.tiktok.com/@user/video/123"),
+            Some(cookies_json),
+            &fetchline_engine::store::ResolvedLink {
+                filename: Some("video.mp4".to_string()),
+                headers: Some(
+                    r#"{"User-Agent":"Mozilla/5.0 TestAgent","Referer":"https://www.tiktok.com/"}"#
+                        .to_string(),
+                ),
+                source_url: Some("https://www.tiktok.com/@user/video/123".to_string()),
+                format_id: Some("18".to_string()),
+                audio_url: None,
+                fragmented: true,
+            },
+        )
+        .unwrap();
+    let (id, _) = mgr
+        .confirm_pending_link(&pending.id, None, None, None, None, None, false)
+        .await
+        .unwrap();
+    let dl = mgr.get_download(&id).unwrap().unwrap();
+    assert!(dl.direct_ytdlp, "a fragmented capture is a direct download");
+    let argv_path = dir.join("fake-argv2.txt");
+    let _fake = FakeYtDlp::install(&argv_path);
+    mgr.start_direct_ytdlp(&id).await.unwrap();
+    assert!(
+        wait_for_status(&mgr, &id, "error", 30).await,
+        "the direct run must fail (the fake exits 1), last status: {}",
+        mgr.get_download(&id).unwrap().unwrap().status
+    );
+    let argv = std::fs::read_to_string(&argv_path).unwrap();
+    assert!(
+        argv.contains("--cookies"),
+        "the direct call must forward the capture's cookies: {argv}"
+    );
+    assert!(
+        argv.contains("fetchline-ytdlp-cookies-"),
+        "the cookies must ride a temp Netscape file: {argv}"
+    );
+    assert!(
+        argv.contains("User-Agent: Mozilla/5.0 TestAgent"),
+        "the format's User-Agent must reach yt-dlp: {argv}"
+    );
+    // The temp cookie file is deleted when the run returns
+    // (RAII): find its path in the recorded argv and check it
+    // is gone.
+    let cookie_path = argv
+        .split_whitespace()
+        .skip_while(|w| *w != "--cookies")
+        .nth(1)
+        .expect("a --cookies value in the argv");
+    assert!(
+        !std::path::Path::new(cookie_path).exists(),
+        "the temp cookie file must be deleted after the run: {cookie_path}"
+    );
+    let dl = mgr.get_download(&id).unwrap().unwrap();
+    assert!(
+        dl.error_message
+            .clone()
+            .unwrap_or_default()
+            .contains("Requested format is not available"),
+        "the stderr reason must surface: {:?}",
+        dl.error_message
+    );
+}

@@ -2250,6 +2250,8 @@ impl DownloadManager {
                     folder,
                     category_id,
                     queue_id,
+                    cookies,
+                    headers,
                 )
                 .await
             {
@@ -2412,7 +2414,15 @@ impl DownloadManager {
         let mut effective_format_id = row.format_id.clone();
         let (download_id, probe) = if row.fragmented {
             let id = self
-                .add_direct_ytdlp_download(&row.url, filename, folder, category_id, queue_id)
+                .add_direct_ytdlp_download(
+                    &row.url,
+                    filename,
+                    folder,
+                    category_id,
+                    queue_id,
+                    None,
+                    headers,
+                )
                 .await?;
             (
                 id,
@@ -2457,6 +2467,19 @@ impl DownloadManager {
                             effective_format_id = format!("{}+{}", row.format_id, audio_format_id);
                         }
                     }
+                    // Round 83 — the fallback download keeps
+                    // the format's headers (the probe call moved
+                    // them, so they are rebuilt from the row's
+                    // headers JSON): the direct yt-dlp call
+                    // needs the same User-Agent / Referer the
+                    // resolve negotiated. No cookies here — the
+                    // manual Add URL resolve is cookieless.
+                    let fallback_headers = Self::headers_from_json(Some(&headers_json));
+                    let fallback_headers = if fallback_headers.is_empty() {
+                        None
+                    } else {
+                        Some(fallback_headers)
+                    };
                     let id = self
                         .add_direct_ytdlp_download(
                             &row.url,
@@ -2464,6 +2487,8 @@ impl DownloadManager {
                             folder,
                             category_id,
                             queue_id,
+                            None,
+                            fallback_headers,
                         )
                         .await?;
                     (
@@ -2989,6 +3014,31 @@ impl DownloadManager {
 
     pub fn list_grabber_projects(&self) -> Result<Vec<GrabberProjectRow>> {
         self.store.list_grabber_projects()
+    }
+
+    /// Rename a grabber project (Round 83 — sidebar inline
+    /// rename, mirroring the queue rename). The store validates
+    /// the name; a running project may be renamed, the run keys
+    /// on the id.
+    pub fn rename_grabber_project(&self, id: &str, name: &str) -> Result<GrabberProjectRow> {
+        self.store.rename_grabber_project(id, name)
+    }
+
+    /// Delete a grabber project (Round 83). Refused while the
+    /// project is running — deleting the row under a live run
+    /// would leave the run writing progress for a project that
+    /// no longer exists. The project's downloads stay (the
+    /// schema untags them with ON DELETE SET NULL).
+    pub async fn delete_grabber_project(&self, id: &str) -> Result<()> {
+        {
+            let runs = self.grabber_runs.lock().await;
+            if runs.contains_key(id) {
+                return Err(EngineError::InvalidState(
+                    "This site grabber is running — stop it before deleting it".to_string(),
+                ));
+            }
+        }
+        self.store.delete_grabber_project(id)
     }
 
     /// Start a grabber run in the background (the wizard's Run
@@ -6113,17 +6163,88 @@ impl DownloadManager {
         if let Some(parent) = Path::new(&save_path).parent() {
             std::fs::create_dir_all(parent)?;
         }
+        // Round 83 — the format selector falls back when the
+        // re-extraction returns a different id, and the output
+        // goes through -P <dir> -o <name> instead of -o <full
+        // path>: a '%' in the path or title breaks yt-dlp's
+        // output template, and a \\?\ prefix is rejected by
+        // yt-dlp (clean_windows_path exists for exactly this).
+        let selector = crate::ytdlp::direct_download_format_selector(&format_id);
+        let save_path_buf = PathBuf::from(&save_path);
+        let out_dir = save_path_buf
+            .parent()
+            .map(|p| crate::ytdlp::clean_windows_path(p))
+            .filter(|s| !s.is_empty());
+        let out_name = save_path_buf
+            .file_name()
+            .map(|n| n.to_string_lossy().replace('%', "%%"))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "video".to_string());
+        // Round 83 — the direct call gets the same session the
+        // resolve had: the browser's cookies (when the download
+        // was created from a capture that carried them) via a
+        // temp Netscape file (RAII — deleted when this returns),
+        // and the format's User-Agent / Referer as --add-header.
+        // Without them a cookie-gated format fails with exit
+        // code 1 and no message. The manual Add URL flow has no
+        // cookies (its resolve is cookieless), so the file is
+        // only written when the maps hold cookies.
+        let cookies_header = self.cookies.lock().unwrap().get(id).cloned();
+        let req_headers = self.headers_for(id);
+        let mut cookies_file: Option<crate::ytdlp::CookieTempFile> = None;
+        if let Some(header) = cookies_header.as_deref().filter(|h| !h.trim().is_empty()) {
+            let pairs = crate::ytdlp::cookie_header_to_pairs(header);
+            let host = url_host(&source_url).unwrap_or_default();
+            match crate::ytdlp::write_cookies_tempfile(&host, &pairs) {
+                Ok(file) => cookies_file = Some(file),
+                Err(e) => {
+                    let _ = self.store.log(&format!(
+                        "direct yt-dlp download {id}: could not write a cookies file ({e}) — continuing without cookies"
+                    ));
+                }
+            }
+        }
+        let mut argv: Vec<String> = vec![
+            "--ignore-config".to_string(),
+            "--no-playlist".to_string(),
+            "-f".to_string(),
+            selector,
+        ];
+        if let Some(dir) = &out_dir {
+            argv.push("-P".to_string());
+            argv.push(dir.clone());
+            argv.push("-o".to_string());
+            argv.push(out_name);
+        } else {
+            argv.push("-o".to_string());
+            argv.push(crate::ytdlp::clean_windows_path(Path::new(&save_path)));
+        }
+        if let Some(file) = &cookies_file {
+            argv.push("--cookies".to_string());
+            argv.push(file.path.display().to_string());
+        }
+        if let Some(headers) = &req_headers {
+            if let Some(ua) = headers
+                .user_agent
+                .as_deref()
+                .filter(|s| !s.contains(['\r', '\n']))
+            {
+                argv.push("--add-header".to_string());
+                argv.push(format!("User-Agent: {ua}"));
+            }
+            if let Some(referer) = headers
+                .referer
+                .as_deref()
+                .filter(|s| !s.contains(['\r', '\n']))
+            {
+                argv.push("--add-header".to_string());
+                argv.push(format!("Referer: {referer}"));
+            }
+        }
+        argv.push("--".to_string());
+        argv.push(source_url.clone());
         let mut cmd = tokio::process::Command::new(&paths.ytdlp);
-        cmd.args([
-            "--ignore-config",
-            "--no-playlist",
-            "-f",
-            &format_id,
-            "-o",
-            &save_path,
-            "--",
-            &source_url,
-        ]);
+        cmd.args(&argv);
         // Round 78 — the (B) fallback merges with yt-dlp itself,
         // so it must be told where the bundled ffmpeg/ffprobe
         // live (they are not on PATH): without
@@ -6152,39 +6273,36 @@ impl DownloadManager {
         let mut child = cmd
             .spawn()
             .map_err(|e| EngineError::InvalidState(format!("Could not start yt-dlp: {e}")))?;
-        // Drain stdout (yt-dlp prints nothing useful there for a
-        // download, but an un-drained pipe would block it).
-        if let Some(stdout) = child.stdout.take() {
-            tokio::spawn(async move {
-                use tokio::io::AsyncReadExt;
-                let mut stdout = stdout;
-                let mut buf = [0u8; 8192];
-                loop {
-                    match stdout.read(&mut buf).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) => {}
-                    }
-                }
-            });
-        }
-        // Parse progress from stderr (`[download] 42.1% of
-        // 123.45MiB at 1.23MiB/s ETA 00:41`) into a channel; the
-        // loop below turns each line into a checkpoint.
-        let (tx, mut rx) =
+        // Round 83 — both streams are read line by line
+        // (splitting on '\n' AND '\r': progress updates are
+        // '\r'-separated when piped). Progress comes from
+        // stdout — yt-dlp prints `[download] 42.1% of
+        // 123.45MiB at 1.23MiB/s ETA 00:41` there, not on
+        // stderr (verified live with yt-dlp 2026.10.26); the
+        // old code drained stdout and discarded it and parsed
+        // only stderr, so progress never updated on this path.
+        // Every line also goes to the ring buffer (see
+        // YtDlpOutputTail), so a failure reports the real
+        // reason instead of only its exit code.
+        let (progress_tx, mut progress_rx) =
             tokio::sync::mpsc::channel::<(f64, Option<u64>, Option<u64>, Option<u64>)>(32);
-        if let Some(stderr) = child.stderr.take() {
+        let (line_tx, mut line_rx) = tokio::sync::mpsc::channel::<(bool, String)>(256);
+        if let Some(stdout) = child.stdout.take() {
+            let tx = line_tx.clone();
+            let ptx = progress_tx.clone();
             tokio::spawn(async move {
-                use tokio::io::{AsyncBufReadExt, BufReader};
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    if let Some(parsed) = parse_ytdlp_progress_line(&line) {
-                        if tx.send(parsed).await.is_err() {
-                            break;
-                        }
-                    }
-                }
+                drain_ytdlp_lines(stdout, false, tx, Some(ptx)).await;
             });
         }
+        if let Some(stderr) = child.stderr.take() {
+            let tx = line_tx.clone();
+            tokio::spawn(async move {
+                drain_ytdlp_lines(stderr, true, tx, None).await;
+            });
+        }
+        drop(line_tx);
+        drop(progress_tx);
+        let mut tail = crate::ytdlp::YtDlpOutputTail::new();
         let mut total_size: Option<u64> = row.size_bytes.map(|s| s as u64);
         loop {
             tokio::select! {
@@ -6198,14 +6316,47 @@ impl DownloadManager {
                     }
                     if let Ok(Some(status)) = child.try_wait() {
                         if !status.success() {
+                            // Round 83 — drain whatever lines
+                            // are still queued, then report the
+                            // real reason: the redacted tail goes
+                            // to startup.log (with the redacted
+                            // argv, the yt-dlp version and the
+                            // format id) and the mapped reason
+                            // goes to the user. The branch
+                            // (fragmented format vs probe-refused
+                            // fallback) is in startup.log's
+                            // "resolved add: probe of ... refused"
+                            // lines.
+                            while let Ok((is_err, line)) = line_rx.try_recv() {
+                                if is_err {
+                                    tail.push_stderr(&line);
+                                } else {
+                                    tail.push_stdout(&line);
+                                }
+                            }
+                            let version = crate::ytdlp::ytdlp_version(&paths).await;
+                            let redacted_tail =
+                                crate::ytdlp::redact_ytdlp_text(&tail.render());
+                            let mapped =
+                                crate::ytdlp::map_error(&crate::ytdlp::redact_ytdlp_text(
+                                    &tail.error_text(),
+                                ));
+                            let _ = self.store.log(&format!(
+                                "direct yt-dlp download {id} failed: {status}; yt-dlp {}; format_id {format_id}; page {}; argv: {}; tail:\n{}",
+                                version.as_deref().unwrap_or("unknown"),
+                                crate::ytdlp::redact_ytdlp_text(&source_url),
+                                crate::ytdlp::redact_ytdlp_text(&argv.join(" ")),
+                                redacted_tail,
+                            ));
                             return Err(EngineError::InvalidState(format!(
-                                "yt-dlp exited with {status} while downloading this video"
+                                "yt-dlp exited with {status} while downloading this video: {}",
+                                mapped.user_message()
                             )));
                         }
                         break;
                     }
                 }
-                Some((pct, total, speed, eta)) = rx.recv() => {
+                Some((pct, total, speed, eta)) = progress_rx.recv() => {
                     if total.is_some() {
                         total_size = total;
                         let _ = self
@@ -6226,6 +6377,13 @@ impl DownloadManager {
                         0,
                     );
                     self.emit_snapshot(id, "downloading").await;
+                }
+                Some((is_err, line)) = line_rx.recv() => {
+                    if is_err {
+                        tail.push_stderr(&line);
+                    } else {
+                        tail.push_stdout(&line);
+                    }
                 }
             }
         }
@@ -6251,7 +6409,12 @@ impl DownloadManager {
     /// manifest format, and its progress lines report the size.
     /// The row's URL is the format's manifest URL (for display);
     /// the runner downloads from the page URL + format id stored
-    /// by `confirm_pending_link`.
+    /// by `confirm_pending_link`. `cookies` / `headers` ride
+    /// the same in-memory maps as the segmented path (Round 83):
+    /// the direct yt-dlp call needs the browser's cookies and
+    /// the format's User-Agent / Referer, or a cookie-gated
+    /// format fails with exit code 1. Memory only, never on
+    /// disk — the same lifecycle as `add_download_with_cookies_and_headers`.
     async fn add_direct_ytdlp_download(
         &self,
         url: &str,
@@ -6259,6 +6422,8 @@ impl DownloadManager {
         folder: Option<String>,
         category_id: Option<String>,
         queue_id: Option<String>,
+        cookies: Option<String>,
+        headers: Option<crate::probe::RequestHeaders>,
     ) -> Result<String> {
         let settings = self.store.get_settings().unwrap_or_default();
         if let Some(host) = url_host(url) {
@@ -6329,6 +6494,20 @@ impl DownloadManager {
             None,
             None,
         )?;
+        // Round 83 — the direct yt-dlp runner reads these maps
+        // (see `run_ytdlp_direct_inner`): without them a
+        // cookie-gated format downloads with no session at all.
+        if let Some(header) = cookies {
+            self.cookies.lock().unwrap().insert(id.clone(), header);
+        }
+        if let Some(headers) = headers {
+            if !headers.is_empty() {
+                self.download_headers
+                    .lock()
+                    .unwrap()
+                    .insert(id.clone(), headers);
+            }
+        }
         if let Some(queue) = queue_id {
             self.store.add_to_queue(&id, &queue)?;
         }
@@ -8112,6 +8291,51 @@ pub async fn merge_dash_files(video: &str, audio: &str, output: &str, ffmpeg: &P
         _ => Err(EngineError::InvalidState(
             "ffmpeg finished but the merged file is missing or empty".to_string(),
         )),
+    }
+}
+
+/// Drain one yt-dlp output stream line by line into the
+/// shared line channel, and — for the progress stream — parse
+/// `[download]` lines into the progress channel. Splits on
+/// '\n' AND '\r': yt-dlp's progress updates are '\r'-separated
+/// when piped, so a plain `.lines()` would buffer a whole run
+/// into one line. Empty segments are skipped. Returns when
+/// the stream ends, errors, or either receiver is gone (the
+/// run ended — the loop stopped listening).
+async fn drain_ytdlp_lines<R>(
+    reader: R,
+    is_stderr: bool,
+    lines: tokio::sync::mpsc::Sender<(bool, String)>,
+    progress: Option<tokio::sync::mpsc::Sender<(f64, Option<u64>, Option<u64>, Option<u64>)>>,
+) where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let mut reader = BufReader::new(reader);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let chunk = String::from_utf8_lossy(&buf);
+        for part in chunk.split(['\n', '\r']) {
+            let line = part.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(parsed) = parse_ytdlp_progress_line(line) {
+                if let Some(tx) = &progress {
+                    if tx.send(parsed).await.is_err() {
+                        return;
+                    }
+                }
+            }
+            if lines.send((is_stderr, line.to_string())).await.is_err() {
+                return;
+            }
+        }
     }
 }
 

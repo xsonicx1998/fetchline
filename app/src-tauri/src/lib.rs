@@ -3144,6 +3144,34 @@ async fn list_grabber_projects(
         .map_err(|e| e.to_string())
 }
 
+/// Rename a grabber project (Round 83 — the R82 retest
+/// confirmed projects could neither be renamed nor deleted).
+/// An empty name is rejected; an unknown id is NotFound.
+/// Renaming a running project is allowed — the run keys on
+/// the id, the name is display-only.
+#[tauri::command]
+async fn rename_grabber_project(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+) -> Result<GrabberProjectRow, String> {
+    state
+        .manager
+        .rename_grabber_project(&id, &name)
+        .map_err(|e| e.to_string())
+}
+
+/// Delete a grabber project (Round 83). Refused while the
+/// project is running; its downloads are kept, untagged.
+#[tauri::command]
+async fn delete_grabber_project(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state
+        .manager
+        .delete_grabber_project(&id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Round 65 — system tray, like IDM: a tray icon (the app logo)
 /// lives by the clock while the app runs. Left-click shows the
 /// main window again; right-click opens the menu (Show / Exit).
@@ -4069,6 +4097,8 @@ pub fn run() {
             stop_grabber,
             get_grabber_project,
             list_grabber_projects,
+            rename_grabber_project,
+            delete_grabber_project,
             get_settings,
             update_settings,
             check_for_updates,

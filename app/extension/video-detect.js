@@ -494,7 +494,11 @@ function videoPageUrlIfVideoPage(href) {
   }
   const host = (u.hostname || "").toLowerCase();
   if (/(^|\.)tiktok\.com$/.test(host)) {
-    if (/^\/@[^/]+\/video\/\d+\/?$/.test(u.pathname)) return u.toString();
+    // Round 83 — the user segment may be empty: a feed video
+    // whose author handle was not found builds
+    // /@/video/<id>, and that form must still count as a
+    // video page (yt-dlp accepts it; see the retest check).
+    if (/^\/@[^/]*\/video\/\d+\/?$/.test(u.pathname)) return u.toString();
     return null;
   }
   if (/(^|\.)youtube\.com$/.test(host) || /(^|\.)youtu\.be$/.test(host)) {
@@ -503,6 +507,204 @@ function videoPageUrlIfVideoPage(href) {
     return null;
   }
   return null;
+}
+
+// Round 83 — TikTok video ids are snowflakes: the high 32
+// bits are a unix timestamp in seconds. A 17–20 digit number
+// is only a video id when that timestamp falls between
+// 2016-01-01 and tomorrow — this rejects the junk ids the
+// live feed carries (e.g. 093800000000000001, whose high bits
+// decode to 1970). The dump-proven id 7692373771000352030
+// decodes to 2026-10-03. BigInt keeps the full 64-bit id
+// exact; a plain Number would lose the low bits.
+function isTiktokSnowflakeId(id) {
+  if (typeof id !== "string" || !/^\d{17,20}$/.test(id)) return false;
+  let ts;
+  try {
+    ts = Number(BigInt(id) >> 32n);
+  } catch {
+    return false;
+  }
+  const min = 1451606400; // 2016-01-01T00:00:00Z
+  const max = Math.floor(Date.now() / 1000) + 86400; // tomorrow
+  return ts >= min && ts <= max;
+}
+
+// The video id inside a TikTok /@user/video/<id> URL, or null
+// for any other URL (a YouTube watch URL has no such id).
+function tiktokVideoIdFromUrl(url) {
+  const m = /\/video\/(\d{17,20})(?:[/?#]|$)/.exec(String(url || ""));
+  return m ? m[1] : null;
+}
+
+// Round 83 — a TikTok video id from ONE element's OWN
+// attributes: the xgplayer wrapper id (xgwrapper-<index>-<id>),
+// or a data-vid / data-aweme-id / data-video-id attribute.
+// Ancestors' own attributes ONLY — never outerHTML text: a
+// high ancestor's outerHTML also carries neighbour slides'
+// ids (the dump's i=7+ levels prove it), and a descendant
+// search would pick the wrong video.
+function tiktokIdFromAttributes(el) {
+  if (!el) return null;
+  const candidates = [];
+  const idAttr =
+    (typeof el.id === "string" && el.id) ||
+    (typeof el.getAttribute === "function" && el.getAttribute("id")) ||
+    "";
+  const wrapper = /xgwrapper-\d+-(\d{17,20})/.exec(idAttr);
+  if (wrapper) candidates.push(wrapper[1]);
+  if (typeof el.getAttribute === "function") {
+    for (const name of ["data-vid", "data-aweme-id", "data-video-id"]) {
+      const v = el.getAttribute(name);
+      if (typeof v === "string" && /^\d{17,20}$/.test(v)) candidates.push(v);
+    }
+  }
+  if (el.dataset) {
+    for (const key of ["vid", "awemeId", "videoId"]) {
+      const v = el.dataset[key];
+      if (typeof v === "string" && /^\d{17,20}$/.test(v)) candidates.push(v);
+    }
+  }
+  for (const c of candidates) {
+    if (isTiktokSnowflakeId(c)) return c;
+  }
+  return null;
+}
+
+// Round 83 — a TikTok video id from the video element's own
+// src / poster URL (an item_id= or video_id= query segment).
+// The live feed's playing video has a blob: src, so this
+// usually finds nothing — it is a fallback, not the path.
+function tiktokIdFromVideoSrc(video) {
+  if (!video) return null;
+  const urls = [];
+  if (typeof video.currentSrc === "string") urls.push(video.currentSrc);
+  if (typeof video.getAttribute === "function") {
+    urls.push(video.getAttribute("src") || "");
+    urls.push(video.getAttribute("poster") || "");
+  }
+  if (typeof video.poster === "string") urls.push(video.poster);
+  if (typeof video.querySelectorAll === "function") {
+    try {
+      for (const s of video.querySelectorAll("source") || []) {
+        if (s && typeof s.getAttribute === "function") {
+          urls.push(s.getAttribute("src") || "");
+        }
+      }
+    } catch {
+      // A source list that throws is no id source.
+    }
+  }
+  for (const u of urls) {
+    const m = /(?:item_id|video_id)=(\d{17,20})/.exec(String(u || ""));
+    if (m && isTiktokSnowflakeId(m[1])) return m[1];
+  }
+  return null;
+}
+
+// Round 83 — the author handle as seen at ONE level of the
+// slide: the [data-e2e="video-author-uniqueid"] text first
+// (authoritative), else the first profile-only anchor
+// (/@handle, no /video/ path) at that level. The nearest
+// level with a handle wins — a higher level can hold another
+// account's link (the dump's i=9 level has /@cookrate.com
+// next to the author's /@sjjan474).
+function tiktokAuthorHandleAt(el) {
+  if (!el) return "";
+  if (typeof el.querySelector === "function") {
+    try {
+      const node = el.querySelector('[data-e2e="video-author-uniqueid"]');
+      const text = node && typeof node.textContent === "string" ? node.textContent.trim() : "";
+      if (text && /^@?[A-Za-z0-9._]+$/.test(text)) return text.replace(/^@/, "");
+    } catch {
+      // A selector that throws is no handle source.
+    }
+  }
+  if (typeof el.querySelectorAll === "function") {
+    const anchors = el.querySelectorAll("a[href]") || [];
+    for (const a of anchors) {
+      const href = (a && a.href) || "";
+      const m = /^(?:https?:\/\/(?:www\.)?tiktok\.com)?\/@([^/?#]+)\/?$/.exec(href);
+      if (m) return m[1];
+    }
+  }
+  return "";
+}
+
+// Round 83 — a TikTok feed video's own page from the player
+// wrapper id (dump-proven: the live /foryou slide has NO
+// /video/ anchor at all; the id lives in the xgplayer wrapper
+// div's own id, xgwrapper-0-<id>). Walks up from the video
+// taking the NEAREST valid id and the NEAREST handle, then
+// builds the canonical URL — with an empty handle when none
+// was found. Last resort: the xgwrapper ids among the
+// descendants of the nearest slide container (ARTICLE /
+// SECTION / [data-e2e="feed-video"]) — accepted only when
+// exactly one distinct valid id exists there, so a neighbour
+// slide's id can never be picked.
+function tiktokVideoPageFromElement(video) {
+  if (!video) return null;
+  let id = tiktokIdFromVideoSrc(video);
+  let handle = "";
+  let el = video;
+  let slide = null;
+  for (let i = 0; i < 12 && el; i++) {
+    if (!slide) {
+      const tag = (el.tagName || "").toUpperCase();
+      const e2e =
+        typeof el.getAttribute === "function" ? el.getAttribute("data-e2e") : "";
+      if (tag === "ARTICLE" || tag === "SECTION" || e2e === "feed-video") slide = el;
+    }
+    if (!id) id = tiktokIdFromAttributes(el);
+    if (!handle) handle = tiktokAuthorHandleAt(el);
+    if (id && handle) break;
+    el = el.parentElement || el.parentNode;
+  }
+  if (!id && slide && typeof slide.querySelectorAll === "function") {
+    const ids = new Set();
+    try {
+      for (const w of slide.querySelectorAll('[id^="xgwrapper-"]') || []) {
+        const found = tiktokIdFromAttributes(w);
+        if (found) ids.add(found);
+      }
+    } catch {
+      // A selector that throws is no id source.
+    }
+    if (ids.size === 1) id = [...ids][0];
+  }
+  if (!id) return null;
+  return `https://www.tiktok.com/@${handle}/video/${id}`;
+}
+
+// Round 83 — pages that are feeds, not video pages: a resolve
+// must never run for one of these. TikTok's /foryou and its
+// siblings, YouTube's home / feed pages. A Facebook reel or
+// Instagram reel URL is the video page itself, so those hosts
+// are never feeds here.
+function isFeedPageUrl(href) {
+  let u;
+  try {
+    u = new URL(href, typeof location !== "undefined" ? location.href : "https://example.invalid");
+  } catch {
+    return false;
+  }
+  const host = (u.hostname || "").toLowerCase();
+  const path = u.pathname || "";
+  if (/(^|\.)tiktok\.com$/.test(host)) {
+    return (
+      path === "/foryou" ||
+      path === "/following" ||
+      path === "/friends" ||
+      path === "/explore" ||
+      path === "/live" ||
+      path.startsWith("/tag/") ||
+      path.startsWith("/music/")
+    );
+  }
+  if (/(^|\.)youtube\.com$/.test(host) || /(^|\.)youtu\.be$/.test(host)) {
+    return path === "/" || path.startsWith("/feed/");
+  }
+  return false;
 }
 
 // Round 81 — the playing video's page URL: walk up from the
@@ -524,7 +726,17 @@ function videoPageUrlIfVideoPage(href) {
 // every level above it has at least as many, so the search
 // stops. Nodes without querySelectorAll (the plain-object test
 // doubles) skip the second pass entirely.
+// Round 83 — the Round 82 pass counted ANCHORS, not videos
+// (Claude, PROVEN in code): a thumbnail link + a caption link
+// to the SAME video counted 2 and returned null. The pass now
+// counts DISTINCT video ids (a Set); it accepts when the
+// subtree holds exactly one distinct id and rejects when it
+// holds two or more. And the live feed has no /video/ anchor
+// at all (dump-proven) — the third pass builds the page URL
+// from the xgplayer wrapper id instead (see
+// tiktokVideoPageFromElement).
 function videoPageUrlFromElement(video) {
+  if (!video) return null;
   let el = video;
   for (let i = 0; i < 12 && el; i++) {
     if ((el.tagName || "").toUpperCase() === "A" && el.href) {
@@ -538,22 +750,26 @@ function videoPageUrlFromElement(video) {
   el = video;
   for (let i = 0; i < 12 && el; i++) {
     if (typeof el.querySelectorAll === "function") {
-      let found = null;
-      let count = 0;
+      const ids = new Set();
+      let firstUrl = null;
       const anchors = el.querySelectorAll("a[href]") || [];
       for (const a of anchors) {
         const url = videoPageUrlIfVideoPage((a && a.href) || "");
         if (url) {
-          count++;
-          found = url;
-          if (count > 1) return null;
+          // Distinct videos, not anchors: two links to the
+          // same video (thumbnail + caption) share one id.
+          // A non-TikTok video page has no /video/ id, so
+          // the URL itself is the key there.
+          ids.add(tiktokVideoIdFromUrl(url) || url);
+          if (!firstUrl) firstUrl = url;
+          if (ids.size > 1) return null;
         }
       }
-      if (count === 1) return found;
+      if (ids.size === 1) return firstUrl;
     }
     el = el.parentElement || el.parentNode;
   }
-  return null;
+  return tiktokVideoPageFromElement(video);
 }
 
 // Shared with the content script (same JS world when injected as
@@ -592,6 +808,10 @@ if (typeof globalThis !== "undefined") {
     buildResolvedVariant,
     videoPageUrlIfVideoPage,
     videoPageUrlFromElement,
+    isTiktokSnowflakeId,
+    tiktokVideoIdFromUrl,
+    tiktokVideoPageFromElement,
+    isFeedPageUrl,
   };
 }
 if (typeof module !== "undefined" && module.exports) {

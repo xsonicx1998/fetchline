@@ -8,6 +8,9 @@
 // 360p-and-up filter, and the video_found variant builder.
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 
 import "../video-detect.js";
 
@@ -26,6 +29,10 @@ const {
   buildResolvedVariant,
   videoPageUrlIfVideoPage,
   videoPageUrlFromElement,
+  isTiktokSnowflakeId,
+  tiktokVideoIdFromUrl,
+  tiktokVideoPageFromElement,
+  isFeedPageUrl,
 } = globalThis.FetchlineVideoDetect;
 
 const RESOLVED = {
@@ -321,4 +328,184 @@ test("videoPageUrlFromElement: a sibling overlay link inside the same slide is f
     videoPageUrlFromElement({ tagName: "VIDEO", parentElement: profileSlide }),
     null,
   );
+});
+
+// Round 83 — the real /foryou dump (see
+// fixtures/tiktok-foryou-dump.json, reconstructed from the VPS
+// capture report 2026-11-20 ~21:00 EET). Build plain-object
+// doubles from the fixture chain: each level gets tagName,
+// parentElement (the next level), its own id attribute, a
+// getAttribute for the recorded attrs, and querySelectorAll
+// returning the level's recorded descendant anchors (and, for
+// the '[id^="xgwrapper-"]' selector, the wrapper elements in
+// its subtree). The fixture's `ids` (outerHTML regex matches)
+// are NOT used to build the doubles — the code must never read
+// outerHTML text, which also carries neighbour slides' ids.
+function elementFromDumpChain(chain) {
+  const levels = chain.map((level) => {
+    const el = {
+      tagName: level.tag,
+      parentElement: null,
+      id: level.attrs.id || "",
+      getAttribute(name) {
+        return Object.prototype.hasOwnProperty.call(level.attrs, name)
+          ? level.attrs[name]
+          : null;
+      },
+      querySelector() {
+        return null;
+      },
+      querySelectorAll(selector) {
+        if (String(selector || "").includes("xgwrapper")) {
+          // Wrapper elements among this level's descendants:
+          // the chain levels below it whose own id starts
+          // with xgwrapper-.
+          const idx = chain.indexOf(level);
+          return chain
+            .slice(0, idx)
+            .filter((l) => (l.attrs.id || "").startsWith("xgwrapper-"))
+            .map((l) => ({ id: l.attrs.id }));
+        }
+        return (level.anchors || []).map((href) => ({ href }));
+      },
+    };
+    return el;
+  });
+  for (let i = 0; i < levels.length - 1; i++) levels[i].parentElement = levels[i + 1];
+  return levels[0];
+}
+
+test("videoPageUrlFromElement: the real /foryou dump resolves to the playing video's own page", () => {
+  const dump = JSON.parse(
+    readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "fixtures", "tiktok-foryou-dump.json"),
+      "utf8",
+    ),
+  );
+  assert.equal(dump.href, "https://www.tiktok.com/foryou");
+  assert.equal(dump.shadow, false);
+  assert.equal(dump.paused, false);
+  assert.equal(dump.videos, 2);
+  // The dump has NO /video/ anchor anywhere in the chain — the
+  // Round 82 sole-anchor pass alone would return null, and the
+  // feed URL must never be the answer.
+  assert.equal(
+    dump.chain.every((l) => !(l.anchors || []).some((h) => h.includes("/video/"))),
+    true,
+  );
+  const video = elementFromDumpChain(dump.chain);
+  assert.equal(
+    videoPageUrlFromElement(video),
+    "https://www.tiktok.com/@sjjan474/video/7692373771000352030",
+  );
+});
+
+test("videoPageUrlFromElement: two anchors to the SAME video resolve (distinct ids, not anchors)", () => {
+  // Round 83 — Claude's PROVEN bug: the Round 82 pass counted
+  // anchors, so a thumbnail link + a caption link to the same
+  // video counted 2 and returned null.
+  const videoHref = "https://www.tiktok.com/@someone/video/7551233954129399053";
+  const slide = {
+    tagName: "DIV",
+    parentElement: null,
+    querySelectorAll: () => [
+      { href: videoHref },
+      { href: "https://www.tiktok.com/@someone/video/7551233954129399053?lang=en" },
+    ],
+  };
+  assert.equal(
+    videoPageUrlFromElement({ tagName: "VIDEO", parentElement: slide }),
+    videoHref,
+  );
+  // Same video id under a different handle is still one video.
+  const slide2 = {
+    tagName: "DIV",
+    parentElement: null,
+    querySelectorAll: () => [
+      { href: videoHref },
+      { href: "https://www.tiktok.com/@other/video/7551233954129399053" },
+    ],
+  };
+  assert.equal(
+    videoPageUrlFromElement({ tagName: "VIDEO", parentElement: slide2 }),
+    videoHref,
+  );
+});
+
+test("isTiktokSnowflakeId: the dump's real id passes, its junk ids fail", () => {
+  assert.equal(isTiktokSnowflakeId("7692373771000352030"), true);
+  // 093800000000000001 decodes to 1970 — not a video id.
+  assert.equal(isTiktokSnowflakeId("093800000000000001"), false);
+  assert.equal(isTiktokSnowflakeId("123"), false);
+  assert.equal(isTiktokSnowflakeId("not-a-number"), false);
+  assert.equal(isTiktokSnowflakeId(""), false);
+  assert.equal(isTiktokSnowflakeId(null), false);
+});
+
+test("videoPageUrlFromElement: a wrapper id that is not a snowflake resolves to nothing", () => {
+  const wrapper = {
+    tagName: "DIV",
+    id: "xgwrapper-0-093800000000000001",
+    parentElement: null,
+  };
+  const video = { tagName: "VIDEO", parentElement: wrapper };
+  assert.equal(videoPageUrlFromElement(video), null);
+});
+
+test("videoPageUrlFromElement: a wrapper id with no author handle builds the empty-handle URL", () => {
+  const wrapper = {
+    tagName: "DIV",
+    id: "xgwrapper-0-7692373771000352030",
+    parentElement: null,
+    querySelectorAll: () => [],
+  };
+  const video = { tagName: "VIDEO", parentElement: wrapper };
+  assert.equal(
+    videoPageUrlFromElement(video),
+    "https://www.tiktok.com/@/video/7692373771000352030",
+  );
+  assert.equal(
+    videoPageUrlIfVideoPage("https://www.tiktok.com/@/video/7692373771000352030"),
+    "https://www.tiktok.com/@/video/7692373771000352030",
+  );
+});
+
+test("videoPageUrlFromElement: the nearest wrapper id wins over a higher one", () => {
+  const outer = {
+    tagName: "DIV",
+    id: "xgwrapper-0-7692374090094611230",
+    parentElement: null,
+  };
+  const inner = {
+    tagName: "DIV",
+    id: "xgwrapper-0-7692373771000352030",
+    parentElement: outer,
+  };
+  const video = { tagName: "VIDEO", parentElement: inner };
+  assert.equal(
+    videoPageUrlFromElement(video),
+    "https://www.tiktok.com/@/video/7692373771000352030",
+  );
+});
+
+test("isFeedPageUrl: feeds are feeds, video pages are not", () => {
+  assert.equal(isFeedPageUrl("https://www.tiktok.com/foryou"), true);
+  assert.equal(isFeedPageUrl("https://www.tiktok.com/following"), true);
+  assert.equal(isFeedPageUrl("https://www.tiktok.com/explore"), true);
+  assert.equal(isFeedPageUrl("https://www.tiktok.com/@user/video/7551233954129399053"), false);
+  assert.equal(isFeedPageUrl("https://www.tiktok.com/@user"), false);
+  assert.equal(isFeedPageUrl("https://www.youtube.com/"), true);
+  assert.equal(isFeedPageUrl("https://www.youtube.com/feed/trending"), true);
+  assert.equal(isFeedPageUrl("https://www.youtube.com/watch?v=dQw4w9WgXcQ"), false);
+  assert.equal(isFeedPageUrl("https://www.facebook.com/reel/1869227551096683"), false);
+  assert.equal(isFeedPageUrl("https://www.instagram.com/reel/Df2xjtXt0jk/"), false);
+});
+
+test("tiktokVideoIdFromUrl: only TikTok video URLs carry an id", () => {
+  assert.equal(
+    tiktokVideoIdFromUrl("https://www.tiktok.com/@someone/video/7551233954129399053"),
+    "7551233954129399053",
+  );
+  assert.equal(tiktokVideoIdFromUrl("https://www.youtube.com/watch?v=dQw4w9WgXcQ"), null);
+  assert.equal(tiktokVideoIdFromUrl("https://www.tiktok.com/foryou"), null);
 });

@@ -1188,3 +1188,57 @@ test("Try again after a needs_login error retries with cookies once a grant is s
   assert.equal(retryRequest.with_cookies, true);
   assert.deepEqual(retryRequest.cookies, cookies);
 });
+
+test("a TikTok feed video with no derivable id never resolves the feed URL (Round 83)", async () => {
+  const FEED = "https://www.tiktok.com/foryou?lang=en";
+  const env = loadContent({ pageUrl: FEED });
+  const video = env.makeVideo("", { videoWidth: 720, videoHeight: 1280, source: false });
+  // No anchor, no wrapper id, no src id: nothing to derive a
+  // video page from — the old code fell back to the feed URL
+  // and the host answered "not a supported video page".
+  env.addVideo(video);
+  env.fireDocumentEvent("loadedmetadata", { target: video });
+  await tick();
+  env.click(env.findButton());
+  await tick();
+  assert.equal(env.ports.length, 0, "no resolve port opened for the feed URL");
+  const dropdown = env.findDropdown();
+  assert.equal(dropdown.style.display, "block");
+  assert.match(dropdownText(env), /Open the video's own page \(click the video\), then press Download/);
+  const retry = dropdown.children.find(
+    (c) => c.tagName === "BUTTON" && c.textContent === "Try again",
+  );
+  assert.equal(retry, undefined, "no Try again — there is nothing to retry");
+});
+
+test("the auto-shown button picks the visible playing video, not the first scanned (Round 83)", async () => {
+  const FEED = "https://www.tiktok.com/foryou?lang=en";
+  const env = loadContent({ pageUrl: FEED });
+  // The neighbour slide's video is scanned first but sits
+  // below the viewport; the playing video spans the middle
+  // band. The old code showed the button for the first one.
+  const neighbour = env.makeVideo("", {
+    videoWidth: 720,
+    videoHeight: 1280,
+    source: false,
+    rect: { left: 100, top: 900, right: 500, bottom: 1200, width: 400, height: 300 },
+  });
+  const playing = env.makeVideo("", {
+    videoWidth: 720,
+    videoHeight: 1280,
+    source: false,
+    rect: { left: 100, top: 200, right: 500, bottom: 700, width: 400, height: 500 },
+  });
+  env.addVideo(neighbour);
+  env.addVideo(playing);
+  env.fireDocumentEvent("loadedmetadata", { target: neighbour });
+  env.fireDocumentEvent("loadedmetadata", { target: playing });
+  env.fireMutation();
+  await tick(300);
+  const button = env.findButton();
+  assert.ok(button, "a button is shown");
+  assert.notEqual(button.style.display, "none");
+  // The button is glued to the playing video's top-right
+  // corner (top + 12), not the neighbour's (900 + 12).
+  assert.equal(button.style.top, "212px");
+});

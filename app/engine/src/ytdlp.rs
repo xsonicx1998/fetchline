@@ -30,7 +30,7 @@
 //! being resolved (written to a temp Netscape file, deleted on
 //! drop, never logged).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -153,6 +153,186 @@ pub fn clean_windows_path(p: &Path) -> String {
         rest.to_string()
     } else {
         s
+    }
+}
+
+/// Round 83 — the direct yt-dlp download's format selector:
+/// the exact format id first, then a fallback chain. A
+/// format id can differ between extractions (TikTok's do), so
+/// `-f <id>` alone fails with "Requested format is not
+/// available" when the re-extraction returns a different id;
+/// the chain falls back to the best mp4, then the best format,
+/// instead of exiting 1. An id that already IS a selector
+/// (contains '/') is left alone.
+pub fn direct_download_format_selector(format_id: &str) -> String {
+    let id = format_id.trim();
+    if id.is_empty() {
+        return "b[ext=mp4]/b".to_string();
+    }
+    if id.contains('/') {
+        return id.to_string();
+    }
+    format!("{id}/b[ext=mp4]/b")
+}
+
+/// Round 83 — redact a yt-dlp argv / output tail before it is
+/// logged or shown: URL query strings are cut (signed stream
+/// URLs carry tokens) and temp cookie-file paths are masked
+/// (the file itself is deleted on drop, but its name must
+/// never appear in a log). Local save paths are left alone.
+pub fn redact_ytdlp_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut start = 0;
+    for (i, c) in text.char_indices() {
+        if c.is_whitespace() {
+            if start < i {
+                out.push_str(&redact_ytdlp_token(&text[start..i]));
+            }
+            out.push(c);
+            start = i + c.len_utf8();
+        }
+    }
+    if start < text.len() {
+        out.push_str(&redact_ytdlp_token(&text[start..]));
+    }
+    out
+}
+
+fn redact_ytdlp_token(token: &str) -> String {
+    if token.contains(YTDLP_COOKIE_FILE_PREFIX) {
+        return "<cookies-file>".to_string();
+    }
+    if let Some(scheme) = token.find("://") {
+        if let Some(q) = token[scheme..].find('?') {
+            let cut = scheme + q;
+            return format!("{}?...", &token[..cut]);
+        }
+    }
+    token.to_string()
+}
+
+/// Round 83 — parse a `Cookie` header value ("a=b; c=d") back
+/// into name/value pairs for a temp Netscape file. Splits on
+/// the FIRST '=' (values may contain '=' — base64 padding),
+/// trims whitespace, skips empty names. Validation happens in
+/// `write_cookies_tempfile` (via `cookies_to_header`), so an
+/// invalid pair is an error there, never silently dropped.
+pub fn cookie_header_to_pairs(header: &str) -> Vec<CookiePair> {
+    header
+        .split(';')
+        .filter_map(|part| {
+            let part = part.trim();
+            if part.is_empty() {
+                return None;
+            }
+            let (name, value) = match part.split_once('=') {
+                Some((n, v)) => (n.trim(), v.trim()),
+                None => (part, ""),
+            };
+            if name.is_empty() {
+                return None;
+            }
+            Some(CookiePair {
+                name: name.to_string(),
+                value: value.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Round 83 — the last lines of a yt-dlp run's stdout and
+/// stderr, kept in ring buffers so a failed run can say WHY it
+/// failed instead of only its exit code. Both streams are
+/// kept: yt-dlp prints `[download]` progress to STDOUT
+/// (verified live with yt-dlp 2026.10.26: one `[download]`
+/// line on stdout, zero on stderr for a local download) while
+/// errors go to stderr — the old code drained stdout and
+/// discarded it and parsed only stderr for progress, so
+/// progress never updated on the direct path and the stderr
+/// tail was lost with it.
+pub const YTDLP_TAIL_LINES: usize = 40;
+
+#[derive(Debug, Default)]
+pub struct YtDlpOutputTail {
+    stdout: VecDeque<String>,
+    stderr: VecDeque<String>,
+}
+
+impl YtDlpOutputTail {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn push_stdout(&mut self, line: &str) {
+        if self.stdout.len() >= YTDLP_TAIL_LINES {
+            self.stdout.pop_front();
+        }
+        self.stdout.push_back(line.to_string());
+    }
+
+    pub fn push_stderr(&mut self, line: &str) {
+        if self.stderr.len() >= YTDLP_TAIL_LINES {
+            self.stderr.pop_front();
+        }
+        self.stderr.push_back(line.to_string());
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.stdout.is_empty() && self.stderr.is_empty()
+    }
+
+    /// The full tail for the log: stderr first (the verdict),
+    /// then stdout.
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        if !self.stderr.is_empty() {
+            out.push_str("--- stderr (last lines) ---\n");
+            for line in &self.stderr {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        if !self.stdout.is_empty() {
+            out.push_str("--- stdout (last lines) ---\n");
+            for line in &self.stdout {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        out.trim_end().to_string()
+    }
+
+    /// The text the failure is mapped from: the stderr lines
+    /// (the verdict lives there), falling back to stdout when
+    /// stderr is empty. The combined `render` (with its
+    /// "--- stderr ---" / "--- stdout ---" headers) must never
+    /// be mapped — its headers would leak into the user message.
+    pub fn error_text(&self) -> String {
+        if self.stderr.is_empty() {
+            self.stdout.iter().cloned().collect::<Vec<_>>().join("\n")
+        } else {
+            self.stderr.iter().cloned().collect::<Vec<_>>().join("\n")
+        }
+    }
+
+    /// The short tail for the error message: the last stderr
+    /// lines, falling back to stdout when stderr is empty.
+    pub fn render_short(&self) -> String {
+        let lines: &VecDeque<String> = if self.stderr.is_empty() {
+            &self.stdout
+        } else {
+            &self.stderr
+        };
+        lines
+            .iter()
+            .rev()
+            .take(8)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 
@@ -283,7 +463,12 @@ impl YtDlpError {
                     .to_string()
             }
             YtDlpErrorKind::BotBlocked => {
-                "YouTube is blocking this video on this connection. It plays in your browser, but the download can't reach it right now."
+                // Round 83 — the cloud-server hint: this is
+                // expected datacenter-IP behaviour (Looney Tunes
+                // Fg_KxhW8-PY, C-IXI604uJ4, 4GzCcun60TQ all
+                // bot-blocked from the VPS even WITH cookies);
+                // no proxy / PO-token workaround is built.
+                "YouTube is blocking this video on this connection. It plays in your browser, but the download can't reach it right now. This is common on cloud servers; it normally works on a home connection."
                     .to_string()
             }
             YtDlpErrorKind::VideoUnavailable => {
@@ -368,7 +553,10 @@ pub fn map_error(stderr: &str) -> YtDlpError {
     if has("confirm you're not a bot") || has("not a bot") {
         return err(
             YtDlpErrorKind::BotBlocked,
-            "YouTube is blocking this video on this connection.",
+            // Round 83 — the cloud-server hint (same text as
+            // user_message): expected datacenter-IP behaviour,
+            // normally fine on a home connection.
+            "YouTube is blocking this video on this connection. This is common on cloud servers; it normally works on a home connection.",
         );
     }
     // Round 82 — an unavailable video is checked BEFORE the
@@ -2006,6 +2194,26 @@ mod tests {
             map_error("ERROR: Private video").user_message(),
             "This video is private or has been removed."
         );
+        // Round 83 — a bot block carries the cloud-server hint
+        // in both texts: the mapped detail (what the extension
+        // shows via the host) and the user message (in-app).
+        let blocked =
+            map_error("ERROR: [youtube] dQw4w9WgXcQ: Sign in to confirm you're not a bot.");
+        assert_eq!(blocked.kind, YtDlpErrorKind::BotBlocked);
+        assert!(
+            blocked
+                .message
+                .contains("common on cloud servers; it normally works on a home connection"),
+            "the mapped bot-block detail must carry the hint: {}",
+            blocked.message
+        );
+        assert!(
+            blocked
+                .user_message()
+                .contains("common on cloud servers; it normally works on a home connection"),
+            "the bot-block user message must carry the hint: {}",
+            blocked.user_message()
+        );
         assert_eq!(
             map_error("ERROR: Signature extraction failed").user_message(),
             "This site changed. Updating the video component may fix it."
@@ -2140,6 +2348,94 @@ mod tests {
         assert!(write_cookies_tempfile("example.com", &bad).is_err());
         // No host, no file.
         assert!(write_cookies_tempfile("", &pairs).is_err());
+    }
+
+    #[test]
+    fn direct_download_format_selector_falls_back_but_keeps_selectors() {
+        // Round 83 — a bare id gets the fallback chain; a
+        // DASH pair keeps its '+' and gets the chain too.
+        assert_eq!(
+            direct_download_format_selector("download_addr-0"),
+            "download_addr-0/b[ext=mp4]/b"
+        );
+        assert_eq!(
+            direct_download_format_selector("137+140"),
+            "137+140/b[ext=mp4]/b"
+        );
+        // An id that already is a selector is left alone.
+        assert_eq!(direct_download_format_selector("137/best"), "137/best");
+        assert_eq!(direct_download_format_selector(""), "b[ext=mp4]/b");
+    }
+
+    #[test]
+    fn redact_ytdlp_text_cuts_query_strings_and_masks_cookie_files() {
+        let redacted = redact_ytdlp_text(
+            "yt-dlp --cookies C:\\Users\\x\\AppData\\Local\\Temp\\fetchline-ytdlp-cookies-abc.txt -- https://example.com/video?token=secret&x=1",
+        );
+        assert!(!redacted.contains("token=secret"));
+        assert!(!redacted.contains("fetchline-ytdlp-cookies-abc"));
+        assert!(redacted.contains("<cookies-file>"));
+        assert!(redacted.contains("https://example.com/video?..."));
+        // Local save paths are left alone.
+        assert_eq!(
+            redact_ytdlp_text(r"C:\Users\x\Downloads\video.mp4"),
+            r"C:\Users\x\Downloads\video.mp4"
+        );
+    }
+
+    #[test]
+    fn cookie_header_to_pairs_splits_on_the_first_equals() {
+        let pairs = cookie_header_to_pairs("session=abc=def; consent=yes; empty=");
+        assert_eq!(pairs.len(), 3);
+        assert_eq!(pairs[0].name, "session");
+        assert_eq!(pairs[0].value, "abc=def");
+        assert_eq!(pairs[1].name, "consent");
+        assert_eq!(pairs[1].value, "yes");
+        assert_eq!(pairs[2].name, "empty");
+        assert_eq!(pairs[2].value, "");
+        assert!(cookie_header_to_pairs("").is_empty());
+        assert!(cookie_header_to_pairs("  ;  ").is_empty());
+    }
+
+    #[test]
+    fn output_tail_keeps_the_last_40_lines_per_stream() {
+        let mut tail = YtDlpOutputTail::new();
+        for i in 0..45 {
+            tail.push_stderr(&format!("err {i}"));
+            tail.push_stdout(&format!("out {i}"));
+        }
+        let rendered = tail.render();
+        // The first 5 lines of each stream fell off the ring.
+        assert!(!rendered.contains("err 4\n"));
+        assert!(rendered.contains("err 5\n"));
+        assert!(rendered.contains("err 44\n"));
+        assert!(!rendered.contains("out 4\n"));
+        // "out 44" is the last line, and render() trims the
+        // trailing newline, so it ends the string (no "\n").
+        assert!(rendered.ends_with("out 44"));
+        // The short tail is the last 8 stderr lines.
+        assert_eq!(
+            tail.render_short(),
+            "err 37\nerr 38\nerr 39\nerr 40\nerr 41\nerr 42\nerr 43\nerr 44"
+        );
+        // With stderr empty, the short tail falls back to stdout.
+        let mut tail2 = YtDlpOutputTail::new();
+        tail2.push_stdout("[download] 42.1% of 10.00MiB");
+        assert_eq!(tail2.render_short(), "[download] 42.1% of 10.00MiB");
+        // error_text maps stderr only (no "--- stdout ---" header
+        // in the user message); with stderr empty it is stdout.
+        // It is the whole kept stderr ring (lines 0-4 fell off),
+        // not the last 8 — map_error takes its own last 3 lines.
+        assert_eq!(
+            tail.error_text(),
+            (5..45)
+                .map(|i| format!("err {i}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        assert_eq!(tail2.error_text(), "[download] 42.1% of 10.00MiB");
+        assert!(YtDlpOutputTail::new().is_empty());
+        assert_eq!(YtDlpOutputTail::new().render(), "");
     }
 
     #[test]

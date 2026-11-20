@@ -202,6 +202,8 @@
     typeof videoPageUrlFromElement === "function"
       ? videoPageUrlFromElement
       : VD.videoPageUrlFromElement || null;
+  const isFeedPageUrlFn =
+    typeof isFeedPageUrl === "function" ? isFeedPageUrl : VD.isFeedPageUrl || (() => false);
   const createResolveCacheFn =
     typeof createResolveCache === "function" ? createResolveCache : VD.createResolveCache || null;
 
@@ -719,23 +721,39 @@
   // dropdown shows "Checking…" first; if the user closes it
   // while the read is in flight, no resolve starts at all (a
   // late reply would otherwise pop the dropdown back open).
-  // Round 81 — the URL a resolve runs for: the playing
+  // Round 83 — the URL a resolve runs for: the playing
   // video's own page when the element sits inside a link to
   // one (a TikTok feed slide links to its video page), else
   // the page URL itself (a YouTube watch page already is the
   // video page). The resolve cache, the consent host and the
   // cookie fetch all use this URL, so two feed videos never
-  // share one cached list.
+  // share one cached list. On a FEED page with no derivable
+  // video id this returns null — the feed URL itself must
+  // NEVER be sent to the resolver (it answers "not a
+  // supported video page"); the caller shows the guidance
+  // message instead.
+  const FEED_NO_VIDEO_MESSAGE =
+    "Open the video's own page (click the video), then press Download.";
   function pageUrlForResolve(video) {
     if (videoPageUrlFromElementFn) {
-      return videoPageUrlFromElementFn(video) || location.href;
+      const url = videoPageUrlFromElementFn(video);
+      if (url) return url;
     }
+    if (isFeedPageUrlFn(location.href)) return null;
     return location.href;
   }
 
   async function openResolveDropdown(video) {
     if (activeResolve && activeResolve.video === video) return;
     const resolveUrl = pageUrlForResolve(video);
+    // Round 83 — a feed page with no derivable video id: never
+    // start a resolve for the feed URL; tell the user to open
+    // the video's own page instead. No "Try again" — there is
+    // nothing to retry until the page changes.
+    if (!resolveUrl) {
+      renderResolveError(video, FEED_NO_VIDEO_MESSAGE, false);
+      return;
+    }
     const cached = resolveCache.get(normalizePageUrlFn(resolveUrl));
     if (cached) {
       renderResolved(video, cached);
@@ -757,7 +775,7 @@
       }
     }
     if (!dropdown || dropdown.style.display === "none" || dropdown._video !== video) return;
-    startResolve(video, { withCookies, cookies, onResolved: null });
+    startResolve(video, { withCookies, cookies, onResolved: null, resolveUrl });
   }
 
   function renderResolveLoading(video) {
@@ -913,7 +931,16 @@
     dropdown.style.display = "block";
   }
 
-  function startResolve(video, { withCookies, cookies, onResolved }) {
+  function startResolve(video, { withCookies, cookies, onResolved, resolveUrl }) {
+    // Round 83 — the caller may already know the resolve URL
+    // (openResolveDropdown computed it); otherwise derive it
+    // here. A null URL (feed page, no video id) never starts
+    // a resolve — show the guidance instead.
+    const url = resolveUrl || pageUrlForResolve(video);
+    if (!url) {
+      renderResolveError(video, FEED_NO_VIDEO_MESSAGE, false);
+      return;
+    }
     const requestId =
       typeof crypto !== "undefined" && crypto.randomUUID
         ? crypto.randomUUID()
@@ -935,7 +962,7 @@
       requestId,
       port,
       video,
-      pageUrl: pageUrlForResolve(video),
+      pageUrl: url,
       withCookies: withCookies === true,
       cookies: cookies || [],
       onResolved: onResolved || null,
@@ -958,7 +985,7 @@
     }
     port.postMessage({
       type: "resolve_video",
-      page_url: pageUrlForResolve(video),
+      page_url: url,
       request_id: requestId,
       with_cookies: withCookies === true,
       cookies: cookies || [],
@@ -1237,6 +1264,41 @@
     );
   }
 
+  // Round 83 — the video that is actually visible and
+  // playing: a feed keeps neighbour slides' <video> elements
+  // in the DOM (the /foryou dump saw 2), so the auto-show path
+  // must not take the first scanned video — it may be a
+  // neighbour's. A video counts when its rect spans the
+  // viewport's vertical middle band and is wide enough; among
+  // those, a playing one beats a paused one, and the most
+  // centred wins. Returns null when nothing matches, and the
+  // caller falls back to the first video (the old behaviour).
+  function pickVisiblePlayingVideo() {
+    const vh = window.innerHeight || 0;
+    let best = null;
+    let bestScore = -1;
+    const consider = (video) => {
+      let r = null;
+      try {
+        r = video.getBoundingClientRect();
+      } catch {
+        return;
+      }
+      if (!r || r.width <= 100) return;
+      if (!(r.top < vh * 0.6 && r.bottom > vh * 0.4)) return;
+      let score = video.paused ? 0 : 2;
+      const cy = r.top + r.height / 2;
+      score += 1 - Math.abs(cy - vh / 2) / (vh / 2 || 1);
+      if (score > bestScore) {
+        bestScore = score;
+        best = video;
+      }
+    };
+    for (const [video] of byElement) consider(video);
+    for (const video of resolveOnly) consider(video);
+    return best;
+  }
+
   // Round 73 — re-scan helpers. A rescan updates the map in
   // place (scanAndAttach is idempotent, button/dropdown are
   // singletons) and shows the button ONLY when none is
@@ -1246,6 +1308,11 @@
   function maybeShowFirst() {
     if (allowedResolved && !allowed) return;
     if (button && button.style.display !== "none") return;
+    const visible = pickVisiblePlayingVideo();
+    if (visible) {
+      showButton(visible);
+      return;
+    }
     for (const [video, variants] of byElement) {
       if (variants.length > 0) {
         showButton(video);
@@ -1433,10 +1500,15 @@
       // History unwrappable here: rescans still catch the move.
     }
     window.addEventListener("popstate", () => notePageUrlChanged());
-    for (const [video, variants] of byElement) {
-      if (variants.length > 0) {
-        showButton(video);
-        break;
+    const visible = pickVisiblePlayingVideo();
+    if (visible) {
+      showButton(visible);
+    } else {
+      for (const [video, variants] of byElement) {
+        if (variants.length > 0) {
+          showButton(video);
+          break;
+        }
       }
     }
     // Round 78 — show the button immediately for the first

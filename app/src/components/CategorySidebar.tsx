@@ -37,6 +37,14 @@ interface CategorySidebarProps {
   onDeleteQueue?: (queue: QueueRow) => void
   /** Round 74 (6) — rename a queue. */
   onRenameQueue?: (queue: QueueRow, name: string) => void
+  /** Round 83 — rename a grabber project (mirrors the queue
+   *  rename: inline input, Enter / blur commits, Escape
+   *  cancels). */
+  onRenameGrabber?: (project: GrabberProjectRow, name: string) => void
+  /** Round 83 — delete a grabber project (asks first, like a
+   *  queue; the backend refuses a running project and keeps
+   *  its downloads, untagged). */
+  onDeleteGrabber?: (project: GrabberProjectRow) => void
   /** A download row was dropped on a category or queue. */
   onDropDownload: (downloadId: string, target: { kind: 'category' | 'queue'; id: string }) => void
 }
@@ -70,6 +78,8 @@ export function CategorySidebar({
   onSyncQueue,
   onDeleteQueue,
   onRenameQueue,
+  onRenameGrabber,
+  onDeleteGrabber,
   onDropDownload,
 }: CategorySidebarProps) {
   const [dropTarget, setDropTarget] = useState<string | null>(null)
@@ -79,11 +89,24 @@ export function CategorySidebar({
   const [renameValue, setRenameValue] = useState('')
   /** Round 74 (6) — the queue awaiting delete confirmation. */
   const [confirmDeleteQueue, setConfirmDeleteQueue] = useState<QueueRow | null>(null)
+  /** Round 83 — the grabber project being renamed inline, and
+   *  the one awaiting delete confirmation (same pattern as the
+   *  queues above; the ids live in separate state so a grabber
+   *  and a queue can never share a rename). */
+  const [renamingGrabberId, setRenamingGrabberId] = useState<string | null>(null)
+  const [renameGrabberValue, setRenameGrabberValue] = useState('')
+  const [confirmDeleteGrabber, setConfirmDeleteGrabber] = useState<GrabberProjectRow | null>(null)
 
   function commitRename(queue: QueueRow) {
     const name = renameValue.trim()
     setRenamingId(null)
     if (name && name !== queue.name) onRenameQueue?.(queue, name)
+  }
+
+  function commitRenameGrabber(project: GrabberProjectRow) {
+    const name = renameGrabberValue.trim()
+    setRenamingGrabberId(null)
+    if (name && name !== project.name) onRenameGrabber?.(project, name)
   }
 
   const countFor = (id: string | null) =>
@@ -240,35 +263,75 @@ export function CategorySidebar({
         const active = selectedFilter === 'grabber' && selectedGrabberId === p.id
         return (
           <div key={p.id} className="group relative flex items-center gap-1">
-            <button
-              type="button"
-              onClick={() => onSelectFilter('grabber', p.id)}
-              aria-current={active || undefined}
-              title={`${p.name} — ${p.files_downloaded} downloaded, ${p.files_matched} matched`}
-              className={`${rowClass(active, `grabber:${p.id}`)} flex-1`}
-            >
-              <PackIcon name="grabber" className="h-5 w-5 icon-glow-cyan" />
-              <span className="flex-1 truncate">{p.name}</span>
-              <span className={countClass(active, true)}>
-                {p.files_downloaded} file{p.files_downloaded === 1 ? '' : 's'}
-              </span>
-              {running ? (
-                <span className="shrink-0 rounded-full bg-info px-2 py-0.5 text-xs font-semibold text-bg transition-opacity group-hover:opacity-0">
-                  Running
-                </span>
-              ) : null}
-            </button>
-            {running ? null : (
+            {renamingGrabberId === p.id ? (
+              <input
+                autoFocus
+                value={renameGrabberValue}
+                onChange={(e) => setRenameGrabberValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') commitRenameGrabber(p)
+                  else if (e.key === 'Escape') setRenamingGrabberId(null)
+                }}
+                onBlur={() => commitRenameGrabber(p)}
+                aria-label={`Rename grabber project ${p.name}`}
+                className="h-9 min-w-0 flex-1 rounded-md border border-accent bg-surface px-2 text-base text-text focus:outline-none"
+              />
+            ) : (
               <button
                 type="button"
-                onClick={() => onRunGrabber(p.id)}
-                aria-label={`Run grabber project ${p.name}`}
-                title={`Run ${p.name}`}
-                className="absolute right-1 top-1/2 z-10 -translate-y-1/2 rounded-md p-1 text-text-muted opacity-0 hover:bg-surface-2 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
+                onClick={() => onSelectFilter('grabber', p.id)}
+                aria-current={active || undefined}
+                title={`${p.name} — ${p.files_downloaded} downloaded, ${p.files_matched} matched`}
+                className={`${rowClass(active, `grabber:${p.id}`)} flex-1`}
               >
-                <Play className="h-4 w-4" aria-hidden="true" />
+                <PackIcon name="grabber" className="h-5 w-5 icon-glow-cyan" />
+                <span className="flex-1 truncate">{p.name}</span>
+                <span className={countClass(active, true)}>
+                  {p.files_downloaded} file{p.files_downloaded === 1 ? '' : 's'}
+                </span>
+                {running ? (
+                  <span className="shrink-0 rounded-full bg-info px-2 py-0.5 text-xs font-semibold text-bg transition-opacity group-hover:opacity-0">
+                    Running
+                  </span>
+                ) : null}
               </button>
             )}
+            <div className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+              {running ? null : (
+                <button
+                  type="button"
+                  onClick={() => onRunGrabber(p.id)}
+                  aria-label={`Run grabber project ${p.name}`}
+                  title={`Run ${p.name}`}
+                  className="rounded-md p-1 text-text-muted hover:bg-surface-2 focus-visible:opacity-100"
+                >
+                  <Play className="h-4 w-4" aria-hidden="true" />
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  setRenameGrabberValue(p.name)
+                  setRenamingGrabberId(p.id)
+                }}
+                aria-label={`Rename grabber project ${p.name}`}
+                title={`Rename ${p.name}`}
+                className="rounded-md p-1 text-text-muted hover:bg-surface-2 focus-visible:opacity-100"
+              >
+                <Pencil className="h-4 w-4" aria-hidden="true" />
+              </button>
+              {running ? null : (
+                <button
+                  type="button"
+                  onClick={() => setConfirmDeleteGrabber(p)}
+                  aria-label={`Delete grabber project ${p.name}`}
+                  title={`Delete ${p.name}`}
+                  className="rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-danger focus-visible:opacity-100"
+                >
+                  <Trash2 className="h-4 w-4" aria-hidden="true" />
+                </button>
+              )}
+            </div>
           </div>
         )
       })}
@@ -390,6 +453,25 @@ export function CategorySidebar({
           if (q) onDeleteQueue?.(q)
         }}
         onCancel={() => setConfirmDeleteQueue(null)}
+      />
+      {/* Round 83 — delete a grabber project asks first; its
+          downloads are kept, untagged. */}
+      <ConfirmDialog
+        open={confirmDeleteGrabber !== null}
+        title="Delete this grabber project?"
+        message={
+          confirmDeleteGrabber
+            ? `“${confirmDeleteGrabber.name}” will be deleted. Its downloads stay in the list.`
+            : ''
+        }
+        confirmLabel="Delete project"
+        cancelLabel="Keep it"
+        onConfirm={() => {
+          const p = confirmDeleteGrabber
+          setConfirmDeleteGrabber(null)
+          if (p) onDeleteGrabber?.(p)
+        }}
+        onCancel={() => setConfirmDeleteGrabber(null)}
       />
     </nav>
   )

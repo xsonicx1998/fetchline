@@ -37,6 +37,8 @@ import {
   redownloadDownload,
   reloadWebviewWindow,
   removeFromQueue,
+  renameGrabberProject,
+  deleteGrabberProject,
   renameQueue,
   resumeDownload,
   runGrabber,
@@ -1183,6 +1185,17 @@ export default function App() {
           }
           onOpenScheduler={(queueId) => openScheduler(queueId)}
           onRunGrabber={(projectId) => void run(() => runGrabber(projectId))}
+          onRenameGrabber={(project, name) =>
+            void run(() => renameGrabberProject(project.id, name).then(() => void refreshGrabberProjects()))
+          }
+          onDeleteGrabber={(project) =>
+            void run(() =>
+              deleteGrabberProject(project.id).then(() => {
+                if (selectedGrabberId === project.id) selectFilter('all')
+                return void refreshGrabberProjects()
+              }),
+            )
+          }
           onNewGrabber={() => setShowSiteGrabber(true)}
           onSyncQueue={(queueId) => void run(() => syncQueueNow(queueId).then(() => undefined))}
           onDropDownload={(downloadId, target) => void handleDropDownload(downloadId, target)}

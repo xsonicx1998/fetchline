@@ -16,9 +16,15 @@ import './index.css'
  *  React `onContextMenu` handler on the download rows
  *  (DownloadTable's RowMenu), which runs before this listener
  *  and draws its own DOM menu; it never needs the native one.
- *  No other component relies on the native menu (text fields
- *  keep keyboard copy/paste). */
+ *  Round 83 — the blanket suppression also killed Paste in
+ *  text fields (the Add URL field had no right-click menu at
+ *  all, R82 retest): when the click lands inside an input,
+ *  textarea or contenteditable element the native menu is
+ *  left alone, so WebView2's own menu offers Cut / Copy /
+ *  Paste there. Everywhere else the menu stays suppressed. */
 document.addEventListener('contextmenu', (e) => {
+  const target = e.target as HTMLElement | null
+  if (target?.closest('input, textarea, [contenteditable]')) return
   e.preventDefault()
 })
 

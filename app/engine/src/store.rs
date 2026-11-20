@@ -1440,6 +1440,46 @@ impl Store {
         Ok(())
     }
 
+    /// Rename a grabber project (Round 83 — the R82 retest
+    /// confirmed projects could not be renamed). The name is
+    /// trimmed; an empty name is rejected, an unknown id is
+    /// NotFound. Renaming a running project is allowed — the
+    /// name is display-only, the run keys on the id.
+    pub fn rename_grabber_project(&self, id: &str, name: &str) -> Result<GrabberProjectRow> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(EngineError::InvalidState(
+                "A grabber project needs a name".to_string(),
+            ));
+        }
+        let conn = self.lock_conn();
+        let changed = conn.execute(
+            "UPDATE grabber_projects SET name = ?1, updated_at = datetime('now') WHERE id = ?2",
+            params![name, id],
+        )?;
+        if changed == 0 {
+            return Err(EngineError::NotFound(id.to_string()));
+        }
+        drop(conn);
+        self.get_grabber_project(id)?
+            .ok_or_else(|| EngineError::NotFound(id.to_string()))
+    }
+
+    /// Delete a grabber project (Round 83 — the R82 retest
+    /// confirmed projects could not be deleted). Its downloads
+    /// are NOT deleted: the schema's `ON DELETE SET NULL`
+    /// untags them, so they stay in the main list. A running
+    /// project is refused by the manager, not here — the store
+    /// just deletes the row, and an unknown id is NotFound.
+    pub fn delete_grabber_project(&self, id: &str) -> Result<()> {
+        let conn = self.lock_conn();
+        let changed = conn.execute("DELETE FROM grabber_projects WHERE id = ?1", params![id])?;
+        if changed == 0 {
+            return Err(EngineError::NotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
     /// Tag a download as belonging to a grabber project, so the main
     /// list can show where it came from. Called right after
     /// `add_download` creates the row — the add path itself is

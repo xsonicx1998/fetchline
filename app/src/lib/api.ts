@@ -549,6 +549,14 @@ export async function listGrabberProjects(): Promise<GrabberProjectRow[]> {
   return invoke<GrabberProjectRow[]>('list_grabber_projects')
 }
 
+export async function renameGrabberProject(id: string, name: string): Promise<GrabberProjectRow> {
+  return invoke<GrabberProjectRow>('rename_grabber_project', { id, name })
+}
+
+export async function deleteGrabberProject(id: string): Promise<void> {
+  return invoke('delete_grabber_project', { id })
+}
+
 export async function addBatch(args: {
   urls: string[]
   folder?: string | null

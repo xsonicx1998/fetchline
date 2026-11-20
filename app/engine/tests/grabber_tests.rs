@@ -1098,3 +1098,134 @@ fn pre_milestone4_database_migrates_grabber_projects() {
     assert_eq!(old.on_complete_program, None);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// -- Round 83 — rename / delete -----------------------------------
+// The R82 retest confirmed grabber projects could neither be
+// renamed nor deleted (the backend had only create / run /
+// stop / get / list).
+
+#[test]
+fn rename_grabber_project_changes_the_name_only() {
+    let dir = tmpdir();
+    let mgr = test_mgr(&dir);
+    let p = mgr
+        .create_grabber_project(
+            "old",
+            "http://127.0.0.1/",
+            &types(&["image"]),
+            2,
+            200,
+            "download",
+            None,
+        )
+        .unwrap();
+    let renamed = mgr.rename_grabber_project(&p.id, "  new name  ").unwrap();
+    assert_eq!(renamed.name, "new name", "the name is trimmed");
+    assert_eq!(renamed.id, p.id);
+    assert_eq!(renamed.start_url, p.start_url);
+    assert_eq!(renamed.status, p.status);
+    let listed = mgr.list_grabber_projects().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].name, "new name");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn rename_grabber_project_rejects_an_empty_name_and_an_unknown_id() {
+    let dir = tmpdir();
+    let mgr = test_mgr(&dir);
+    let p = mgr
+        .create_grabber_project(
+            "old",
+            "http://127.0.0.1/",
+            &types(&["image"]),
+            2,
+            200,
+            "download",
+            None,
+        )
+        .unwrap();
+    assert!(
+        mgr.rename_grabber_project(&p.id, "   ").is_err(),
+        "an empty name must be rejected"
+    );
+    assert!(
+        mgr.rename_grabber_project("no-such-id", "x").is_err(),
+        "an unknown id must be rejected"
+    );
+    assert_eq!(
+        mgr.get_grabber_project(&p.id).unwrap().unwrap().name,
+        "old",
+        "a rejected rename must not change the name"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn delete_grabber_project_keeps_its_downloads_untagged() {
+    let dir = tmpdir();
+    let mgr = test_mgr(&dir);
+    let server = MockServer::start(MockConfig {
+        ..Default::default()
+    });
+    let (dl, _) = mgr
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let p = mgr
+        .create_grabber_project(
+            "p",
+            "http://127.0.0.1/",
+            &types(&["image"]),
+            2,
+            200,
+            "download",
+            None,
+        )
+        .unwrap();
+    mgr.store()
+        .set_download_grabber_project(&dl, &p.id)
+        .unwrap();
+    assert_eq!(
+        mgr.get_download(&dl).unwrap().unwrap().grabber_project_id,
+        Some(p.id.clone())
+    );
+    mgr.delete_grabber_project(&p.id).await.unwrap();
+    assert!(mgr.get_grabber_project(&p.id).unwrap().is_none());
+    assert!(mgr.list_grabber_projects().unwrap().is_empty());
+    // The download survives, untagged (schema ON DELETE SET NULL).
+    let row = mgr.get_download(&dl).unwrap().unwrap();
+    assert_eq!(row.grabber_project_id, None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn delete_grabber_project_rejects_an_unknown_id_and_a_running_project() {
+    let dir = tmpdir();
+    let mgr = test_mgr(&dir);
+    assert!(
+        mgr.delete_grabber_project("no-such-id").await.is_err(),
+        "an unknown id must be rejected"
+    );
+    let site = GrabberSite::start(RobotsMode::None);
+    let p = mgr
+        .create_grabber_project("p", &site.page_url, &all_types(), 2, 200, "explore", None)
+        .unwrap();
+    mgr.run_grabber(&p.id).await.unwrap();
+    assert!(
+        mgr.delete_grabber_project(&p.id).await.is_err(),
+        "a running project must not be deleted under its run"
+    );
+    // Once the run finishes, the same project deletes fine.
+    let done = wait_grabber(&mgr, &p.id, 30).await;
+    assert_eq!(done.status, "done");
+    mgr.delete_grabber_project(&p.id).await.unwrap();
+    assert!(mgr.get_grabber_project(&p.id).unwrap().is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
