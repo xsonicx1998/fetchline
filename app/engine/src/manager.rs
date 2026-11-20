@@ -2296,6 +2296,24 @@ impl DownloadManager {
                 if let Some(kbps) = speed_limit_kbps.filter(|k| *k > 0) {
                     let _ = self.set_download_speed_limit(&download_id, Some(kbps));
                 }
+                // Round 79 — a DASH pair saved for later keeps
+                // its audio: create the children eagerly (linked,
+                // merge pending) so a later start finds the pair
+                // instead of downloading the video half alone. A
+                // child-creation failure is logged, never fatal —
+                // the parent still exists and starts as a plain
+                // file.
+                if !row.fragmented {
+                    if let Some(audio_url) =
+                        row.audio_url.as_deref().filter(|u| !u.trim().is_empty())
+                    {
+                        if let Err(e) = self.ensure_dash_children(&download_id, audio_url).await {
+                            let _ = self.store.log(&format!(
+                                "confirm {download_id}: could not create the DASH audio part ({e}) — the video will start without it"
+                            ));
+                        }
+                    }
+                }
                 if start_now {
                     // Round 78 — a DASH pair (video + audio) or a
                     // (B) fragmented download does not start as a
@@ -2322,6 +2340,115 @@ impl DownloadManager {
                 Err(e)
             }
         }
+    }
+
+    /// Round 79 — add a download from a resolved platform video
+    /// (the manual Add URL dialog's resolve): the row is one
+    /// `QualityRow` from `ytdlp_resolve` — its stream URL(s),
+    /// headers, format id and fragmented flag. The page URL is
+    /// NEVER downloaded itself: a watch-page URL probes size 0
+    /// with no ranges, and the Round 78 retest showed the manual
+    /// dialog creating exactly that broken download ("watch",
+    /// 0 B, "Server ignored the range request").
+    ///   * fragmented → the (B) direct yt-dlp download (no
+    ///     probe, no segments; yt-dlp downloads the manifest
+    ///     format itself).
+    ///   * DASH pair (audio_url present) → the video stream is
+    ///     the parent and the audio child is created eagerly —
+    ///     even when saved for later — so a later start finds
+    ///     the pair (see `ensure_dash_children`).
+    ///   * otherwise (progressive) → a plain segmented
+    ///     download of the stream URL with the row's headers.
+    /// The resolver metadata (page URL + format id) is recorded
+    /// on the row, like `confirm_pending_link` does, so a
+    /// 403/410 can re-resolve. The speed cap is applied before
+    /// the start, like the confirm path. Returns the created
+    /// download id and its probe info.
+    pub async fn add_resolved_video_download(
+        self: &Arc<Self>,
+        page_url: &str,
+        row: &crate::ytdlp::QualityRow,
+        filename: Option<String>,
+        folder: Option<String>,
+        category_id: Option<String>,
+        queue_id: Option<String>,
+        speed_limit_kbps: Option<i64>,
+        start_now: bool,
+    ) -> Result<(String, ProbeInfo)> {
+        let settings = self.store.get_settings().unwrap_or_default();
+        if !settings.platform_downloads_enabled {
+            return Err(EngineError::InvalidState(
+                "Platform downloads are turned off in Fetchline settings".to_string(),
+            ));
+        }
+        let headers_json = serde_json::to_string(&row.headers).unwrap_or_default();
+        let headers = Self::headers_from_json(Some(&headers_json));
+        let headers = if headers.is_empty() {
+            None
+        } else {
+            Some(headers)
+        };
+        let probe_filename = filename.clone();
+        let (download_id, probe) = if row.fragmented {
+            let id = self
+                .add_direct_ytdlp_download(&row.url, filename, folder, category_id, queue_id)
+                .await?;
+            (
+                id,
+                ProbeInfo {
+                    size: None,
+                    accept_ranges: false,
+                    etag: None,
+                    last_modified: None,
+                    filename: probe_filename,
+                    final_url: row.url.clone(),
+                },
+            )
+        } else {
+            self.add_download_with_cookies_and_headers(
+                &row.url,
+                filename,
+                folder,
+                category_id,
+                queue_id,
+                None,
+                headers,
+            )
+            .await?
+        };
+        let _ = self.store.set_download_ytdlp_meta(
+            &download_id,
+            Some(page_url),
+            Some(&row.format_id),
+            row.fragmented,
+        );
+        if let Some(kbps) = speed_limit_kbps.filter(|k| *k > 0) {
+            let _ = self.set_download_speed_limit(&download_id, Some(kbps));
+        }
+        // A DASH pair saved for later keeps its audio: create
+        // the children eagerly (linked, merge pending) so a
+        // later start finds the pair instead of downloading the
+        // video half alone.
+        let audio_url = row.audio_url.as_deref().filter(|u| !u.trim().is_empty());
+        if !row.fragmented {
+            if let Some(audio_url) = audio_url {
+                if let Err(e) = self.ensure_dash_children(&download_id, audio_url).await {
+                    let _ = self.store.log(&format!(
+                        "resolved add {download_id}: could not create the DASH audio part ({e}) — the video will start without it"
+                    ));
+                }
+            }
+        }
+        if start_now {
+            if row.fragmented {
+                let _ = self.start_direct_ytdlp(&download_id).await;
+            } else if let Some(audio_url) = audio_url {
+                let _ = self.start_dash_download(&download_id, audio_url).await;
+            } else {
+                let _ = self.start_download(&download_id).await;
+            }
+        }
+        Ok((download_id, probe))
     }
 
     /// Expand a page into pending links (S13 Download All without a
@@ -5478,7 +5605,21 @@ impl DownloadManager {
     /// ffmpeg merges the two children. The parent's size is the
     /// sum of the children's sizes, so the table shows the real
     /// total.
-    pub async fn start_dash_download(self: &Arc<Self>, id: &str, audio_url: &str) -> Result<()> {
+    /// Round 79 — make sure a DASH parent has its two children
+    /// (video + audio): create them when they do not exist yet,
+    /// reuse them on resume (their segments and bytes are kept,
+    /// like any resumed download). Linking a child sets the
+    /// parent's merge_status to 'pending', so a parent whose
+    /// children exist is always recognisable as a pair — a later
+    /// start finds the pair instead of downloading the video
+    /// half alone. Used by `start_dash_download` and by the
+    /// resolved-add paths, which create the children eagerly
+    /// even when the download is saved for later.
+    pub async fn ensure_dash_children(
+        self: &Arc<Self>,
+        id: &str,
+        audio_url: &str,
+    ) -> Result<(DownloadRow, DownloadRow)> {
         let parent = self
             .store
             .get_download(id)?
@@ -5489,7 +5630,7 @@ impl DownloadManager {
             ));
         }
         let children = self.store.list_child_downloads(id)?;
-        let (video_child, audio_child) = if children.len() >= 2 {
+        if children.len() >= 2 {
             // Resume: the children already exist — reuse them
             // (their segments and bytes are kept, like any
             // resumed download).
@@ -5502,12 +5643,10 @@ impl DownloadManager {
                 .find(|c| c.child_kind.as_deref() == Some("audio"))
                 .cloned();
             match (video, audio) {
-                (Some(v), Some(a)) => (v, a),
-                _ => {
-                    return Err(EngineError::InvalidState(
-                        "This download's video or audio part is missing".to_string(),
-                    ))
-                }
+                (Some(v), Some(a)) => Ok((v, a)),
+                _ => Err(EngineError::InvalidState(
+                    "This download's video or audio part is missing".to_string(),
+                )),
             }
         } else {
             // Fresh: create the two children next to the parent
@@ -5570,8 +5709,12 @@ impl DownloadManager {
             if total > 0 {
                 let _ = self.store.update_known_remote(id, Some(total), None, None);
             }
-            (video_row, audio_row)
-        };
+            Ok((video_row, audio_row))
+        }
+    }
+
+    pub async fn start_dash_download(self: &Arc<Self>, id: &str, audio_url: &str) -> Result<()> {
+        let (video_child, audio_child) = self.ensure_dash_children(id, audio_url).await?;
         // The parent runs as a pair from here: status
         // 'downloading', merge pending; the supervisor drives it.
         self.store.set_status(id, "downloading", None)?;

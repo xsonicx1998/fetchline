@@ -235,14 +235,30 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
   /** Round 78 — update yt-dlp from its GitHub release (the
    *  engine verifies the SHA-256 checksum before installing).
    *  A failed update reports the reason and leaves the old
-   *  binary in place. */
+   *  binary in place.
+   *
+   *  Round 79 (Bug 3) — the button now shows a status
+   *  IMMEDIATELY on click ("Checking for updates…") instead of
+   *  staying silent until the ~23 MB download finishes, and
+   *  says "already the newest version" when the version did not
+   *  change — in the Round 78 retest the button was clicked
+   *  twice with no visible progress or version change within
+   *  ~10 s. Frontend-only: the update command and its
+   *  signature are unchanged. */
   async function updateYtdlp() {
+    const before = ytdlp?.version ?? null
     setYtdlpUpdating(true)
-    setYtdlpMessage(null)
+    setYtdlpMessage('Checking for updates…')
     try {
       const status = await ytdlpUpdate()
       setYtdlp(status)
-      setYtdlpMessage(status.version ? `yt-dlp updated to ${status.version}.` : 'yt-dlp updated.')
+      if (!status.version) {
+        setYtdlpMessage('yt-dlp updated.')
+      } else if (before !== null && status.version === before) {
+        setYtdlpMessage(`yt-dlp is already the newest version (${status.version}).`)
+      } else {
+        setYtdlpMessage(`yt-dlp updated to ${status.version}.`)
+      }
     } catch (e) {
       setYtdlpMessage(e instanceof Error ? e.message : String(e))
     } finally {

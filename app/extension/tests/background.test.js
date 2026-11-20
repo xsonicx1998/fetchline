@@ -487,6 +487,52 @@ test("a host error reply is forwarded to the content script unchanged", async ()
   assert.equal(port.messages[0].error_kind, "login_required");
 });
 
+// Round 79 — a stale pre-R78 host answers an unknown
+// `resolve_video` message with an error that carries NO
+// request_id; it must reach the content script as this
+// request's error instead of hanging to the 32 s timeout.
+test("an id-less host error reply is delivered as the pending resolve's error (stale host)", async () => {
+  const env = loadBackground();
+  const port = openResolve(env);
+  await tick(20);
+  env.deliverNative(env.nativePorts[0], {
+    type: "error",
+    ok: false,
+    error: "Could not understand the message from the browser: unknown message type 'resolve_video'",
+    needs_login: false,
+    error_kind: "unknown_message",
+  });
+  await tick(20);
+  assert.equal(port.messages.length, 1, "the id-less error reaches the content script instead of hanging to the timeout");
+  assert.equal(port.messages[0].type, "error");
+  assert.match(port.messages[0].error, /Could not understand the message/);
+  assert.equal(port.messages[0].request_id, undefined, "forwarded unchanged — no request_id was attached");
+  assert.equal(env.nativePorts[0].disconnected, true, "the native port closes after the error");
+});
+
+test("a host reply with a present-but-different request_id is still ignored (cross-talk guard)", async () => {
+  const env = loadBackground();
+  const port = openResolve(env);
+  await tick(20);
+  // A resolved reply for another request, an error for another
+  // request, and an id-less resolved reply (only id-less
+  // ERRORS are delivered — see the stale-host test above).
+  env.deliverNative(env.nativePorts[0], {
+    type: "resolved", ok: true, request_id: "req-other", title: "Other", is_live: false, degraded: false, warning: null, formats: [],
+  });
+  env.deliverNative(env.nativePorts[0], {
+    type: "error", ok: false, request_id: "req-other", error: "Nope.", needs_login: false, error_kind: "other",
+  });
+  env.deliverNative(env.nativePorts[0], {
+    type: "resolved", ok: true, title: "No id", is_live: false, degraded: false, warning: null, formats: [],
+  });
+  await tick(20);
+  assert.equal(port.messages.length, 0, "a mismatched request_id is still dropped, as is an id-less resolved reply");
+  // Finish the pending resolve so no 32 s timeout timer lingers.
+  port._onMessage({ type: "cancel_resolve", request_id: "req-1" });
+  await tick(20);
+});
+
 test("the stored extractor-args override is passed through, and only then", async () => {
   const env = loadBackground();
   env.storage.ytdlp_extractor_args = "youtube:player_client=android_vr,tv";

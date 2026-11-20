@@ -3,14 +3,16 @@ import { Plus, X } from 'lucide-react'
 import { open as openFolderPicker } from '@tauri-apps/plugin-dialog'
 import {
   addDownload,
+  addResolvedVideoDownload,
   confirmPendingLink,
   probeUrl,
   setDownloadDescription,
   setDownloadSpeedLimit,
   startDownload,
   updateCategory,
+  ytdlpResolve,
 } from '../lib/api'
-import type { CategoryRow, ProbeInfo } from '../lib/types'
+import type { CategoryRow, ProbeInfo, QualityRow, YtdlpResolveResult } from '../lib/types'
 import { Button } from './Button'
 
 interface AddDownloadDialogProps {
@@ -105,6 +107,55 @@ function joinSaveAs(folder: string, filename: string): string {
   return filename ? `${f}\\${filename}` : `${f}\\`
 }
 
+/** Round 79 — a pasted link that is a platform video page
+ *  (YouTube / TikTok / Instagram / Facebook): the dialog
+ *  resolves it with yt-dlp instead of probing the page itself
+ *  (a watch-page URL probes size 0 with no ranges, and the
+ *  Round 78 retest showed the manual dialog creating exactly
+ *  that broken download). Mirrors the extension's
+ *  `isSupportedPlatform`, with a path hint on YouTube so a
+ *  channel page is not resolved. */
+export function isVideoPageUrl(rawUrl: string): boolean {
+  let parsed: URL
+  try {
+    parsed = new URL(rawUrl.trim())
+  } catch {
+    return false
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false
+  const host = parsed.hostname.toLowerCase().replace(/^www\./, '')
+  if (host === 'youtu.be') return true
+  if (host === 'youtube.com' || host.endsWith('.youtube.com')) {
+    const path = parsed.pathname
+    return (
+      path === '/watch' ||
+      path.startsWith('/watch/') ||
+      path.startsWith('/shorts/') ||
+      path.startsWith('/live/') ||
+      path.startsWith('/embed/') ||
+      path.startsWith('/v/')
+    )
+  }
+  if (host === 'tiktok.com' || host.endsWith('.tiktok.com')) return true
+  if (host === 'instagram.com' || host.endsWith('.instagram.com')) return true
+  if (
+    host === 'facebook.com' ||
+    host.endsWith('.facebook.com') ||
+    host === 'fb.watch' ||
+    host.endsWith('.fb.watch')
+  )
+    return true
+  return false
+}
+
+/** Round 79 — the best quality row of a resolve: rows are one
+ *  per height, sorted ascending, so the last row is the highest
+ *  quality the site offers. */
+export function bestQualityRow(result: YtdlpResolveResult | null): QualityRow | null {
+  if (!result || result.formats.length === 0) return null
+  return result.formats[result.formats.length - 1]
+}
+
 /** S02 — add a new download (components.md: Dialog, TextInput, Dropdown).
  *  URL, file name, save folder and category. "Start now" begins the
  *  download at once; "Save for later" only queues it.
@@ -157,6 +208,15 @@ export function AddDownloadDialog({
    *  is advisory only — the submit re-probes and reports its own
    *  error — so it is muted text, not the pink submit error. */
   const [probeError, setProbeError] = useState<string | null>(null)
+  /** Round 79 — the yt-dlp resolve for a pasted platform
+   *  video page (title + quality rows), and its failure or
+   *  in-flight state. `resolvedForUrl` is the URL the cached
+   *  result belongs to — a resolve for one video must never
+   *  be submitted for another. */
+  const [resolved, setResolved] = useState<YtdlpResolveResult | null>(null)
+  const [resolveError, setResolveError] = useState<string | null>(null)
+  const [resolving, setResolving] = useState(false)
+  const resolvedForUrl = useRef('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const urlRef = useRef<HTMLInputElement>(null)
@@ -191,6 +251,10 @@ export function AddDownloadDialog({
       setRememberPath(false)
       setFileSize(null)
       setProbeError(null)
+      setResolved(null)
+      setResolveError(null)
+      setResolving(false)
+      resolvedForUrl.current = ''
       setError(null)
       setBusy(false)
       folderEdited.current = false
@@ -232,7 +296,15 @@ export function AddDownloadDialog({
     if (!open) return
     const target = url.trim()
     if (!target) {
+      // Invalidate any in-flight resolve/probe for the URL that
+      // was just cleared — its answer must not land on an empty
+      // field (or a different URL typed next).
+      probeReqId.current += 1
       setFileSize(null)
+      setProbeError(null)
+      setResolved(null)
+      setResolveError(null)
+      setResolving(false)
       return
     }
     const scheme = target.startsWith('http://')
@@ -252,6 +324,53 @@ export function AddDownloadDialog({
     }
     const reqId = ++probeReqId.current
     const timer = window.setTimeout(async () => {
+      // Round 79 — a platform video page resolves with yt-dlp
+      // instead of probing the page itself (a watch-page URL
+      // probes size 0 with no ranges, and the Round 78 retest
+      // showed the manual dialog creating exactly that broken
+      // download). Captures never resolve here — their row is
+      // already resolved by the extension.
+      if (isVideoPageUrl(target) && !pendingLinkId) {
+        setResolving(true)
+        try {
+          const result = await ytdlpResolve(target)
+          if (probeReqId.current !== reqId || probedUrl.current !== target) return
+          if (result.is_live) {
+            resolvedForUrl.current = ''
+            setResolved(null)
+            setFileSize(null)
+            setResolveError("Live streams can't be downloaded")
+            return
+          }
+          resolvedForUrl.current = target
+          setResolved(result)
+          setResolveError(null)
+          setProbeError(null)
+          const best = bestQualityRow(result)
+          setFileSize(best?.filesize ?? null)
+          if (!userEditedFilename.current && result.title) {
+            setFilename(`${result.title}.${best?.ext ?? 'mp4'}`)
+          }
+        } catch (e) {
+          if (probeReqId.current !== reqId || probedUrl.current !== target) return
+          resolvedForUrl.current = ''
+          setResolved(null)
+          setFileSize(null)
+          setProbeError(null)
+          setResolveError(e instanceof Error ? e.message : String(e))
+        } finally {
+          if (probeReqId.current === reqId && probedUrl.current === target) {
+            setResolving(false)
+          }
+        }
+        return
+      }
+      // Not a video page: drop any stale resolve from a
+      // previous URL (the quality line must not show for a
+      // plain file link).
+      resolvedForUrl.current = ''
+      setResolved(null)
+      setResolveError(null)
       try {
         // Round 78 — a resolved video's headers ride the probe,
         // so a stream host that expects its own User-Agent /
@@ -271,7 +390,7 @@ export function AddDownloadDialog({
     }, 500)
     probedUrl.current = target
     return () => window.clearTimeout(timer)
-  }, [open, url, initialCookies, initialHeaders])
+  }, [open, url, initialCookies, initialHeaders, pendingLinkId])
 
   // Round 67 — IDM behaviour: picking a category fills the
   // folder with that category's default folder (the engine
@@ -291,6 +410,10 @@ export function AddDownloadDialog({
     () => categories.find((c) => c.id === category)?.name ?? '',
     [categories, category],
   )
+
+  /** Round 79 — the best quality of the cached resolve (the
+   *  highest row), shown next to the size. */
+  const bestRow = bestQualityRow(resolved)
 
   // Round 67 — the folder the file will land in: the typed one,
   // else the global default, else the OS Downloads folder (what
@@ -400,6 +523,54 @@ export function AddDownloadDialog({
         const [id] = await confirmPendingLink({
           id: pendingLinkId,
           filename: filename.trim() || null,
+          folder: folderValue,
+          category: categoryValue,
+          queue: startNow ? null : 'queue-main',
+          speedLimitKbps: cap > 0 ? cap : null,
+          startNow,
+        })
+        if (description.trim()) {
+          try {
+            await setDownloadDescription(id, description.trim())
+          } catch {
+            // Non-fatal — the download is already added.
+          }
+        }
+        return id
+      }
+      if (!pendingLinkId && isVideoPageUrl(url.trim())) {
+        // Round 79 — a platform video page: resolve first and
+        // create the download from the RESOLVED stream URLs,
+        // never from the page URL (a watch-page URL probes size
+        // 0 with no ranges). The debounced probe already
+        // resolved it; submit re-resolves when the cached
+        // result is stale or missing (e.g. a retry after a
+        // failure). A resolve failure throws — the error is
+        // shown and NO download is created.
+        let result = resolvedForUrl.current === url.trim() ? resolved : null
+        if (!result) {
+          setResolving(true)
+          try {
+            result = await ytdlpResolve(url.trim())
+          } finally {
+            setResolving(false)
+          }
+          resolvedForUrl.current = url.trim()
+          setResolved(result)
+          setResolveError(null)
+        }
+        if (result.is_live) {
+          throw new Error("Live streams can't be downloaded")
+        }
+        const row = bestQualityRow(result)
+        if (!row) {
+          throw new Error('No downloadable qualities were found for this video.')
+        }
+        const videoFilename = filename.trim() || `${result.title}.${row.ext}`
+        const [id] = await addResolvedVideoDownload({
+          pageUrl: url.trim(),
+          row,
+          filename: videoFilename || null,
           folder: folderValue,
           category: categoryValue,
           queue: startNow ? null : 'queue-main',
@@ -685,6 +856,18 @@ export function AddDownloadDialog({
                 {formatBytes(fileSize)}
               </span>
             )}
+            {bestRow !== null && (
+              <span
+                className="shrink-0 text-[13px] font-semibold text-info"
+                title={resolved?.warning ?? undefined}
+              >
+                {bestRow.label} · {bestRow.ext.toUpperCase()}
+                {bestRow.needs_merge ? ' · merged' : ''}
+              </span>
+            )}
+            {resolving && (
+              <span className="shrink-0 text-[12px] text-text-muted">Resolving video…</span>
+            )}
             {fileSize === null && probeError !== null && (
               <span
                 className="shrink-0 truncate text-[12px] text-text-muted"
@@ -693,7 +876,19 @@ export function AddDownloadDialog({
                 Could not check this link — Start will try again
               </span>
             )}
+            {fileSize === null && resolveError !== null && (
+              <span
+                className="shrink-0 truncate text-[12px] text-text-muted"
+                title={resolveError}
+              >
+                Could not resolve this video — Start will try again
+              </span>
+            )}
           </div>
+
+          {resolved?.warning ? (
+            <p className="text-xs text-warning">{resolved.warning}</p>
+          ) : null}
 
           <div>
             <input

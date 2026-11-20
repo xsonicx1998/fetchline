@@ -410,7 +410,21 @@ function startNativeResolve(request, handlers) {
     return { cancel() {} };
   }
   port.onMessage.addListener((msg) => {
-    if (!msg || msg.request_id !== request.request_id) return;
+    if (!msg) return;
+    // Round 79 — a stale pre-R78 host answers an unknown
+    // `resolve_video` message with an `error` reply that
+    // carries NO request_id, so the guard below used to drop it
+    // and the resolve hung until the 32 s timeout fired. An
+    // id-less error can only belong to this port's one in-flight
+    // request, so it is delivered as that request's error (a
+    // stale-host diagnostic) instead of being dropped. A
+    // present-but-different request_id is still ignored — the
+    // cross-talk guard stands.
+    if (msg.type === "error" && (msg.request_id === undefined || msg.request_id === null)) {
+      finishError(msg);
+      return;
+    }
+    if (msg.request_id !== request.request_id) return;
     if (msg.type === "resolve_progress") {
       if (typeof handlers.onProgress === "function") handlers.onProgress(msg);
       return;
@@ -467,8 +481,10 @@ function startNativeResolve(request, handlers) {
 // Round 78 — the content script's resolve port. One native port
 // per resolve_video message; a second message on the same port
 // (the needs-login retry) opens a fresh native port. The first
-// resolve NEVER carries cookies (with_cookies false, cookies []);
-// only the retry after a needs_login error does, with the
+// resolve carries cookies only when the content script has a
+// stored consent grant for the site (Round 79); otherwise it is
+// cookieless (with_cookies false, cookies []), and only the
+// retry after a needs_login error carries cookies, with the
 // cookies the content script fetched via `cookies_for` below.
 // The hidden extractor-args override is read from storage and
 // passed through only when the user stored one — no

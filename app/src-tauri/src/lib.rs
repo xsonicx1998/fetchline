@@ -168,7 +168,11 @@ fn startup_log_line(path: &std::path::Path, msg: &str) {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let line = format!("[{secs}] {msg}\n");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         use std::io::Write;
         let _ = f.write_all(line.as_bytes());
     }
@@ -268,17 +272,29 @@ async fn add_download(
 
 #[tauri::command]
 async fn start_download(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.manager.start_download(&id).await.map_err(|e| e.to_string())
+    state
+        .manager
+        .start_download(&id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn pause_download(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.manager.pause_download(&id).await.map_err(|e| e.to_string())
+    state
+        .manager
+        .pause_download(&id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn resume_download(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.manager.resume_download(&id).await.map_err(|e| e.to_string())
+    state
+        .manager
+        .resume_download(&id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Round 72 (C) — Redownload in place: reset the row's segments
@@ -287,7 +303,11 @@ async fn resume_download(state: State<'_, AppState>, id: String) -> Result<(), S
 /// old delete-first flow lost the row entirely on a flaky probe).
 #[tauri::command]
 async fn redownload_download(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.manager.redownload_download(&id).await.map_err(|e| e.to_string())
+    state
+        .manager
+        .redownload_download(&id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Refresh the address of a paused or failed download (Round 51):
@@ -337,14 +357,22 @@ fn clipboard_sequence_number() -> Option<u32> {
 
 #[tauri::command]
 async fn cancel_download(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.manager.cancel_download(&id).await.map_err(|e| e.to_string())
+    state
+        .manager
+        .cancel_download(&id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Skip the backoff of a download waiting for a retry (S03,
 /// "Retry now"). The engine refuses when nothing is waiting.
 #[tauri::command]
 async fn retry_now(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.manager.retry_now(&id).await.map_err(|e| e.to_string())
+    state
+        .manager
+        .retry_now(&id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Open the folder of a finished download in the system file
@@ -384,7 +412,10 @@ fn progress_window_label(download_id: &str) -> String {
 fn progress_window_title(downloaded_bytes: u64, size_bytes: Option<u64>, filename: &str) -> String {
     match size_bytes {
         Some(size) if size > 0 => {
-            let percent = downloaded_bytes.saturating_mul(100).saturating_div(size).min(100);
+            let percent = downloaded_bytes
+                .saturating_mul(100)
+                .saturating_div(size)
+                .min(100);
             format!("{percent}% {filename}")
         }
         _ => filename.to_string(),
@@ -1036,10 +1067,18 @@ async fn open_progress_window(
         // does not come back on `set_focus()` alone.
         let _ = window.show();
         window.set_focus().map_err(|e| e.to_string())?;
-        log_startup(log, &format!("progress window {label} already open — focused"));
+        log_startup(
+            log,
+            &format!("progress window {label} already open — focused"),
+        );
         return Ok(());
     }
-    build_progress_window(&app, &state.manager, &download_id, &state.webview_heartbeats)?;
+    build_progress_window(
+        &app,
+        &state.manager,
+        &download_id,
+        &state.webview_heartbeats,
+    )?;
     Ok(())
 }
 
@@ -1729,7 +1768,10 @@ async fn run_antivirus_scan(state: State<'_, AppState>, id: String) -> Result<Sc
 /// or `None` when it was never scanned.
 #[tauri::command]
 fn get_scan_result(state: State<'_, AppState>, id: String) -> Result<Option<ScanResult>, String> {
-    state.manager.get_scan_result(&id).map_err(|e| e.to_string())
+    state
+        .manager
+        .get_scan_result(&id)
+        .map_err(|e| e.to_string())
 }
 
 /// Antivirus hook (S14): the Settings > Downloads "Test" button —
@@ -1754,7 +1796,10 @@ async fn test_antivirus_scanner(
 /// nothing ever calls this on its own. Returns the new path.
 #[tauri::command]
 fn quarantine_download(state: State<'_, AppState>, id: String) -> Result<String, String> {
-    state.manager.quarantine_download(&id).map_err(|e| e.to_string())
+    state
+        .manager
+        .quarantine_download(&id)
+        .map_err(|e| e.to_string())
 }
 
 /// Antivirus hook (S14): open a finished download in its default
@@ -1798,7 +1843,11 @@ fn open_file_with(state: State<'_, AppState>, id: String) -> Result<(), String> 
 }
 
 #[tauri::command]
-async fn delete_download(state: State<'_, AppState>, id: String, delete_file: bool) -> Result<(), String> {
+async fn delete_download(
+    state: State<'_, AppState>,
+    id: String,
+    delete_file: bool,
+) -> Result<(), String> {
     // Slice behaviour: remove the row from the list. `delete_file` also
     // removes the finished file from disk when it exists.
     let manager = &state.manager;
@@ -1846,7 +1895,10 @@ fn trace_command_exit(
 }
 
 #[tauri::command]
-async fn list_downloads(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<DownloadRow>, String> {
+async fn list_downloads(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<DownloadRow>, String> {
     let n = LIST_DOWNLOADS_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
     let started = std::time::Instant::now();
     let log = startup_log_path_from_app(&app);
@@ -1862,13 +1914,7 @@ async fn list_downloads(app: AppHandle, state: State<'_, AppState>) -> Result<Ve
     // Sampled (§7.1e): every 100th call, or any call slower than
     // 1 s — a wedged invoke shows up as a missing sampled exit.
     if n % 100 == 0 || started.elapsed() > Duration::from_secs(1) {
-        trace_command_exit(
-            log.as_deref(),
-            "list_downloads",
-            n,
-            started,
-            result.is_ok(),
-        );
+        trace_command_exit(log.as_deref(), "list_downloads", n, started, result.is_ok());
     }
     result
 }
@@ -1880,7 +1926,10 @@ async fn list_download_history(
     state: State<'_, AppState>,
     query: String,
 ) -> Result<Vec<HistoryRow>, String> {
-    state.manager.list_history(&query).map_err(|e| e.to_string())
+    state
+        .manager
+        .list_history(&query)
+        .map_err(|e| e.to_string())
 }
 
 /// Download history (Round 53): empty the whole history.
@@ -1909,14 +1958,21 @@ async fn redownload_from_history(
 /// entry's file lives in.
 #[tauri::command]
 async fn open_history_folder(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.manager.open_history_folder(&id).map_err(|e| e.to_string())
+    state
+        .manager
+        .open_history_folder(&id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn get_categories(state: State<'_, AppState>) -> Result<Vec<CategoryRow>, String> {
     // Architecture.md names this command `get_categories`; it is the
     // category list (there is no separate `list_categories`).
-    state.manager.store().list_categories().map_err(|e| e.to_string())
+    state
+        .manager
+        .store()
+        .list_categories()
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1934,7 +1990,10 @@ async fn create_category(
 
 #[tauri::command]
 async fn delete_category(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.manager.delete_category(&id).map_err(|e| e.to_string())
+    state
+        .manager
+        .delete_category(&id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2014,7 +2073,11 @@ async fn update_queue(
 /// schedule, and wait for the per-file result.
 #[tauri::command]
 async fn sync_queue_now(state: State<'_, AppState>, id: String) -> Result<SyncResult, String> {
-    state.manager.run_sync_queue(&id).await.map_err(|e| e.to_string())
+    state
+        .manager
+        .run_sync_queue(&id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2024,12 +2087,22 @@ async fn list_queues(state: State<'_, AppState>) -> Result<Vec<QueueRow>, String
 
 #[tauri::command]
 async fn get_queue(state: State<'_, AppState>, id: String) -> Result<Option<QueueRow>, String> {
-    state.manager.get_queue(&id).await.map_err(|e| e.to_string())
+    state
+        .manager
+        .get_queue(&id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn get_queue_files(state: State<'_, AppState>, queue_id: String) -> Result<Vec<DownloadRow>, String> {
-    state.manager.list_queue_files(&queue_id).map_err(|e| e.to_string())
+async fn get_queue_files(
+    state: State<'_, AppState>,
+    queue_id: String,
+) -> Result<Vec<DownloadRow>, String> {
+    state
+        .manager
+        .list_queue_files(&queue_id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2046,7 +2119,10 @@ async fn add_to_queue(
 
 #[tauri::command]
 async fn remove_from_queue(state: State<'_, AppState>, download_id: String) -> Result<(), String> {
-    state.manager.remove_from_queue(&download_id).map_err(|e| e.to_string())
+    state
+        .manager
+        .remove_from_queue(&download_id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2064,12 +2140,20 @@ async fn reorder_queue(
 
 #[tauri::command]
 async fn start_queue(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.manager.start_queue(&id).await.map_err(|e| e.to_string())
+    state
+        .manager
+        .start_queue(&id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn stop_queue(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.manager.stop_queue(&id).await.map_err(|e| e.to_string())
+    state
+        .manager
+        .stop_queue(&id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2095,7 +2179,11 @@ async fn fetch_page_links(
     state: State<'_, AppState>,
     page_url: String,
 ) -> Result<Vec<PageLink>, String> {
-    state.manager.fetch_page_links(&page_url).await.map_err(|e| e.to_string())
+    state
+        .manager
+        .fetch_page_links(&page_url)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2160,8 +2248,14 @@ async fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
 /// Save the settings and apply them live (connection count, speed
 /// cap, proxy, retries — see `DownloadManager::apply_settings`).
 #[tauri::command]
-async fn update_settings(state: State<'_, AppState>, settings: Settings) -> Result<Settings, String> {
-    state.manager.update_settings(&settings).map_err(|e| e.to_string())
+async fn update_settings(
+    state: State<'_, AppState>,
+    settings: Settings,
+) -> Result<Settings, String> {
+    state
+        .manager
+        .update_settings(&settings)
+        .map_err(|e| e.to_string())
 }
 
 /// Change only the global speed cap (architecture.md
@@ -2171,7 +2265,10 @@ async fn set_speed_limit(
     state: State<'_, AppState>,
     kbps: Option<i64>,
 ) -> Result<Settings, String> {
-    state.manager.set_speed_limit(kbps).map_err(|e| e.to_string())
+    state
+        .manager
+        .set_speed_limit(kbps)
+        .map_err(|e| e.to_string())
 }
 
 /// The stored speed cap in KB/s (`None` = unlimited).
@@ -2189,7 +2286,10 @@ async fn set_download_limit(
     mb: i64,
     hours: i64,
 ) -> Result<Settings, String> {
-    state.manager.set_download_limit(mb, hours).map_err(|e| e.to_string())
+    state
+        .manager
+        .set_download_limit(mb, hours)
+        .map_err(|e| e.to_string())
 }
 
 /// The download quota's live state (S12): limit, usage, window
@@ -2215,7 +2315,10 @@ async fn set_download_speed_limit(
     id: String,
     kbps: Option<i64>,
 ) -> Result<(), String> {
-    state.manager.set_download_speed_limit(&id, kbps).map_err(|e| e.to_string())
+    state
+        .manager
+        .set_download_speed_limit(&id, kbps)
+        .map_err(|e| e.to_string())
 }
 
 /// The saved proxy row, if any. Never contains the password — only
@@ -2232,7 +2335,10 @@ async fn save_proxy_config(
     state: State<'_, AppState>,
     input: ProxyConfigInput,
 ) -> Result<ProxyConfigRow, String> {
-    state.manager.save_proxy_config(&input).map_err(|e| e.to_string())
+    state
+        .manager
+        .save_proxy_config(&input)
+        .map_err(|e| e.to_string())
 }
 
 /// Probe a URL through a proxy that has NOT been saved yet (the Test
@@ -2252,7 +2358,11 @@ async fn test_proxy(
     input: ProxyConfigInput,
     test_url: String,
 ) -> Result<u16, String> {
-    state.manager.test_proxy(&input, &test_url).await.map_err(|e| e.to_string())
+    state
+        .manager
+        .test_proxy(&input, &test_url)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Site logins (S09 Site logins tab). Rows never contain a
@@ -2268,19 +2378,28 @@ async fn save_site_login(
     state: State<'_, AppState>,
     input: SiteLoginInput,
 ) -> Result<SiteLoginRow, String> {
-    state.manager.save_site_login(&input).map_err(|e| e.to_string())
+    state
+        .manager
+        .save_site_login(&input)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn delete_site_login(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.manager.delete_site_login(&id).map_err(|e| e.to_string())
+    state
+        .manager
+        .delete_site_login(&id)
+        .map_err(|e| e.to_string())
 }
 
 /// Sounds (S09 Sounds tab): one setting per event. The engine
 /// emits the event and plays the WAV on Windows only.
 #[tauri::command]
 async fn get_sound_settings(state: State<'_, AppState>) -> Result<Vec<SoundSetting>, String> {
-    state.manager.get_sound_settings().map_err(|e| e.to_string())
+    state
+        .manager
+        .get_sound_settings()
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2299,7 +2418,10 @@ async fn save_sound_settings(
 /// honest result here is the validation, not audio.
 #[tauri::command]
 async fn test_sound_file(state: State<'_, AppState>, path: String) -> Result<String, String> {
-    state.manager.test_sound_file(&path).map_err(|e| e.to_string())
+    state
+        .manager
+        .test_sound_file(&path)
+        .map_err(|e| e.to_string())
 }
 
 /// Round 66 — the built-in "Download complete" chime,
@@ -2455,9 +2577,8 @@ fn play_notification_sound(
     {
         // Writing the built-in failed — fall back to the
         // Windows default sound instead of silence.
-        return play_default_system_sound().map(|()| {
-            "Windows default sound (built-in sound could not be written)".to_string()
-        });
+        return play_default_system_sound()
+            .map(|()| "Windows default sound (built-in sound could not be written)".to_string());
     }
     match play_wav_with_sound_player(&path) {
         Ok(()) => Ok(builtin_desc.to_string()),
@@ -2648,7 +2769,11 @@ async fn detect_page_videos(
 /// installer address instead.
 #[tauri::command]
 async fn check_for_updates(state: State<'_, AppState>) -> Result<UpdateCheckResult, String> {
-    state.manager.check_for_updates().await.map_err(|e| e.to_string())
+    state
+        .manager
+        .check_for_updates()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Drain the browser-extension pending-links queue (S13): every
@@ -2673,7 +2798,10 @@ async fn drain_pending_links(state: State<'_, AppState>) -> Result<DrainSummary,
 /// opens the dialog for each browser/video capture in turn.
 #[tauri::command]
 fn list_pending_links(state: State<'_, AppState>) -> Result<Vec<PendingLinkRow>, String> {
-    state.manager.list_pending_links().map_err(|e| e.to_string())
+    state
+        .manager
+        .list_pending_links()
+        .map_err(|e| e.to_string())
 }
 
 /// Round 67 — decide one pending row from the Add URL dialog:
@@ -2872,6 +3000,40 @@ async fn confirm_pending_link(
         .map_err(|e| e.to_string())
 }
 
+/// Round 79 — add a download from a resolved platform video
+/// (the manual Add URL dialog): the dialog resolved the page
+/// with `ytdlp_resolve` and picked one quality row; the engine
+/// creates the download from the row's stream URLs — never
+/// from the page URL (a watch-page URL probes size 0 with no
+/// ranges). Returns the created download id and its probe info.
+#[tauri::command]
+async fn add_resolved_video_download(
+    state: State<'_, AppState>,
+    page_url: String,
+    row: fetchline_engine::ytdlp::QualityRow,
+    filename: Option<String>,
+    folder: Option<String>,
+    category: Option<String>,
+    queue: Option<String>,
+    speed_limit_kbps: Option<i64>,
+    start_now: bool,
+) -> Result<(String, ProbeInfo), String> {
+    state
+        .manager
+        .add_resolved_video_download(
+            &page_url,
+            &row,
+            filename,
+            folder,
+            category,
+            queue,
+            speed_limit_kbps,
+            start_now,
+        )
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Site grabber (S06 / F06): create a project (wizard steps 1–3).
 /// The engine validates the inputs — depth over 5, a page cap over
 /// 1000, no file types, an unknown queue, a bad completion action,
@@ -2916,18 +3078,29 @@ async fn create_grabber_project(
 /// `get_grabber_project` for progress.
 #[tauri::command]
 async fn run_grabber(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.manager.run_grabber(&id).await.map_err(|e| e.to_string())
+    state
+        .manager
+        .run_grabber(&id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Ask a running grabber to stop after the current page / file.
 #[tauri::command]
 async fn stop_grabber(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.manager.stop_grabber(&id).await.map_err(|e| e.to_string())
+    state
+        .manager
+        .stop_grabber(&id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// One grabber project with its live progress and matched files.
 #[tauri::command]
-async fn get_grabber_project(state: State<'_, AppState>, id: String) -> Result<GrabberProjectRow, String> {
+async fn get_grabber_project(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<GrabberProjectRow, String> {
     state
         .manager
         .get_grabber_project(&id)
@@ -2937,8 +3110,13 @@ async fn get_grabber_project(state: State<'_, AppState>, id: String) -> Result<G
 
 /// All grabber projects, newest first.
 #[tauri::command]
-async fn list_grabber_projects(state: State<'_, AppState>) -> Result<Vec<GrabberProjectRow>, String> {
-    state.manager.list_grabber_projects().map_err(|e| e.to_string())
+async fn list_grabber_projects(
+    state: State<'_, AppState>,
+) -> Result<Vec<GrabberProjectRow>, String> {
+    state
+        .manager
+        .list_grabber_projects()
+        .map_err(|e| e.to_string())
 }
 
 /// Round 65 — system tray, like IDM: a tray icon (the app logo)
@@ -3069,9 +3247,7 @@ fn register_native_host_best_effort(app: &AppHandle, log: Option<&std::path::Pat
         // exe under its full triple name; the first ZIP missed this
         // candidate and the extension reported "host not found".
         exe_dir.join("fetchline-host-x86_64-pc-windows-msvc.exe"),
-        exe_dir
-            .join("binaries")
-            .join("fetchline-host.exe"),
+        exe_dir.join("binaries").join("fetchline-host.exe"),
         exe_dir
             .join("binaries")
             .join("fetchline-host-x86_64-pc-windows-msvc.exe"),
@@ -3195,8 +3371,7 @@ fn register_native_host_best_effort(app: &AppHandle, log: Option<&std::path::Pat
             .creation_flags(CREATE_NO_WINDOW)
             .output()
             .map(|out| {
-                out.status.success()
-                    && String::from_utf8_lossy(&out.stdout).contains(manifest)
+                out.status.success() && String::from_utf8_lossy(&out.stdout).contains(manifest)
             })
             .unwrap_or(false);
         if already {
@@ -3265,10 +3440,7 @@ pub fn run() {
     }));
     startup_log_line(&startup_log_path_early(), "main entered");
     match tauri::webview_version() {
-        Ok(v) => startup_log_line(
-            &startup_log_path_early(),
-            &format!("webview version: {v}"),
-        ),
+        Ok(v) => startup_log_line(&startup_log_path_early(), &format!("webview version: {v}")),
         Err(e) => startup_log_line(
             &startup_log_path_early(),
             &format!("webview version: ERROR {e:?}"),
@@ -3531,10 +3703,7 @@ pub fn run() {
                     let text = match read {
                         Ok(Ok(t)) => {
                             if read_failed_logged {
-                                log_startup(
-                                    clipboard_log.as_deref(),
-                                    "clipboard read recovered",
-                                );
+                                log_startup(clipboard_log.as_deref(), "clipboard read recovered");
                                 read_failed_logged = false;
                             }
                             Some(t)
@@ -3902,6 +4071,7 @@ pub fn run() {
             ytdlp_version,
             ytdlp_resolve,
             ytdlp_update,
+            add_resolved_video_download,
             set_download_description,
             confirm_pending_link,
         ])

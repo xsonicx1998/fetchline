@@ -322,6 +322,29 @@ pub fn map_error(stderr: &str) -> YtDlpError {
     let lower = stderr.to_ascii_lowercase();
     let has = |needle: &str| lower.contains(needle);
     let err = |kind: YtDlpErrorKind, message: &str| YtDlpError::new(kind, message.to_string());
+    // Round 79 — a YouTube bot check is a login wall, not a
+    // removed video: yt-dlp prints "Sign in to confirm you're
+    // not a bot" (and the player reports playability
+    // LOGIN_REQUIRED) on a datacenter IP, and the page itself
+    // also says "Video unavailable" — so this check runs BEFORE
+    // the Private rule below, or the bot block maps to Private
+    // and the extension never offers the cookie retry (the
+    // Round 78 retest: "Couldn't load download formats" with
+    // no consent prompt, even signed in). The needles are
+    // bot-specific ("not a bot", "login_required"), so a
+    // genuinely private video — "Private video. Sign in if
+    // you've been granted access…" — still maps to Private
+    // below, exactly as before.
+    if has("confirm you're not a bot")
+        || has("not a bot")
+        || has("login_required")
+        || has("playability status")
+    {
+        return err(
+            YtDlpErrorKind::LoginRequired,
+            "This video needs you to be signed in.",
+        );
+    }
     if has("private") || has("has been removed") || has("video unavailable") {
         return err(
             YtDlpErrorKind::Private,
@@ -1795,6 +1818,31 @@ mod tests {
                 YtDlpErrorKind::Private,
             ),
             ("ERROR: Video unavailable", YtDlpErrorKind::Private),
+            // Round 79 — a genuinely private video that also
+            // mentions signing in still maps to Private: the
+            // bot-check needles above are specific ("not a bot",
+            // "login_required"), so this phrasing falls through.
+            (
+                "ERROR: [youtube] Private video. Sign in if you've been granted access to view this video",
+                YtDlpErrorKind::Private,
+            ),
+            // Round 79 — the YouTube bot check maps to
+            // LoginRequired (not Private), even though the page
+            // also says the video is unavailable: the bot-check
+            // needles run before the Private rule, so the
+            // extension offers the cookie retry for these.
+            (
+                "ERROR: [youtube] dQw4w9WgXcQ: Sign in to confirm you're not a bot. This helps protect our community.",
+                YtDlpErrorKind::LoginRequired,
+            ),
+            (
+                "ERROR: [youtube] dQw4w9WgXcQ: Video unavailable. Sign in to confirm you're not a bot",
+                YtDlpErrorKind::LoginRequired,
+            ),
+            (
+                "WARNING: [youtube] dQw4w9WgXcQ: Playability status: LOGIN_REQUIRED",
+                YtDlpErrorKind::LoginRequired,
+            ),
             (
                 "ERROR: [youtube] This video is not available in your country",
                 YtDlpErrorKind::GeoBlocked,

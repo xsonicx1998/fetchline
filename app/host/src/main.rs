@@ -90,7 +90,12 @@ fn print_usage() {
 fn db_candidates() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Ok(p) = std::env::var("APPDATA") {
-        out.push(PathBuf::from(&p).join("com.fetchline.app").join("fetchline").join("app.db"));
+        out.push(
+            PathBuf::from(&p)
+                .join("com.fetchline.app")
+                .join("fetchline")
+                .join("app.db"),
+        );
         out.push(PathBuf::from(&p).join("fetchline").join("app.db"));
     }
     if let Ok(home) = std::env::var("HOME") {
@@ -105,7 +110,11 @@ fn db_candidates() -> Vec<PathBuf> {
         let xdg = std::env::var("XDG_DATA_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from(&home).join(".local").join("share"));
-        out.push(xdg.join("com.fetchline.app").join("fetchline").join("app.db"));
+        out.push(
+            xdg.join("com.fetchline.app")
+                .join("fetchline")
+                .join("app.db"),
+        );
         out.push(xdg.join("fetchline").join("app.db"));
     }
     out
@@ -316,7 +325,14 @@ async fn resolve_video(
             .or(stored_extractor_args),
         timeout_secs: ytdlp::RESOLVE_TIMEOUT_SECS,
     };
-    resolve_with_heartbeat(output, &request_id, page_url, opts).await
+    // Round 79 — log the request (page URL + whether cookies
+    // rode along) so a failed resolve in host.log can be tied
+    // to the attempt that produced it.
+    log_line(
+        log_path,
+        &format!("resolve: url={page_url} with_cookies={with_cookies}"),
+    );
+    resolve_with_heartbeat(output, log_path, &request_id, page_url, opts).await
 }
 
 /// Round 78 — run the resolve while writing a `resolve_progress`
@@ -324,8 +340,14 @@ async fn resolve_video(
 /// port sees traffic during a long resolve and Chrome does not
 /// consider the channel idle. Dropping the pinned future on a
 /// closed stdout kills yt-dlp (kill-on-drop).
+/// Round 79 — a failed resolve is logged to host.log with the
+/// real yt-dlp error (kind + stderr tail), so the next retest
+/// can tell a bot block from a stale host from a missing binary
+/// instead of guessing from the extension's message. The detail
+/// is yt-dlp's stderr tail, never cookies.
 async fn resolve_with_heartbeat(
     output: &mut std::io::StdoutLock<'static>,
+    log_path: &std::path::Path,
     request_id: &str,
     page_url: String,
     opts: ytdlp::ResolveOptions,
@@ -335,7 +357,15 @@ async fn resolve_with_heartbeat(
     let mut elapsed: u64 = 0;
     loop {
         tokio::select! {
-            r = &mut fut => return Some(resolve_to_reply(request_id, r)),
+            r = &mut fut => {
+                if let Err(e) = &r {
+                    log_line(
+                        log_path,
+                        &format!("resolve failed: kind={} {}", e.kind_str(), e.message),
+                    );
+                }
+                return Some(resolve_to_reply(request_id, r));
+            }
             _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
                 elapsed += 5;
                 let beat = serde_json::json!({
@@ -593,8 +623,7 @@ mod tests {
         assert!(parse_host_args(["--db-path"].iter().copied()).is_err());
         // A bare --parent-window followed by a non-numeric arg must
         // NOT eat that arg — it is still parsed as a flag.
-        let a = parse_host_args(["--parent-window", "--db-path", "x.db"].iter().copied())
-            .unwrap();
+        let a = parse_host_args(["--parent-window", "--db-path", "x.db"].iter().copied()).unwrap();
         assert_eq!(a.db_path, Some(PathBuf::from("x.db")));
     }
 

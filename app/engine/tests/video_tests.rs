@@ -939,3 +939,163 @@ async fn video_found_m3u8_drains_into_a_real_playlist_download() {
     assert_eq!(bytes, fixture("vod.m3u8").into_bytes());
     assert_eq!(dl.filename, "vod.m3u8");
 }
+
+// -- Round 79 — manual Add URL with a video URL ---------------------------
+// The Round 78 retest: the dialog resolved the metadata (title +
+// "1080p + 128kbps — merged") but the download used the raw watch
+// URL — the list item was "watch", 0 B, Error, "Server ignored
+// the range request". `add_resolved_video_download` must create
+// the download from the RESOLVED stream URL(s) with the resolved
+// filename — never from the page URL.
+
+fn resolved_row(url: &str) -> fetchline_engine::ytdlp::QualityRow {
+    fetchline_engine::ytdlp::QualityRow {
+        height: 360,
+        label: "360p".to_string(),
+        ext: "mp4".to_string(),
+        has_audio: true,
+        needs_merge: false,
+        filesize: Some(512 * 1024),
+        url: url.to_string(),
+        audio_url: None,
+        audio_format_id: None,
+        format_id: "18".to_string(),
+        headers: std::collections::HashMap::new(),
+        fragmented: false,
+    }
+}
+
+#[tokio::test]
+async fn resolved_video_download_uses_stream_url_not_page_url() {
+    let server = MockServer::start(MockConfig {
+        size_bytes: Some(512 * 1024),
+        ..Default::default()
+    });
+    let dir = tmpdir();
+    let mgr = test_mgr(&dir);
+    let page_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+    let (id, probe) = mgr
+        .add_resolved_video_download(
+            page_url,
+            &resolved_row(&server.url),
+            Some(
+                "Rick Astley - Never Gonna Give You Up (Official Video) (4K Remaster).mp4"
+                    .to_string(),
+            ),
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+    let dl = mgr.get_download(&id).unwrap().unwrap();
+    assert_eq!(
+        dl.url, server.url,
+        "the download must use the resolved stream URL, not the page URL"
+    );
+    assert!(
+        !dl.url.contains("youtube.com"),
+        "no watch-page URL may be downloaded: {}",
+        dl.url
+    );
+    assert_eq!(
+        dl.filename,
+        "Rick Astley - Never Gonna Give You Up (Official Video) (4K Remaster).mp4"
+    );
+    assert_eq!(dl.source_url.as_deref(), Some(page_url));
+    assert_eq!(dl.format_id.as_deref(), Some("18"));
+    assert_eq!(probe.size, Some(512 * 1024));
+    assert!(wait_for_status(&mgr, &id, "complete", 15).await);
+    let dl = mgr.get_download(&id).unwrap().unwrap();
+    assert_eq!(dl.downloaded_bytes, 512 * 1024);
+    assert_eq!(std::fs::read(&dl.save_path).unwrap(), payload(512 * 1024));
+}
+
+#[tokio::test]
+async fn resolved_dash_pair_creates_audio_child_even_when_saved_for_later() {
+    let video = MockServer::start(MockConfig {
+        size_bytes: Some(64 * 1024),
+        ..Default::default()
+    });
+    let audio = MockServer::start(MockConfig {
+        size_bytes: Some(32 * 1024),
+        ..Default::default()
+    });
+    let dir = tmpdir();
+    let mgr = test_mgr(&dir);
+    let store = mgr.store();
+    let mut row = resolved_row(&video.url);
+    row.height = 1080;
+    row.label = "1080p".to_string();
+    row.has_audio = false;
+    row.needs_merge = true;
+    row.filesize = Some(64 * 1024);
+    row.audio_url = Some(audio.url.clone());
+    row.audio_format_id = Some("140".to_string());
+    row.format_id = "137".to_string();
+    let (id, _) = mgr
+        .add_resolved_video_download(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            &row,
+            Some("video.mp4".to_string()),
+            None,
+            None,
+            None,
+            None,
+            false, // saved for later — the children must still exist
+        )
+        .await
+        .unwrap();
+    let children = store.list_child_downloads(&id).unwrap();
+    assert_eq!(
+        children.len(),
+        2,
+        "video + audio children must exist before any start: {:?}",
+        children
+            .iter()
+            .map(|c| c.child_kind.clone())
+            .collect::<Vec<_>>()
+    );
+    let audio_child = children
+        .iter()
+        .find(|c| c.child_kind.as_deref() == Some("audio"))
+        .expect("an audio child");
+    assert_eq!(audio_child.url, audio.url);
+    assert_eq!(audio_child.parent_id.as_deref(), Some(id.as_str()));
+    // The link marks the PARENT's merge pending (children carry
+    // no merge status of their own).
+    let parent = mgr.get_download(&id).unwrap().unwrap();
+    assert_eq!(parent.merge_status.as_deref(), Some("pending"));
+    // The parent itself was saved for later, not started.
+    assert_ne!(parent.status, "downloading");
+}
+
+#[tokio::test]
+async fn resolved_video_download_failure_creates_no_download() {
+    // A stream URL that cannot be probed (or a resolve failure in
+    // the dialog) must never leave a size-0 download behind —
+    // the Round 78 retest's "watch", 0 B, Error row.
+    let dir = tmpdir();
+    let mgr = test_mgr(&dir);
+    let store = mgr.store();
+    let row = resolved_row("http://127.0.0.1:1/unreachable.mp4");
+    let err = mgr
+        .add_resolved_video_download(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            &row,
+            Some("video.mp4".to_string()),
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        store.list_downloads().unwrap().is_empty(),
+        "a failed add must leave no download row behind: {err}"
+    );
+}

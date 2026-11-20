@@ -61,7 +61,11 @@
 // the page URL changes (SPA navigation). A needs_login error
 // asks once per site whether the browser login may be used
 // (stored consent grants silently next time; a denial is
-// remembered for this session only). No sizes are ever shown.
+// remembered for this session only). Round 79 — a stored grant
+// sends the page's cookies on the FIRST resolve of a later
+// click (no doomed cookieless attempt first), and "Try again"
+// never repeats the identical failing request. No sizes are
+// ever shown.
 //
 // The button and dropdown are Sonic design (dark #0B0F24, purple
 // #8B20FF → pink #F02DCD → cyan #00C8FF gradient) — no artwork or
@@ -208,6 +212,10 @@
     : { get: () => null, getEntry: () => null, isStale: () => true, set: () => {}, clear: () => {} };
   const deniedConsentHosts = new Set();
   let activeResolve = null; // { requestId, port, video, withCookies, cookies, onResolved }
+  // Round 79 — the last failed resolve attempt
+  // ({ video, error, withCookies, cookies }), so "Try again"
+  // never repeats the identical failing request.
+  let lastResolveAttempt = null;
   let lastPageUrl = normalizePageUrlFn(location.href);
   let loadingNote = null;
 
@@ -696,7 +704,18 @@
   // port to the host, and heartbeats update the elapsed seconds
   // until the final `resolved` or `error` reply arrives.
 
-  function openResolveDropdown(video) {
+  // Round 79 — the first resolve goes WITH the page's cookies
+  // when this site already has a stored cookie-consent grant:
+  // a cookieless first attempt would only fail again with
+  // needs_login and waste a round trip (the Round 78 retest's
+  // click failed three times before the consent path was ever
+  // reached). No grant stored: the old cookieless-first
+  // behaviour — the host is never sent cookies it was not
+  // allowed to have. The consent read is async, so the
+  // dropdown shows "Checking…" first; if the user closes it
+  // while the read is in flight, no resolve starts at all (a
+  // late reply would otherwise pop the dropdown back open).
+  async function openResolveDropdown(video) {
     if (activeResolve && activeResolve.video === video) return;
     const cached = resolveCache.get(normalizePageUrlFn(location.href));
     if (cached) {
@@ -704,7 +723,22 @@
       return;
     }
     renderResolveLoading(video);
-    startResolve(video, { withCookies: false, cookies: [], onResolved: null });
+    let withCookies = false;
+    let cookies = [];
+    const host = hostOf(location.href);
+    if (host) {
+      try {
+        const stored = await chrome.storage.local.get([`ytdlp_cookie_consent:${host}`]);
+        if (stored && stored[`ytdlp_cookie_consent:${host}`] === true) {
+          withCookies = true;
+          cookies = await requestCookies(location.href);
+        }
+      } catch {
+        // Storage/cookie read failed: fall back to cookieless.
+      }
+    }
+    if (!dropdown || dropdown.style.display === "none" || dropdown._video !== video) return;
+    startResolve(video, { withCookies, cookies, onResolved: null });
   }
 
   function renderResolveLoading(video) {
@@ -765,9 +799,13 @@
       textAlign: "left",
       cursor: "pointer",
     });
+    // Round 79 — "Try again" never repeats the identical
+    // failing request: retryResolve re-runs the consent flow
+    // for a cookieless needs_login failure, and otherwise
+    // retries with the same cookies the failed attempt used.
     retry.addEventListener("click", () => {
       renderResolveLoading(video);
-      startResolve(video, { withCookies: false, cookies: [], onResolved: null });
+      retryResolve(video);
     });
     dropdown.appendChild(retry);
     dropdown.style.display = "block";
@@ -856,10 +894,12 @@
     try {
       port = chrome.runtime.connect({ name: "sonic-resolve" });
     } catch {
+      recordResolveFailure(video, { error: "Sonic Manager could not be reached.", needs_login: false }, withCookies, cookies);
       renderResolveError(video, "Sonic Manager could not be reached.");
       return;
     }
     if (!port || typeof port.postMessage !== "function") {
+      recordResolveFailure(video, { error: "Sonic Manager could not be reached.", needs_login: false }, withCookies, cookies);
       renderResolveError(video, "Sonic Manager could not be reached.");
       return;
     }
@@ -924,39 +964,94 @@
     }
   }
 
+  // Round 79 — remember the last failed resolve attempt, so
+  // "Try again" knows what failed and with which cookies.
+  function recordResolveFailure(video, err, withCookies, cookies) {
+    lastResolveAttempt = {
+      video,
+      error: err || null,
+      withCookies: withCookies === true,
+      cookies: Array.isArray(cookies) ? cookies : [],
+    };
+  }
+
+  // The per-site cookie-consent flow, shared by the
+  // needs_login error path and by "Try again": a stored grant
+  // answers silently; a denial this session is never re-asked;
+  // otherwise the user is asked once (confirm()) and a grant is
+  // stored per site. Returns true when cookies may be used.
+  async function askCookieConsent(host) {
+    const key = `ytdlp_cookie_consent:${host}`;
+    let granted = false;
+    try {
+      const stored = await chrome.storage.local.get([key]);
+      granted = !!(stored && stored[key] === true);
+    } catch {
+      granted = false;
+    }
+    if (!granted && !deniedConsentHosts.has(host)) {
+      if (typeof confirm === "function") {
+        granted = confirm(
+          "This video needs login. Allow Sonic Manager to use your browser login for this site to fetch its qualities?",
+        );
+      }
+      if (granted) {
+        try {
+          await chrome.storage.local.set({ [key]: true });
+        } catch {
+          // Consent not persisted: the retry still runs once.
+        }
+      } else {
+        deniedConsentHosts.add(host);
+      }
+    }
+    return granted;
+  }
+
+  // Round 79 — "Try again" after a failed resolve. It never
+  // repeats the identical failing request: a needs_login
+  // failure on a cookieless attempt runs the consent flow
+  // instead (ask, unless denied this session; retry with
+  // cookies if granted, else show the error again); anything
+  // else retries with the SAME cookies the failed attempt used
+  // (a cookied attempt that failed stays cookied).
+  async function retryResolve(video) {
+    const last = lastResolveAttempt;
+    if (last && last.video === video && last.error && last.error.needs_login && !last.withCookies) {
+      const granted = await askCookieConsent(hostOf(location.href));
+      if (granted) {
+        const cookies = await requestCookies(location.href);
+        startResolve(video, { withCookies: true, cookies, onResolved: null });
+        return;
+      }
+      renderResolveError(
+        video,
+        (last.error && last.error.error) || "Sonic Manager could not fetch this video's qualities.",
+      );
+      return;
+    }
+    startResolve(video, {
+      withCookies: !!(last && last.video === video && last.withCookies),
+      cookies: last && last.video === video ? last.cookies || [] : [],
+      onResolved: null,
+    });
+  }
+
   // Needs-login: ask once per site whether the browser login
   // may be used. A stored grant re-sends with cookies silently;
   // a denial is remembered for this session only, so the user
   // is not asked on every click. The retry carries the cookies
   // the background fetched for this page — and those same
   // cookies are attached to the video_found pick later.
+  // Round 79 — this branch only runs for a COOKIELESS attempt
+  // (done.withCookies is false): a cookied attempt that ALSO
+  // fails with needs_login never reaches it — the cookies
+  // didn't help, so the error is shown, with no loop and no
+  // second consent ask.
   async function handleResolveError(video, err, done) {
+    recordResolveFailure(video, err, done && done.withCookies, done && done.cookies);
     if (err && err.needs_login && done && !done.withCookies) {
-      const host = hostOf(location.href);
-      const key = `ytdlp_cookie_consent:${host}`;
-      let granted = false;
-      try {
-        const stored = await chrome.storage.local.get([key]);
-        granted = !!(stored && stored[key] === true);
-      } catch {
-        granted = false;
-      }
-      if (!granted && !deniedConsentHosts.has(host)) {
-        if (typeof confirm === "function") {
-          granted = confirm(
-            "This video needs login. Allow Sonic Manager to use your browser login for this site to fetch its qualities?",
-          );
-        }
-        if (granted) {
-          try {
-            await chrome.storage.local.set({ [key]: true });
-          } catch {
-            // Consent not persisted: the retry still runs once.
-          }
-        } else {
-          deniedConsentHosts.add(host);
-        }
-      }
+      const granted = await askCookieConsent(hostOf(location.href));
       if (granted) {
         const cookies = await requestCookies(location.href);
         renderResolveLoading(video);

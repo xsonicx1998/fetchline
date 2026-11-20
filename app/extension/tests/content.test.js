@@ -587,13 +587,19 @@ function resolvedReply(requestId, overrides = {}) {
 // list; returns the env, video and the port the resolve ran on.
 async function resolveVideo(env, video, replyOverrides) {
   env.click(env.findButton());
+  // Round 79 — the click now reads stored consent first (an
+  // async storage read), so the port opens a tick later.
+  await tick();
   assert.equal(env.ports.length, 1, "one resolve port opened on click");
   const port = env.ports[0];
   assert.equal(port.name, "sonic-resolve");
   const request = port.messages[0];
   assert.equal(request.type, "resolve_video");
   assert.equal(request.page_url, YT_PAGE);
-  // No-cookies-first: the first resolve never carries cookies.
+  // No-cookies-first when no consent is stored: the first
+  // resolve never carries cookies. Round 79: a stored grant
+  // sends cookies on the first resolve instead — see the
+  // stored-consent test below.
   // JSON comparison: the array was built inside the vm realm,
   // so its Object prototype differs from this realm's.
   assert.equal(request.with_cookies, false);
@@ -652,6 +658,7 @@ test("clicking the button resolves lazily: Checking… state, heartbeat, then qu
   await tick();
   assert.equal(env.ports.length, 0, "nothing resolves on page load or hover");
   env.click(env.findButton());
+  await tick();
   const port = env.ports[0];
   assert.equal(env.findButton().disabled, true, "repeat clicks disabled while resolving");
   assert.match(dropdownText(env), /Checking… 0 s/);
@@ -681,6 +688,7 @@ test("Cancel closes the resolve port and the dropdown", async () => {
   env.fireDocumentEvent("loadedmetadata", { target: video });
   await tick();
   env.click(env.findButton());
+  await tick();
   const port = env.ports[0];
   const cancel = env.findDropdown().children.find((c) => c.tagName === "BUTTON" && c._quality !== true);
   assert.ok(cancel, "Cancel button present while resolving");
@@ -829,6 +837,7 @@ test("SPA navigation clears the cache: the next video resolves again", async () 
   env.location.href = "https://www.youtube.com/watch?v=zzz999";
   env.window.history.pushState({}, "", "https://www.youtube.com/watch?v=zzz999");
   env.click(env.findButton());
+  await tick();
   assert.equal(env.ports.length, 2, "after navigation the old qualities are gone — a fresh resolve runs");
   assert.match(dropdownText(env), /Checking…/);
 });
@@ -843,6 +852,7 @@ test("SPA navigation via popstate also clears the cache", async () => {
   env.location.href = "https://www.youtube.com/watch?v=zzz999";
   env.fireWindowEvent("popstate", {});
   env.click(env.findButton());
+  await tick();
   assert.equal(env.ports.length, 2, "popstate cleared the cache too");
 });
 
@@ -861,6 +871,7 @@ test("needs_login: grant asks once, stores consent, retries with cookies", async
   env.fireDocumentEvent("loadedmetadata", { target: video });
   await tick();
   env.click(env.findButton());
+  await tick();
   const port = env.ports[0];
   env.deliver(port, {
     type: "error",
@@ -885,7 +896,7 @@ test("needs_login: grant asks once, stores consent, retries with cookies", async
   assert.deepEqual(env.sentOfType("video_found")[0].cookies, cookies);
 });
 
-test("needs_login: a stored grant retries silently, without asking again", async () => {
+test("needs_login: a stored grant sends cookies on the FIRST resolve — no cookieless failure first (Round 79)", async () => {
   const cookies = [{ name: "session", value: "abc" }];
   const env = loadContent({
     pageUrl: YT_PAGE,
@@ -901,19 +912,27 @@ test("needs_login: a stored grant retries silently, without asking again", async
   env.fireDocumentEvent("loadedmetadata", { target: video });
   await tick();
   env.click(env.findButton());
-  const port = env.ports[0];
-  env.deliver(port, {
+  await tick();
+  assert.equal(env.ports.length, 1, "one resolve — the first already carries cookies");
+  const first = env.ports[0].messages[0];
+  assert.equal(first.with_cookies, true, "stored consent: the first resolve is cookied");
+  assert.deepEqual(first.cookies, cookies, "the first resolve carries the page's cookies");
+  assert.equal(env.confirmCalls.length, 0, "stored consent grants silently, never asked");
+  // The cookied attempt ALSO fails with needs_login: the
+  // cookies didn't help — show the error, do not loop or ask
+  // again.
+  env.deliver(env.ports[0], {
     type: "error",
     ok: false,
-    request_id: port.messages[0].request_id,
+    request_id: first.request_id,
     error: "This video needs login.",
     needs_login: true,
     error_kind: "login_required",
   });
   await tick(30);
-  assert.equal(env.confirmCalls.length, 0, "stored consent grants silently");
-  assert.equal(env.ports.length, 2);
-  assert.equal(env.ports[1].messages[0].with_cookies, true);
+  assert.equal(env.confirmCalls.length, 0, "no second consent ask after a cookied failure");
+  assert.equal(env.ports.length, 1, "no retry: the cookies already failed");
+  assert.match(dropdownText(env), /needs login/);
 });
 
 test("needs_login: a denial shows the error and is not asked again this session", async () => {
@@ -931,6 +950,7 @@ test("needs_login: a denial shows the error and is not asked again this session"
     error_kind: "login_required",
   });
   env.click(env.findButton());
+  await tick();
   env.deliver(env.ports[0], loginError(env.ports[0].messages[0].request_id));
   await tick(30);
   assert.equal(env.confirmCalls.length, 1);
@@ -941,10 +961,22 @@ test("needs_login: a denial shows the error and is not asked again this session"
   // the user is not asked a second time in this session.
   env.click(env.findButton());
   env.click(env.findButton());
+  await tick();
   assert.equal(env.ports.length, 2);
   env.deliver(env.ports[1], loginError(env.ports[1].messages[0].request_id));
   await tick(30);
   assert.equal(env.confirmCalls.length, 1, "still asked only once");
+  assert.match(dropdownText(env), /needs login/);
+  // Round 79 — "Try again" after the denial does NOT repeat
+  // the identical cookieless request and does NOT ask again:
+  // the denial stands for this session, so the error is shown
+  // again with no new resolve.
+  const retry = env.findDropdown().children.find((c) => c.tagName === "BUTTON" && c.textContent === "Try again");
+  assert.ok(retry, "a retry button is offered");
+  env.click(retry);
+  await tick(30);
+  assert.equal(env.confirmCalls.length, 1, "still asked only once");
+  assert.equal(env.ports.length, 2, "no new resolve after a denied retry");
   assert.match(dropdownText(env), /needs login/);
 });
 
@@ -955,6 +987,7 @@ test("a plain resolve error shows the host's message, with a retry", async () =>
   env.fireDocumentEvent("loadedmetadata", { target: video });
   await tick();
   env.click(env.findButton());
+  await tick();
   const port = env.ports[0];
   env.deliver(port, {
     type: "error",
@@ -970,5 +1003,90 @@ test("a plain resolve error shows the host's message, with a retry", async () =>
   const retry = env.findDropdown().children.find((c) => c.tagName === "BUTTON" && c.textContent === "Try again");
   assert.ok(retry, "a retry button is offered");
   env.click(retry);
+  await tick();
   assert.equal(env.ports.length, 2, "retry opens a fresh resolve");
+  // Round 79 — the retry repeats the failed attempt's cookies:
+  // this one was cookieless, so the retry is cookieless too.
+  const retryRequest = env.ports[1].messages[0];
+  assert.equal(retryRequest.with_cookies, false);
+  assert.equal(JSON.stringify(retryRequest.cookies), JSON.stringify([]));
+});
+
+// -- Round 79 (stored-consent first resolve / "Try again") ----------
+
+test("Try again after a cookied attempt fails retries WITH the same cookies", async () => {
+  const cookies = [{ name: "session", value: "abc" }];
+  const env = loadContent({
+    pageUrl: YT_PAGE,
+    seed: { "ytdlp_cookie_consent:www.youtube.com": true },
+    sendMessageImpl: (msg, cb) => {
+      if (msg.type === "cookies_for") cb({ ok: true, cookies });
+      else if (typeof cb === "function") cb({ ok: true });
+    },
+  });
+  const video = env.makeVideo(YT_BLOB, { videoWidth: 1280, videoHeight: 720, source: false });
+  env.addVideo(video);
+  env.fireDocumentEvent("loadedmetadata", { target: video });
+  await tick();
+  env.click(env.findButton());
+  await tick();
+  assert.equal(env.ports[0].messages[0].with_cookies, true, "stored grant: the first resolve is already cookied");
+  env.deliver(env.ports[0], {
+    type: "error",
+    ok: false,
+    request_id: env.ports[0].messages[0].request_id,
+    error: "Something went wrong on the host.",
+    needs_login: false,
+    error_kind: "unknown",
+  });
+  await tick();
+  assert.match(dropdownText(env), /Something went wrong/);
+  const retry = env.findDropdown().children.find((c) => c.tagName === "BUTTON" && c.textContent === "Try again");
+  assert.ok(retry, "a retry button is offered");
+  env.click(retry);
+  await tick();
+  assert.equal(env.ports.length, 2, "retry opens a fresh resolve");
+  const retryRequest = env.ports[1].messages[0];
+  assert.equal(retryRequest.with_cookies, true, "the retry keeps the failed attempt's cookies");
+  assert.deepEqual(retryRequest.cookies, cookies);
+});
+
+test("Try again after a needs_login error retries with cookies once a grant is stored", async () => {
+  const cookies = [{ name: "session", value: "abc" }];
+  const env = loadContent({
+    pageUrl: YT_PAGE,
+    confirmFn: () => false,
+    sendMessageImpl: (msg, cb) => {
+      if (msg.type === "cookies_for") cb({ ok: true, cookies });
+      else if (typeof cb === "function") cb({ ok: true });
+    },
+  });
+  const video = env.makeVideo(YT_BLOB, { videoWidth: 1280, videoHeight: 720, source: false });
+  env.addVideo(video);
+  env.fireDocumentEvent("loadedmetadata", { target: video });
+  await tick();
+  env.click(env.findButton());
+  await tick();
+  env.deliver(env.ports[0], {
+    type: "error",
+    ok: false,
+    request_id: env.ports[0].messages[0].request_id,
+    error: "This video needs login.",
+    needs_login: true,
+    error_kind: "login_required",
+  });
+  await tick(30);
+  assert.equal(env.confirmCalls.length, 1, "asked once, denied");
+  assert.match(dropdownText(env), /needs login/);
+  // Another tab stores a grant for this site after the denial.
+  env.storage["ytdlp_cookie_consent:www.youtube.com"] = true;
+  const retry = env.findDropdown().children.find((c) => c.tagName === "BUTTON" && c.textContent === "Try again");
+  assert.ok(retry, "a retry button is offered");
+  env.click(retry);
+  await tick(30);
+  assert.equal(env.confirmCalls.length, 1, "the stored grant answers silently — never asked again");
+  assert.equal(env.ports.length, 2, "retry runs with cookies instead of repeating the cookieless request");
+  const retryRequest = env.ports[1].messages[0];
+  assert.equal(retryRequest.with_cookies, true);
+  assert.deepEqual(retryRequest.cookies, cookies);
 });

@@ -20,6 +20,7 @@ import type {
   ProgressEvent,
   ProxyConfigInput,
   ProxyConfigRow,
+  QualityRow,
   QueueRow,
   QueueUpdate,
   QuotaStatus,
@@ -167,6 +168,34 @@ export async function ytdlpVersion(): Promise<YtdlpStatus> {
  *  quality list. No cookies — the app has no browser session. */
 export async function ytdlpResolve(url: string): Promise<YtdlpResolveResult> {
   return invoke<YtdlpResolveResult>('ytdlp_resolve', { url })
+}
+
+/** Round 79 — add a download from a resolved platform video
+ *  (the manual Add URL dialog): the dialog resolved the page
+ *  with `ytdlpResolve` and picked one quality row; the engine
+ *  creates the download from the row's stream URLs — never
+ *  from the page URL (a watch-page URL probes size 0 with no
+ *  ranges). Returns the created download id and the probe info. */
+export async function addResolvedVideoDownload(args: {
+  pageUrl: string
+  row: QualityRow
+  filename?: string | null
+  folder?: string | null
+  category?: string | null
+  queue?: string | null
+  speedLimitKbps?: number | null
+  startNow: boolean
+}): Promise<[string, ProbeInfo]> {
+  return invoke<[string, ProbeInfo]>('add_resolved_video_download', {
+    pageUrl: args.pageUrl,
+    row: args.row,
+    filename: args.filename ?? null,
+    folder: args.folder ?? null,
+    category: args.category ?? null,
+    queue: args.queue ?? null,
+    speedLimitKbps: args.speedLimitKbps ?? null,
+    startNow: args.startNow,
+  })
 }
 
 /** Round 78 — download the newest yt-dlp.exe from its GitHub
