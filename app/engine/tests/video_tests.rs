@@ -1466,6 +1466,7 @@ async fn direct_ytdlp_download_forwards_capture_cookies_and_headers() {
                 format_id: Some("18".to_string()),
                 audio_url: None,
                 fragmented: true,
+                filesize: None,
             },
         )
         .unwrap();

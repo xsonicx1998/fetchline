@@ -279,6 +279,14 @@ pub struct ResolvedLink {
     pub format_id: Option<String>,
     pub audio_url: Option<String>,
     pub fragmented: bool,
+    /// Round 84 — the yt-dlp format's size in bytes
+    /// (`filesize`, falling back to `filesize_approx`), so the
+    /// Add URL dialog can render the pre-resolved size without
+    /// probing the stream URL and `confirm_pending_link` can
+    /// create the download without a probe. `None` when yt-dlp
+    /// reported no size — the download still proceeds (Mister's
+    /// probe tolerates "size unknown" instead of rejecting).
+    pub filesize: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -316,6 +324,12 @@ pub struct PendingLinkRow {
     pub audio_url: Option<String>,
     #[serde(default)]
     pub fragmented: bool,
+    /// Round 84 — the yt-dlp format's size in bytes (see
+    /// `ResolvedLink::filesize`): the dialog renders it without
+    /// a probe, and the probe-free confirm uses it as the
+    /// download's size. `None` when yt-dlp reported no size.
+    #[serde(default)]
+    pub filesize: Option<i64>,
     pub created_at: String,
 }
 
@@ -801,6 +815,19 @@ impl Store {
                 }
             }
         }
+        // Round 84 — the resolved size (see `ResolvedLink::filesize`):
+        // same PRAGMA-guarded pattern as Round 78, so databases
+        // made before this round gain the column on open.
+        {
+            let mut stmt = conn.prepare("PRAGMA table_info(pending_links)")?;
+            let cols: Vec<String> = stmt
+                .query_map([], |r| r.get::<_, String>(1))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            drop(stmt);
+            if !cols.iter().any(|c| c == "filesize") {
+                conn.execute("ALTER TABLE pending_links ADD COLUMN filesize INTEGER", [])?;
+            }
+        }
         // Added in the site-grabber milestone (S06): the
         // grabber_projects table gained a 'stopped' status, live
         // progress columns and the matched-files JSON. A database
@@ -1224,7 +1251,7 @@ impl Store {
         let conn = self.lock_conn();
         conn.execute(
             "UPDATE pending_links SET filename = ?1, headers = ?2, source_url = ?3, \
-             format_id = ?4, audio_url = ?5, fragmented = ?6 WHERE id = ?7",
+             format_id = ?4, audio_url = ?5, fragmented = ?6, filesize = ?7 WHERE id = ?8",
             params![
                 resolved.filename,
                 resolved.headers,
@@ -1232,6 +1259,7 @@ impl Store {
                 resolved.format_id,
                 resolved.audio_url,
                 if resolved.fragmented { 1 } else { 0 },
+                resolved.filesize.map(|s| s as i64),
                 row.id,
             ],
         )?;
@@ -1246,7 +1274,7 @@ impl Store {
     pub fn list_pending_links(&self, status: Option<&str>) -> Result<Vec<PendingLinkRow>> {
         let conn = self.lock_conn();
         let mut stmt = conn.prepare(
-            "SELECT id, url, referrer, source, status, download_id, error, cookies, created_at, filename, headers, source_url, format_id, audio_url, fragmented \
+            "SELECT id, url, referrer, source, status, download_id, error, cookies, created_at, filename, headers, source_url, format_id, audio_url, fragmented, filesize \
              FROM pending_links WHERE (?1 IS NULL OR status = ?1) \
              ORDER BY created_at ASC, rowid ASC",
         )?;
@@ -1258,7 +1286,7 @@ impl Store {
     pub fn get_pending_link(&self, id: &str) -> Result<Option<PendingLinkRow>> {
         let conn = self.lock_conn();
         let mut stmt = conn.prepare(
-            "SELECT id, url, referrer, source, status, download_id, error, cookies, created_at, filename, headers, source_url, format_id, audio_url, fragmented \
+            "SELECT id, url, referrer, source, status, download_id, error, cookies, created_at, filename, headers, source_url, format_id, audio_url, fragmented, filesize \
              FROM pending_links WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![id], row_to_pending_link)?;
@@ -3632,6 +3660,7 @@ fn row_to_pending_link(r: &rusqlite::Row<'_>) -> rusqlite::Result<PendingLinkRow
         format_id: r.get(12)?,
         audio_url: r.get(13)?,
         fragmented: r.get::<_, i64>(14)? != 0,
+        filesize: r.get(15)?,
     })
 }
 

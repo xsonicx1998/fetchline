@@ -53,6 +53,11 @@ interface AddDownloadDialogProps {
    *  `http_headers` JSON), so the size probe sends the
    *  User-Agent / Referer the stream host expects. */
   initialHeaders?: string | null
+  /** Round 84: a resolved video's size in bytes (the
+   *  yt-dlp format's size) — the dialog renders it directly
+   *  instead of probing the stream URL, which TikTok's CDN
+   *  refuses 403. Null when yt-dlp reported no size. */
+  initialFileSize?: number | null
   /** Round 74 (12): capture mode — the dialog shows a captured
    *  link (extension or clipboard), not a typed URL: the file
    *  name is the title instead of "Add URL", and the URL field
@@ -206,6 +211,7 @@ export function AddDownloadDialog({
   pendingLinkId = null,
   initialCookies = null,
   initialHeaders = null,
+  initialFileSize = null,
   captureMode = false,
   captureTitle = null,
   alreadyInList = false,
@@ -343,6 +349,23 @@ export function AddDownloadDialog({
     } catch {
       return
     }
+    // Round 84 — a yt-dlp-resolved capture (a pending row with
+    // the resolver's headers and/or size) is NEVER probed:
+    // yt-dlp already validated the stream, and the R83 retest
+    // proved the probe itself is refused 403 by TikTok's CDN
+    // on the signed URL — the probe error then blocked Start
+    // Download and locked the row out. Render the pre-resolved
+    // size (or nothing when yt-dlp reported none — "size
+    // unknown" is tolerated, not an error) and return: no
+    // probe, no error. A capture without either signal is an
+    // old plain capture and still probes as before.
+    const resolvedCapture =
+      pendingLinkId != null && (initialHeaders != null || initialFileSize != null)
+    if (resolvedCapture) {
+      setFileSize(initialFileSize ?? null)
+      setProbeError(null)
+      return
+    }
     const reqId = ++probeReqId.current
     const timer = window.setTimeout(async () => {
       // Round 79 — a platform video page resolves with yt-dlp
@@ -425,7 +448,7 @@ export function AddDownloadDialog({
     }, 500)
     probedUrl.current = target
     return () => window.clearTimeout(timer)
-  }, [open, url, initialCookies, initialHeaders, pendingLinkId])
+  }, [open, url, initialCookies, initialHeaders, initialFileSize, pendingLinkId])
 
   // Round 67 — IDM behaviour: picking a category fills the
   // folder with that category's default folder (the engine
@@ -552,9 +575,10 @@ export function AddDownloadDialog({
         // Round 67 — a browser capture: confirm it through the
         // real add path with its cookies. The engine applies
         // the speed cap before the start and starts it when
-        // asked; it marks the row rejected with the reason when
-        // the add itself fails, so the dialog shows the error
-        // and stays open for the user to fix it.
+        // asked. Round 84 — a failed add leaves the row
+        // pending (retryable) instead of marking it rejected,
+        // so the dialog shows the error and stays open for the
+        // user to fix it and retry.
         const [id] = await confirmPendingLink({
           id: pendingLinkId,
           filename: filename.trim() || null,

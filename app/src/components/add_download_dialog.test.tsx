@@ -339,3 +339,61 @@ describe('standalone header', () => {
     expect(screen.getByRole('heading').textContent).toBe(MOVIE_TITLE)
   })
 })
+
+// -- Round 84 — a resolved capture never probes ---------------------------
+// The R83 retest: the dialog probed the direct TikTok CDN URL,
+// TikTok answered 403, and Start Download was rejected with
+// "already decided (rejected)". yt-dlp already validated the
+// stream, so a capture carrying the resolver's headers and/or
+// size renders the pre-resolved size and never calls probeUrl
+// (and never resolves the page either — the row is already
+// resolved). No probe error is shown.
+describe('resolved capture probe skip', () => {
+  const CDN_URL =
+    'https://v16-webapp-prime.us.tiktok.com/video/tos/useast2a/tos-useast2a-ve-0068c003/oYvA0wQwEFuQAA/video.mp4'
+  const HEADERS =
+    '{"User-Agent":"Mozilla/5.0 TestAgent","Referer":"https://www.tiktok.com/"}'
+
+  function renderResolvedCapture(initialFileSize: number | null) {
+    return render(
+      <AddDownloadDialog
+        open
+        standalone
+        captureMode
+        categories={[]}
+        initialUrl={CDN_URL}
+        pendingLinkId="pl-1"
+        initialHeaders={HEADERS}
+        initialFileSize={initialFileSize}
+        captureTitle="TikTok video.mp4"
+        onClose={() => {}}
+        onAdded={() => {}}
+        onLateError={() => {}}
+      />,
+    )
+  }
+
+  test('renders the pre-resolved size without probing', async () => {
+    renderResolvedCapture(11_829_048)
+    // The pre-resolved size renders (no 500 ms debounce — the
+    // skip runs on mount, not in the timer).
+    await waitFor(() => expect(screen.getByText('11.3 MB')).toBeTruthy(), {
+      timeout: 5000,
+    })
+    // Past the debounce: still no probe, no resolve, no error.
+    await new Promise((r) => setTimeout(r, 700))
+    expect(vi.mocked(api.probeUrl)).not.toHaveBeenCalled()
+    expect(vi.mocked(api.ytdlpResolve)).not.toHaveBeenCalled()
+    expect(screen.queryByText(/403/)).toBeNull()
+  })
+
+  test('no size is tolerated, still without probing', async () => {
+    renderResolvedCapture(null)
+    // Past the debounce: no probe, no error — "size unknown"
+    // is tolerated, not an error.
+    await new Promise((r) => setTimeout(r, 700))
+    expect(vi.mocked(api.probeUrl)).not.toHaveBeenCalled()
+    expect(vi.mocked(api.ytdlpResolve)).not.toHaveBeenCalled()
+    expect(screen.queryByText(/403/)).toBeNull()
+  })
+})

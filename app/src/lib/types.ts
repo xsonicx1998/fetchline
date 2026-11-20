@@ -196,6 +196,10 @@ export interface PendingLinkRow {
   format_id: string | null
   audio_url: string | null
   fragmented: boolean
+  // Round 84 — the resolved format's size in bytes: the dialog
+  // renders it without probing the stream URL, and confirm
+  // creates the download without a probe.
+  filesize?: number | null
 }
 
 /** Round 78 — the bundled yt-dlp's status, for the Settings

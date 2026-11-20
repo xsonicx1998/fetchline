@@ -101,6 +101,9 @@ fn store_migration_adds_round78_columns_to_old_db() {
     assert_eq!(pending[0].filename, None);
     assert_eq!(pending[0].headers, None);
     assert!(!pending[0].fragmented);
+    // Round 84 — the old row's filesize is NULL (the migration
+    // adds the column without a value for pre-Round-84 rows).
+    assert_eq!(pending[0].filesize, None);
     // A resolved row round-trips through the new columns.
     let resolved = store
         .enqueue_pending_link_resolved(
@@ -117,9 +120,16 @@ fn store_migration_adds_round78_columns_to_old_db() {
                 format_id: Some("22".to_string()),
                 audio_url: None,
                 fragmented: false,
+                // Round 84 — the resolved size round-trips too.
+                filesize: Some(1_000_000),
             },
         )
         .unwrap();
+    let pending = store.list_pending_links(None).unwrap();
+    assert_eq!(pending.len(), 2);
+    assert_eq!(pending[1].filename.as_deref(), Some("My Video.mp4"));
+    assert_eq!(pending[1].format_id.as_deref(), Some("22"));
+    assert_eq!(pending[1].filesize, Some(1_000_000));
     let back = store.get_pending_link(&resolved.id).unwrap().expect("row");
     assert_eq!(back.filename.as_deref(), Some("My Video.mp4"));
     assert_eq!(back.format_id.as_deref(), Some("22"));
@@ -162,6 +172,8 @@ fn resolved_variant() -> VideoVariantInput {
         source_url: Some("https://www.youtube.com/watch?v=x".to_string()),
         format_id: Some("22".to_string()),
         fragmented: false,
+        // Round 84 — the resolved size rides the variant.
+        filesize: Some(1_000_000),
     }
 }
 
@@ -202,6 +214,8 @@ fn host_video_found_resolved_variant_stores_resolver_metadata() {
     assert!(!headers.contains("SID=abc"));
     assert!(!headers.contains("Cookie"));
     assert!(!row.fragmented);
+    // Round 84 — the resolved size rides the row too.
+    assert_eq!(row.filesize, Some(1_000_000));
 }
 
 #[test]

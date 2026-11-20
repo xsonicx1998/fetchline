@@ -472,6 +472,14 @@ pub struct VideoVariantInput {
     pub format_id: Option<String>,
     #[serde(default)]
     pub fragmented: bool,
+    /// Round 84 — the yt-dlp format's size in bytes (`filesize`,
+    /// falling back to `filesize_approx`), carried by the
+    /// extension's `buildResolvedVariant` from the host's
+    /// quality row: stored on the pending row so the dialog
+    /// renders it and confirm creates the download without
+    /// probing the stream URL.
+    #[serde(default)]
+    pub filesize: Option<u64>,
 }
 
 /// Validate one `video_found` message against the desktop settings.

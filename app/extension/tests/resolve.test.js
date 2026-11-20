@@ -205,6 +205,10 @@ test("buildResolvedVariant: the video_found variant for a picked quality", () =>
   assert.equal(v.source_url, page);
   assert.equal(v.format_id, "137");
   assert.equal(v.fragmented, false);
+  // Round 84 — the resolved format's size rides the variant so
+  // the engine stores it on the pending row (dialog renders it,
+  // confirm creates the download without probing the stream).
+  assert.equal(v.filesize, 123456);
   // Round 81 — headers is a JSON-encoded STRING, not the raw
   // map: the engine's VideoVariantInput takes Option<String>,
   // and the raw map made the host refuse the whole pick with
@@ -221,6 +225,9 @@ test("buildResolvedVariant: the video_found variant for a picked quality", () =>
   const stream = buildResolvedVariant(RESOLVED.formats[3], RESOLVED, page);
   assert.equal(stream.url, "https://cdn.example.com/master.m3u8");
   assert.equal(stream.fragmented, true);
+  // Round 84 — a format with no size sends null, not 0: the
+  // download still proceeds with an unknown size.
+  assert.equal(stream.filesize, null);
 
   // A fragmented format with no manifest URL falls back to the page URL.
   const noManifest = buildResolvedVariant({ ...RESOLVED.formats[3], url: null }, RESOLVED, page);

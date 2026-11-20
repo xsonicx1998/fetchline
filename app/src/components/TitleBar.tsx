@@ -113,11 +113,21 @@ export function TitleBar({
         className="flex min-w-0 flex-1 items-center gap-2 px-3"
       >
         {icon ? (
+          // Round 84 — frameless: the R83 retest still showed the
+          // logo in a "dark rounded square with a purple glow".
+          // The pixels are innocent (public/icon.png IS the
+          // transparent emblem — byte-identical to the
+          // flood-fill cut, mean opaque RGB (91,51,213), and the
+          // alpha map is a diagonal quills shape, not a baked
+          // tile), so the box was these classes: rounded-[5px]
+          // clipped the 20px artwork into a rounded square and
+          // the purple glow outlined it as a tile. No rounding,
+          // no glow — the graphic floats on the title bar.
           <img
             src="/icon.png"
             alt=""
             aria-hidden="true"
-            className="h-5 w-5 shrink-0 rounded-[5px] shadow-[0_0_10px_rgba(139,32,255,0.8)]"
+            className="h-5 w-5 shrink-0"
           />
         ) : null}
         <span className="truncate text-[13.5px] font-semibold text-text">{title}</span>

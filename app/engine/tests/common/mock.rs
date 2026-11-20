@@ -47,6 +47,13 @@ pub struct MockConfig {
     /// still complete — the refused segments defer and retry
     /// under the ratcheted concurrency instead of failing.
     pub max_concurrent_gets: Option<usize>,
+    /// Round 84 — when non-empty, every request must carry each
+    /// listed header (name, exact value) or it is refused 403:
+    /// models a CDN that answers only requests with the
+    /// browser's User-Agent / Referer / Cookie (TikTok's signed
+    /// URLs). A download that completes against this gate proves
+    /// the resolved headers + cookies reached the worker.
+    pub require_headers: Vec<(String, String)>,
 }
 
 impl Default for MockConfig {
@@ -62,6 +69,7 @@ impl Default for MockConfig {
             no_etag: false,
             send_last_modified: false,
             max_concurrent_gets: None,
+            require_headers: Vec::new(),
         }
     }
 }
@@ -396,6 +404,25 @@ pub fn handle(
     let mut buf = [0u8; 8192];
     let Ok(n) = stream.read(&mut buf) else { return };
     let req = String::from_utf8_lossy(&buf[..n]).to_string();
+    // Round 84 — header gate (see `MockConfig::require_headers`):
+    // a request missing any required header is refused 403,
+    // exactly like a CDN that only answers the browser's own
+    // request.
+    if !config.require_headers.is_empty() {
+        let missing = config.require_headers.iter().any(|(name, value)| {
+            !req.lines().skip(1).any(|line| {
+                let Some((k, v)) = line.split_once(':') else {
+                    return false;
+                };
+                k.trim().eq_ignore_ascii_case(name) && v.trim() == value
+            })
+        });
+        if missing {
+            let head = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let _ = stream.write_all(head.as_bytes());
+            return;
+        }
+    }
     // Forced failure mode (replica-test): every request answers with
     // this status and no body, e.g. 404 for the probe's HEAD.
     if let Some(code) = config.fail_status {

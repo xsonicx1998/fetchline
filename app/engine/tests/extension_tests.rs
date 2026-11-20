@@ -537,9 +537,14 @@ async fn confirm_pending_link_twice_is_an_error() {
 }
 
 #[tokio::test]
-async fn confirm_pending_link_bad_url_is_rejected() {
-    // A dead link is rejected with the reason, and the dialog can
-    // show it and stay open for the user to fix the URL.
+async fn confirm_pending_link_bad_url_stays_pending() {
+    // Round 84 — a dead link no longer decides the row: the R83
+    // retest proved the old rejection locked the user out
+    // ("This browser link was already decided (rejected)")
+    // after a probe 403 the retry could have survived. The
+    // confirm fails with the real error, the row stays pending
+    // with no verdict, and a second confirm reaches the add
+    // path again instead of being refused as already-decided.
     let server = MockServer::start(MockConfig {
         fail_status: Some(404),
         ..Default::default()
@@ -556,9 +561,190 @@ async fn confirm_pending_link_bad_url_is_rejected() {
         .unwrap_err();
     assert!(err.to_string().contains("404"), "error: {err}");
     let row = store.get_pending_link(&row.id).unwrap().unwrap();
-    assert_eq!(row.status, "rejected");
-    assert!(row.error.as_deref().unwrap().contains("404"));
+    assert_eq!(row.status, "pending");
+    assert!(row.error.is_none());
     assert!(mgr.list_downloads().unwrap().is_empty());
+    // A retry is not locked out: it reaches the add path and
+    // fails with the same real error, not "already decided".
+    let err = mgr
+        .confirm_pending_link(&row.id, None, None, None, None, None, true)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("404"), "error: {err}");
+    assert!(
+        !err.to_string().contains("already decided"),
+        "a retry must reach the add path: {err}"
+    );
+}
+
+#[tokio::test]
+async fn confirm_pending_link_failed_add_retries_after_fix() {
+    // Round 84 — the state transition, end to end: a failed add
+    // leaves the row pending, and fixing the cause lets the
+    // retry succeed. The failure here is a folder that cannot
+    // be created (an existing file sits in its place); the
+    // retry uses the default folder.
+    let server = MockServer::start(MockConfig::default());
+    let dir = tmpdir();
+    let mgr = test_mgr(&dir);
+    let store = mgr.store();
+    let row = store
+        .enqueue_pending_link(&server.url, None, "browser")
+        .unwrap();
+    let blocker = dir.join("blocker");
+    std::fs::write(&blocker, b"x").unwrap();
+    let err = mgr
+        .confirm_pending_link(
+            &row.id,
+            None,
+            Some(blocker.to_string_lossy().to_string()),
+            None,
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap_err();
+    let row = store.get_pending_link(&row.id).unwrap().unwrap();
+    assert_eq!(row.status, "pending", "error was: {err}");
+    let (download_id, _) = mgr
+        .confirm_pending_link(&row.id, None, None, None, None, None, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        mgr.get_download(&download_id).unwrap().unwrap().status,
+        "queued"
+    );
+    let row = store.get_pending_link(&row.id).unwrap().unwrap();
+    assert_eq!(row.status, "accepted");
+    assert_eq!(row.download_id.as_deref(), Some(download_id.as_str()));
+}
+
+#[tokio::test]
+async fn confirm_pending_link_resolved_video_skips_probe() {
+    // Round 84 — the R83 retest's TikTok failure: the Add URL
+    // dialog probed the direct CDN URL, TikTok answered 403,
+    // and Start Download was rejected with "already decided
+    // (rejected)". A yt-dlp-resolved row is now created WITHOUT
+    // a probe — yt-dlp already validated the stream — so the
+    // confirm succeeds against a server that 403s every
+    // request, and the server sees zero HEADs. The download's
+    // size is the resolved format's size, it starts as one
+    // open-ended segment (no `Range` header is ever sent), and
+    // a plain capture against the same server still fails its
+    // probe — but stays pending now, not rejected.
+    let server = MockServer::start(MockConfig {
+        fail_status: Some(403),
+        size_bytes: Some(512 * 1024),
+        ..Default::default()
+    });
+    let dir = tmpdir();
+    let mgr = test_mgr(&dir);
+    let store = mgr.store();
+    let page = "https://www.tiktok.com/@user/video/7551233954129399053";
+    let row = store
+        .enqueue_pending_link_resolved(
+            &server.url,
+            Some(page),
+            None,
+            &fetchline_engine::store::ResolvedLink {
+                filename: Some("TikTok video.mp4".to_string()),
+                headers: Some(
+                    r#"{"User-Agent":"Mozilla/5.0 TestAgent","Referer":"https://www.tiktok.com/"}"#
+                        .to_string(),
+                ),
+                source_url: Some(page.to_string()),
+                format_id: Some("h264".to_string()),
+                audio_url: None,
+                fragmented: false,
+                filesize: Some(512 * 1024),
+            },
+        )
+        .unwrap();
+    let (download_id, _) = mgr
+        .confirm_pending_link(&row.id, None, None, None, None, None, false)
+        .await
+        .unwrap();
+    assert_eq!(server.head_requests(), 0, "the probe must not run");
+    let dl = mgr.get_download(&download_id).unwrap().unwrap();
+    assert_eq!(dl.filename, "TikTok video.mp4");
+    assert_eq!(dl.size_bytes, Some(512 * 1024));
+    let segments = store.get_segments(&download_id).unwrap();
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments[0].start_byte, 0);
+    assert_eq!(segments[0].end_byte, None);
+    let row = store.get_pending_link(&row.id).unwrap().unwrap();
+    assert_eq!(row.status, "accepted");
+    // The contrast: a plain capture against the same 403 server
+    // still probes, still fails — but stays pending now. (The
+    // 403 error IS the proof the probe ran: it is the only
+    // network call in the plain confirm path. The server's HEAD
+    // counter cannot prove it — the mock's fail_status branch
+    // answers before the counter increments.)
+    let plain = store
+        .enqueue_pending_link(&server.url, None, "browser")
+        .unwrap();
+    let err = mgr
+        .confirm_pending_link(&plain.id, None, None, None, None, None, false)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("403"), "error: {err}");
+    let plain = store.get_pending_link(&plain.id).unwrap().unwrap();
+    assert_eq!(plain.status, "pending");
+}
+
+#[tokio::test]
+async fn resolved_video_headers_and_cookies_reach_the_worker() {
+    // Round 84 (1b) — the resolved headers + cookies must ride
+    // the segment requests, not just the probe: the server
+    // refuses 403 every request that lacks the browser's
+    // User-Agent and Cookie, so a download that completes
+    // against it proves both reached the worker. The confirm
+    // never probes (zero HEADs) — the gate would refuse a bare
+    // probe too.
+    let server = MockServer::start(MockConfig {
+        size_bytes: Some(512 * 1024),
+        require_headers: vec![
+            (
+                "User-Agent".to_string(),
+                "Mozilla/5.0 TestAgent".to_string(),
+            ),
+            ("Cookie".to_string(), "sessionid=abc".to_string()),
+        ],
+        ..Default::default()
+    });
+    let dir = tmpdir();
+    let mgr = test_mgr(&dir);
+    let store = mgr.store();
+    let page = "https://www.tiktok.com/@user/video/7551233954129399053";
+    let row = store
+        .enqueue_pending_link_resolved(
+            &server.url,
+            Some(page),
+            Some(r#"[{"name":"sessionid","value":"abc"}]"#),
+            &fetchline_engine::store::ResolvedLink {
+                filename: Some("TikTok video.mp4".to_string()),
+                headers: Some(
+                    r#"{"User-Agent":"Mozilla/5.0 TestAgent","Referer":"https://www.tiktok.com/"}"#
+                        .to_string(),
+                ),
+                source_url: Some(page.to_string()),
+                format_id: Some("h264".to_string()),
+                audio_url: None,
+                fragmented: false,
+                filesize: Some(512 * 1024),
+            },
+        )
+        .unwrap();
+    let (download_id, _) = mgr
+        .confirm_pending_link(&row.id, None, None, None, None, None, true)
+        .await
+        .unwrap();
+    assert_eq!(server.head_requests(), 0, "the probe must not run");
+    assert!(wait_for_status(&mgr, &download_id, "complete", 30).await);
+    let dl = mgr.get_download(&download_id).unwrap().unwrap();
+    assert_eq!(dl.size_bytes, Some(512 * 1024));
+    assert_eq!(std::fs::read(&dl.save_path).unwrap().len(), 512 * 1024);
 }
 
 #[tokio::test]
@@ -1313,10 +1499,13 @@ async fn drain_cookie_gated_link_downloads_when_cookie_present() {
 }
 
 #[tokio::test]
-async fn drain_cookie_gated_link_rejected_without_cookie() {
+async fn drain_cookie_gated_link_stays_pending_without_cookie() {
     // Round 67: the dialog's confirm (not the drain) decides a
     // browser capture — without its cookies the gated link fails
-    // with 401 and the row is rejected with the reason.
+    // with 401. Round 84: the failure no longer rejects the row
+    // (the R83 retest proved that locked the user out) — it
+    // stays pending, so the user can supply the cookies (or the
+    // site) and retry.
     let server = CookieGatedServer::start(true);
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
@@ -1346,12 +1535,11 @@ async fn drain_cookie_gated_link_rejected_without_cookie() {
         .unwrap_err();
     assert!(err.to_string().contains("401"), "error: {err}");
     let row = store.get_pending_link(&pending_id).unwrap().unwrap();
-    assert_eq!(row.status, "rejected");
+    assert_eq!(row.status, "pending");
     assert_eq!(row.cookies, None);
-    assert!(store
-        .list_pending_links(Some("pending"))
-        .unwrap()
-        .is_empty());
+    let still_pending = store.list_pending_links(Some("pending")).unwrap();
+    assert_eq!(still_pending.len(), 1);
+    assert_eq!(still_pending[0].id, pending_id);
     assert_eq!(
         server.cookie_seen(),
         0,

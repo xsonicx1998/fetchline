@@ -1872,6 +1872,41 @@ impl DownloadManager {
         let info = self
             .probe_url_with_headers(url, cookies.as_deref(), headers.as_ref())
             .await?;
+        return self
+            .create_download_from_probe(
+                url,
+                filename,
+                folder,
+                category_id,
+                queue_id,
+                cookies,
+                headers,
+                info,
+            )
+            .await;
+    }
+
+    /// Round 84 — the shared tail of every add that starts from
+    /// a `ProbeInfo`: filename/category/folder resolution,
+    /// duplicate handling, the download + segments rows, and the
+    /// in-memory cookies/headers for the segment requests
+    /// (Round 78). The probed path (`add_download_with_cookies
+    /// _and_headers`) and the probe-free resolved path
+    /// (`add_resolved_stream_download`) both end here, so a
+    /// resolved download gets exactly the same row shape as a
+    /// probed one — only the probe itself is skipped.
+    async fn create_download_from_probe(
+        &self,
+        url: &str,
+        filename: Option<String>,
+        folder: Option<String>,
+        category_id: Option<String>,
+        queue_id: Option<String>,
+        cookies: Option<String>,
+        headers: Option<crate::probe::RequestHeaders>,
+        info: ProbeInfo,
+    ) -> Result<(String, ProbeInfo)> {
+        let settings = self.store.get_settings().unwrap_or_default();
         let name = sanitize_filename(
             filename
                 .filter(|f| !f.trim().is_empty())
@@ -1967,6 +2002,61 @@ impl DownloadManager {
             self.store.add_to_queue(&id, &queue)?;
         }
         Ok((id, info))
+    }
+
+    /// Round 84 — add a download from a yt-dlp-resolved stream
+    /// URL WITHOUT probing it first. yt-dlp already validated
+    /// the stream (`filesize` / `filesize_approx`, ext,
+    /// resolution, `http_headers`), and the R83 retest proved
+    /// the engine's own probe is refused 403 by TikTok's CDN on
+    /// the signed URL — a bare HEAD / 1-byte ranged GET that the
+    /// resolver's headers would have answered. So:
+    ///   * the size comes from the resolved format (`size`,
+    ///     `None` = unknown — tolerated, the download streams
+    ///     to EOF, Mister's probe tolerates "size unknown"
+    ///     instead of rejecting);
+    ///   * the headers + cookies ride the segment requests
+    ///     (Round 78 — already forwarded, verified in code);
+    ///   * the download starts as ONE open-ended segment
+    ///     (`accept_ranges: false` — no `Range` header is ever
+    ///     sent, and an open-ended segment cannot be split into
+    ///     parallel range requests; the run-level host cap,
+    ///     `tiktok.com` → 1, is a second guard).
+    /// If the direct download still fails with 401/403 (e.g. the
+    /// signed URL expired while the dialog sat open), the
+    /// run-level re-resolve (403/410 → `reresolve_once`, once
+    /// per session, using the meta `confirm_pending_link`
+    /// stores) is the fallback — same as for a probed download.
+    pub async fn add_resolved_stream_download(
+        self: &Arc<Self>,
+        url: &str,
+        filename: Option<String>,
+        folder: Option<String>,
+        category_id: Option<String>,
+        queue_id: Option<String>,
+        cookies: Option<String>,
+        headers: Option<crate::probe::RequestHeaders>,
+        size: Option<i64>,
+    ) -> Result<(String, ProbeInfo)> {
+        let info = ProbeInfo {
+            size: size.filter(|s| *s > 0).map(|s| s as u64),
+            accept_ranges: false,
+            etag: None,
+            last_modified: None,
+            filename: filename.clone().filter(|f| !f.trim().is_empty()),
+            final_url: url.to_string(),
+        };
+        self.create_download_from_probe(
+            url,
+            filename,
+            folder,
+            category_id,
+            queue_id,
+            cookies,
+            headers,
+            info,
+        )
+        .await
     }
 
     // -- browser extension (S13): pending-links drain -------------------
@@ -2242,6 +2332,21 @@ impl DownloadManager {
         // without a probe or segments: yt-dlp downloads the
         // manifest format itself, and the manifest URL is not a
         // file to probe.
+        // Round 84 — a yt-dlp-resolved row (a `format_id` is
+        // present) is created WITHOUT a probe: yt-dlp already
+        // validated the stream, and the R83 retest proved the
+        // engine's probe is refused 403 by TikTok's CDN on the
+        // signed URL. The size comes from the row's `filesize`
+        // (the resolved format's size, or `None` when yt-dlp
+        // reported none). Note `source == "video"` is NOT the
+        // marker: plain S13 page-scraped captures share that
+        // source and were never resolved, so they still probe.
+        let resolved_video = !row.fragmented
+            && row
+                .format_id
+                .as_deref()
+                .map(|f| !f.trim().is_empty())
+                .unwrap_or(false);
         let add = if row.fragmented {
             match self
                 .add_direct_ytdlp_download(
@@ -2268,6 +2373,18 @@ impl DownloadManager {
                 )),
                 Err(e) => Err(e),
             }
+        } else if resolved_video {
+            self.add_resolved_stream_download(
+                &row.url,
+                resolved_filename,
+                folder,
+                category_id,
+                queue_id,
+                cookies,
+                headers,
+                row.filesize,
+            )
+            .await
         } else {
             self.add_download_with_cookies_and_headers(
                 &row.url,
@@ -2335,10 +2452,20 @@ impl DownloadManager {
                 Ok((download_id, probe))
             }
             Err(e) => {
-                let err = e.to_string();
-                let _ = self
-                    .store
-                    .mark_pending_link(&row.id, "rejected", None, Some(&err));
+                // Round 84 — a failed add NEVER decides the row:
+                // the R83 retest proved the old behaviour locked
+                // the user out ("This browser link was already
+                // decided (rejected)") after a probe 403 the
+                // retry could have survived. The row stays
+                // pending, so the dialog can be retried — the
+                // error is logged, not stored as a verdict.
+                // (The two policy rejections above — integration
+                // off, excluded site — still mark rejected: those
+                // are decisions, not failures.)
+                let _ = self.store.log(&format!(
+                    "confirm {}: add failed ({e}) — row stays pending, retryable",
+                    row.id
+                ));
                 Err(e)
             }
         }

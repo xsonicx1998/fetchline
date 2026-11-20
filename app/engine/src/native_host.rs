@@ -696,6 +696,7 @@ pub fn enqueue_resolved(
             format_id: variant.format_id.clone(),
             audio_url: variant.audio_url.clone(),
             fragmented: variant.fragmented,
+            filesize: variant.filesize,
         },
     )
 }

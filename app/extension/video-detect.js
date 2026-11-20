@@ -475,6 +475,14 @@ function buildResolvedVariant(format, resolved, pageUrl) {
     source_url: pageUrl,
     format_id: (format && format.format_id) || null,
     fragmented: !!(format && format.fragmented),
+    // Round 84 — the resolved format's size (filesize, falling
+    // back to filesize_approx in the host's quality row): the
+    // engine stores it on the pending row so the Add URL dialog
+    // renders the pre-resolved size and confirm creates the
+    // download without probing the stream URL. A format with no
+    // size sends null — the download still proceeds.
+    filesize:
+      format && typeof format.filesize === "number" ? format.filesize : null,
   };
 }
 

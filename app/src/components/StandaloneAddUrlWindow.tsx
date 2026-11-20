@@ -105,7 +105,13 @@ export function StandaloneAddUrlWindow({ linkId }: { linkId: string }) {
   }, [])
 
   function closeWindow() {
-    void getCurrentWindow().close().catch(() => undefined)
+    // Round 84 — a `close()` that rejects (WebView2 flake) used
+    // to fail silently and leave the window open after Start
+    // Download; `destroy()` is the fallback so a failed close
+    // cannot strand the window.
+    void getCurrentWindow()
+      .close()
+      .catch(() => getCurrentWindow().destroy().catch(() => undefined))
   }
 
   function handleClose() {
@@ -197,6 +203,9 @@ export function StandaloneAddUrlWindow({ linkId }: { linkId: string }) {
               // size probe.
               captureTitle={link.filename ?? null}
               initialHeaders={link.headers ?? null}
+              // Round 84 — the resolved format's size: the dialog
+              // renders it without probing the stream URL.
+              initialFileSize={link.filesize ?? null}
               onClose={handleClose}
               onAdded={handleAdded}
               onLateError={(message) => setLateError(message)}

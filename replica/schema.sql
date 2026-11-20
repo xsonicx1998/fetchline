@@ -363,6 +363,11 @@ CREATE TABLE IF NOT EXISTS pending_links (
   format_id TEXT,
   audio_url TEXT,
   fragmented INTEGER NOT NULL DEFAULT 0,
+  -- Round 84 (2026-11-20): the yt-dlp format's size in bytes
+  -- (filesize, falling back to filesize_approx), so the Add URL
+  -- dialog renders the pre-resolved size and confirm creates
+  -- the download without probing the stream URL.
+  filesize INTEGER,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

@@ -114,8 +114,18 @@ export function DownloadCompleteDialog({ downloadId }: { downloadId: string }) {
     }
   }, [downloadId])
 
+  // Round 84 — the R83 retest's Close button did not dismiss
+  // the dialog while the X did, although both already called
+  // the same `getCurrentWindow().close()` (and
+  // `core:window:allow-close` IS in capabilities/default.json —
+  // the missing-permission hypothesis is wrong). The remaining
+  // explanation is a `close()` that rejects (a WebView2 flake)
+  // and fails silently — `void` swallows it. `destroy()` is
+  // the fallback so a failed close cannot strand the dialog.
   function closeDialog() {
-    void getCurrentWindow().close()
+    void getCurrentWindow()
+      .close()
+      .catch(() => getCurrentWindow().destroy().catch(() => undefined))
   }
 
   async function handleOpenFile() {

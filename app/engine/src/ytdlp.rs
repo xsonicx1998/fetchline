@@ -1133,12 +1133,19 @@ pub fn sanitize_title_filename(title: &str, ext: &str) -> String {
 /// Suffix match on the lowercased host, so any subdomain of
 /// the CDN counts but a lookalike domain (`notgooglevideo.com`)
 /// does not. `None` means "no opinion — use the normal cap".
+/// Round 84 — `tiktok.com` at 1: the R83 retest's TikTok CDN
+/// host was `v16-webapp-prime.us.tiktok.com` (the videoplayback
+/// host yt-dlp resolves), NOT a tiktokcdn.com host, so the old
+/// tiktokcdn.com cap never applied and the engine could open
+/// several parallel range requests against a host that 403s
+/// them. One connection for any tiktok.com host.
 pub fn default_host_segment_cap(host: &str) -> Option<usize> {
     let host = host.trim().to_ascii_lowercase();
     for (suffix, cap) in [
         ("googlevideo.com", 8usize),
         ("fbcdn.net", 4usize),
         ("tiktokcdn.com", 2usize),
+        ("tiktok.com", 1usize),
     ] {
         if host == suffix || host.ends_with(&format!(".{suffix}")) {
             return Some(cap);
@@ -2294,6 +2301,14 @@ mod tests {
         assert_eq!(default_host_segment_cap("fbcdn.net"), Some(4));
         assert_eq!(default_host_segment_cap("v16m.tiktokcdn.com"), Some(2));
         assert_eq!(default_host_segment_cap("tiktokcdn.com"), Some(2));
+        // Round 84 — the R83 retest's TikTok CDN host is a
+        // tiktok.com host, not tiktokcdn.com: one connection.
+        assert_eq!(
+            default_host_segment_cap("v16-webapp-prime.us.tiktok.com"),
+            Some(1)
+        );
+        assert_eq!(default_host_segment_cap("tiktok.com"), Some(1));
+        assert_eq!(default_host_segment_cap("nottiktok.com"), None);
         assert_eq!(default_host_segment_cap("example.com"), None);
         assert_eq!(default_host_segment_cap("youtube.com"), None);
         // A lookalike domain is not the CDN.
