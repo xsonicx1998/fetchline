@@ -9,8 +9,8 @@
 //!    as a single open-ended segment.
 
 use reqwest::header::{
-    ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, COOKIE, ETAG, LAST_MODIFIED,
-    RANGE,
+    ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, COOKIE, ETAG,
+    LAST_MODIFIED, RANGE,
 };
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -34,8 +34,70 @@ pub struct ProbeInfo {
     pub last_modified: Option<String>,
     /// Filename from `Content-Disposition`, when present.
     pub filename: Option<String>,
+    /// `Content-Type` of the probed response, when present
+    /// (Round 87.2): the cinejoy.pk retest showed a watch page
+    /// (5.6 KB of HTML) downloading as a Finished file — the
+    /// probe never looked at what the server said the bytes
+    /// were. `None` when the server sent no Content-Type (some
+    /// HEAD responses omit it) — an unknown type is never
+    /// refused.
+    pub content_type: Option<String>,
     /// Final URL after redirects.
     pub final_url: String,
+}
+
+/// Round 87.2 — the refusal message for a probed web page.
+/// Shown as the probe/add error, never as a download row.
+pub const HTML_PAGE_REFUSAL: &str =
+    "This link points to a web page (HTML), not a downloadable video or file.";
+
+/// Round 87.2 — true when the probed response is a web PAGE,
+/// not a file: `Content-Type` is `text/html` (or
+/// `application/xhtml+xml`) and the URL path does not
+/// explicitly end in `.html` / `.htm` / `.mhtml`. The media
+/// type is compared without its parameters (`text/html;
+/// charset=utf-8` counts) and case-insensitively; the
+/// extension check runs on the final URL's path (after
+/// redirects, query and fragment stripped). A missing
+/// Content-Type never refuses — an unknown type is not proof
+/// of a page.
+pub fn is_html_page_response(content_type: Option<&str>, final_url: &str) -> bool {
+    let Some(media_type) = content_type
+        .map(|v| {
+            v.split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase()
+        })
+        .filter(|s| !s.is_empty())
+    else {
+        return false;
+    };
+    if media_type != "text/html" && media_type != "application/xhtml+xml" {
+        return false;
+    }
+    let path = final_url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    !(path.ends_with(".html") || path.ends_with(".htm") || path.ends_with(".mhtml"))
+}
+
+impl ProbeInfo {
+    /// Round 87.2 — refuse a probed web page as a download:
+    /// `Err` with the clear message when `is_html_page_response`
+    /// holds, `Ok(())` otherwise. Called by `from_headers` /
+    /// `probe_info_from_raw`, so every probe path refuses — the
+    /// dialog's probe, the add path and resume all fail with the
+    /// same message and no row is ever created for a page.
+    pub fn refuse_html_page(&self) -> Result<()> {
+        if is_html_page_response(self.content_type.as_deref(), &self.final_url) {
+            return Err(EngineError::InvalidState(HTML_PAGE_REFUSAL.to_string()));
+        }
+        Ok(())
+    }
 }
 
 /// Probe `url` and return what the server tells us about the file.
@@ -88,7 +150,7 @@ pub async fn probe_with_cookies(
         return probe_cookies_407_fallback(client, url, cookies, proxy, false).await;
     }
     if status.is_success() || status == StatusCode::PARTIAL_CONTENT {
-        return Ok(from_headers(head.headers(), head.url().as_str()));
+        return from_headers(head.headers(), head.url().as_str());
     }
     if status == StatusCode::METHOD_NOT_ALLOWED
         || status == StatusCode::NOT_IMPLEMENTED
@@ -180,7 +242,7 @@ async fn probe_cookies_407_fallback(
                     ));
                 }
                 if status.is_success() || status == StatusCode::PARTIAL_CONTENT {
-                    let mut info = from_headers(resp.headers(), resp.url().as_str());
+                    let mut info = from_headers(resp.headers(), resp.url().as_str())?;
                     if ranged {
                         apply_ranged_total(&mut info, resp.headers());
                     }
@@ -213,7 +275,7 @@ async fn probe_cookies_407_fallback(
                             format!("{status} while checking the address"),
                         ));
                     }
-                    let mut info = from_headers(resp.headers(), resp.url().as_str());
+                    let mut info = from_headers(resp.headers(), resp.url().as_str())?;
                     apply_ranged_total(&mut info, resp.headers());
                     return Ok(info);
                 }
@@ -261,7 +323,7 @@ async fn probe_with_ranged_get_cookies(
             format!("{status} while checking the address"),
         ));
     }
-    let mut info = from_headers(resp.headers(), resp.url().as_str());
+    let mut info = from_headers(resp.headers(), resp.url().as_str())?;
     apply_ranged_total(&mut info, resp.headers());
     Ok(info)
 }
@@ -363,7 +425,7 @@ pub async fn probe_with_headers(
         return probe_cookies_407_fallback(client, url, cookies, proxy, false).await;
     }
     if status.is_success() || status == StatusCode::PARTIAL_CONTENT {
-        return Ok(from_headers(head.headers(), head.url().as_str()));
+        return from_headers(head.headers(), head.url().as_str());
     }
     if status == StatusCode::METHOD_NOT_ALLOWED
         || status == StatusCode::NOT_IMPLEMENTED
@@ -401,7 +463,7 @@ async fn probe_with_ranged_get_headers(
             format!("{status} while checking the address"),
         ));
     }
-    let mut info = from_headers(resp.headers(), resp.url().as_str());
+    let mut info = from_headers(resp.headers(), resp.url().as_str())?;
     apply_ranged_total(&mut info, resp.headers());
     Ok(info)
 }
@@ -525,7 +587,7 @@ pub async fn probe_with_proxy(
         return probe_proxy_auth_fallback(client, url, auth, proxy, false).await;
     }
     if status.is_success() || status == StatusCode::PARTIAL_CONTENT {
-        return Ok(from_headers(head.headers(), head.url().as_str()));
+        return from_headers(head.headers(), head.url().as_str());
     }
     if status == StatusCode::METHOD_NOT_ALLOWED
         || status == StatusCode::NOT_IMPLEMENTED
@@ -656,7 +718,7 @@ async fn probe_proxy_auth_fallback(
                                 format!("{status} while checking the address"),
                             ));
                         }
-                        let mut info = probe_info_from_raw(&headers, url);
+                        let mut info = probe_info_from_raw(&headers, url)?;
                         if ranged {
                             if let Some(range) = headers
                                 .iter()
@@ -721,7 +783,7 @@ async fn probe_proxy_auth_fallback(
                         format!("{status} while checking the address"),
                     ));
                 }
-                let mut info = probe_info_from_raw(&headers, url);
+                let mut info = probe_info_from_raw(&headers, url)?;
                 if ranged {
                     if let Some(range) = headers
                         .iter()
@@ -765,7 +827,7 @@ async fn probe_proxy_auth_fallback(
                     continue;
                 }
                 if status.is_success() || status == StatusCode::PARTIAL_CONTENT {
-                    let mut info = from_headers(resp.headers(), resp.url().as_str());
+                    let mut info = from_headers(resp.headers(), resp.url().as_str())?;
                     if ranged {
                         apply_ranged_total(&mut info, resp.headers());
                     }
@@ -783,14 +845,14 @@ async fn probe_proxy_auth_fallback(
 
 /// Build a `ProbeInfo` from raw `(name, value)` headers (the NTLM
 /// path has no reqwest `HeaderMap` to reuse `from_headers` with).
-fn probe_info_from_raw(headers: &[(String, String)], final_url: &str) -> ProbeInfo {
+fn probe_info_from_raw(headers: &[(String, String)], final_url: &str) -> Result<ProbeInfo> {
     let get = |name: &str| {
         headers
             .iter()
             .find(|(n, _)| n == name)
             .map(|(_, v)| v.as_str())
     };
-    ProbeInfo {
+    let info = ProbeInfo {
         size: get("content-length").and_then(|v| v.parse::<u64>().ok()),
         accept_ranges: get("accept-ranges")
             .map(|v| v.eq_ignore_ascii_case("bytes"))
@@ -798,8 +860,12 @@ fn probe_info_from_raw(headers: &[(String, String)], final_url: &str) -> ProbeIn
         etag: get("etag").map(str::to_string),
         last_modified: get("last-modified").map(str::to_string),
         filename: get("content-disposition").and_then(parse_content_disposition_filename),
+        content_type: get("content-type").map(str::to_string),
         final_url: final_url.to_string(),
-    }
+    };
+    // Round 87.2 — same refusal as `from_headers`.
+    info.refuse_html_page()?;
+    Ok(info)
 }
 
 /// Attach a Basic-auth credential to one request builder, if any.
@@ -830,7 +896,7 @@ async fn probe_with_ranged_get(
             format!("{status} while checking the address"),
         ));
     }
-    let mut info = from_headers(resp.headers(), resp.url().as_str());
+    let mut info = from_headers(resp.headers(), resp.url().as_str())?;
     // A 206 answer carries the total in Content-Range: "bytes 0-0/<total>".
     if let Some(range) = resp
         .headers()
@@ -845,7 +911,7 @@ async fn probe_with_ranged_get(
     Ok(info)
 }
 
-fn from_headers(headers: &reqwest::header::HeaderMap, final_url: &str) -> ProbeInfo {
+fn from_headers(headers: &reqwest::header::HeaderMap, final_url: &str) -> Result<ProbeInfo> {
     let size = headers
         .get(CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
@@ -867,14 +933,23 @@ fn from_headers(headers: &reqwest::header::HeaderMap, final_url: &str) -> ProbeI
         .get(CONTENT_DISPOSITION)
         .and_then(|v| v.to_str().ok())
         .and_then(parse_content_disposition_filename);
-    ProbeInfo {
+    let content_type = headers
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let info = ProbeInfo {
         size,
         accept_ranges,
         etag,
         last_modified,
         filename,
+        content_type,
         final_url: final_url.to_string(),
-    }
+    };
+    // Round 87.2 — a probed web page is not a file: refuse it
+    // here, in the one place every probe path funnels through.
+    info.refuse_html_page()?;
+    Ok(info)
 }
 
 /// `attachment; filename="report.pdf"` -> `report.pdf`.
@@ -913,4 +988,87 @@ fn percent_decode(input: &str) -> Option<String> {
         }
     }
     String::from_utf8(out).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn html_page_refused_for_plain_urls() {
+        assert!(is_html_page_response(
+            Some("text/html"),
+            "https://cinejoy.pk/watch/tv/138501/1/1"
+        ));
+        assert!(is_html_page_response(
+            Some("text/html; charset=utf-8"),
+            "https://example.com/page"
+        ));
+        assert!(is_html_page_response(
+            Some("application/xhtml+xml"),
+            "https://example.com/feed"
+        ));
+        assert!(is_html_page_response(
+            Some("TEXT/HTML"),
+            "https://example.com/x"
+        ));
+    }
+
+    #[test]
+    fn html_page_allowed_for_explicit_page_urls_and_other_types() {
+        assert!(!is_html_page_response(
+            Some("text/html"),
+            "https://example.com/index.html"
+        ));
+        assert!(!is_html_page_response(
+            Some("text/html"),
+            "https://example.com/a/b.htm"
+        ));
+        assert!(!is_html_page_response(
+            Some("text/html"),
+            "https://example.com/a.MHTML"
+        ));
+        assert!(!is_html_page_response(
+            Some("text/html"),
+            "https://example.com/index.html?x=1"
+        ));
+        assert!(!is_html_page_response(
+            Some("video/mp4"),
+            "https://example.com/v.mp4"
+        ));
+        assert!(!is_html_page_response(
+            Some("application/octet-stream"),
+            "https://example.com/f.bin"
+        ));
+        assert!(!is_html_page_response(None, "https://example.com/page"));
+    }
+
+    #[test]
+    fn refuse_html_page_errors_with_the_clear_message() {
+        let info = ProbeInfo {
+            size: Some(5600),
+            accept_ranges: false,
+            etag: None,
+            last_modified: None,
+            filename: Some("1".to_string()),
+            content_type: Some("text/html".to_string()),
+            final_url: "https://cinejoy.pk/watch/tv/138501/1/1".to_string(),
+        };
+        let err = info.refuse_html_page().unwrap_err();
+        assert_eq!(err.to_string(), HTML_PAGE_REFUSAL);
+    }
+
+    #[test]
+    fn refuse_html_page_passes_normal_files() {
+        let info = ProbeInfo {
+            size: Some(20_971_520),
+            accept_ranges: true,
+            etag: None,
+            last_modified: None,
+            filename: Some("slow-a.mp4".to_string()),
+            content_type: Some("video/mp4".to_string()),
+            final_url: "http://127.0.0.1:55443/slow-a.mp4".to_string(),
+        };
+        assert!(info.refuse_html_page().is_ok());
+    }
 }

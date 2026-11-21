@@ -159,6 +159,10 @@ export interface ProbeInfo {
   etag: string | null
   last_modified: string | null
   filename: string | null
+  /** Round 87.2 — the probed `Content-Type` (null when the
+   *  server sent none): a `text/html` answer for a non-page URL
+   *  is refused as a download instead of saving the page. */
+  content_type: string | null
   final_url: string
 }
 

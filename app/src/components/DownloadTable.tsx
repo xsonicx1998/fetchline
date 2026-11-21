@@ -232,12 +232,18 @@ export function DownloadTable({
    *  selected it is a NO-OP: the old fallback removed the
    *  focused row, so Ctrl+clicking the last row off and
    *  pressing Delete deleted a row nothing selected.
+   *  Round 87.2 — the same NO-OP now covers a selection of
+   *  only stale ids (rows removed elsewhere): `rows` empty
+   *  returns instead of falling back to `[d]`.
    */
   function removeSelected(d: DownloadRow) {
     if (selectedIds.size === 0) return
+    // Round 87.2 — the selection holds only stale ids (rows
+    // removed elsewhere): delete nothing, not the focused row.
+    const rows = downloads.filter((row) => selectedIds.has(row.id))
+    if (rows.length === 0) return
     if (onRemoveMany) {
-      const rows = downloads.filter((row) => selectedIds.has(row.id))
-      onRemoveMany(rows.length > 0 ? rows : [d])
+      onRemoveMany(rows)
     } else {
       onRemove(d)
     }
@@ -274,7 +280,23 @@ export function DownloadTable({
   }
 
   return (
-    <div className="relative bg-[#0B0F24]">
+    <div
+      className="relative min-h-full bg-[#0B0F24]"
+      // Round 87.2 — clicking empty table space deselects:
+      // only a click landing directly on this container (not
+      // on a row, cell or menu) clears the selection and the
+      // anchor. Before this there was no empty-space handler
+      // at all, so a click cleared nothing and the next Delete
+      // still prompted for the old row (the R87.1 retest's
+      // "cleared the selection" read was mistaken). min-h-full
+      // stretches the container over the whole scroll area, so
+      // the empty space below the last row is clickable too.
+      onClick={(e) => {
+        if (e.target !== e.currentTarget) return
+        commitSelection(new Set())
+        onSelect(null)
+      }}
+    >
       <table className="w-full border-collapse text-base" aria-label="Downloads" aria-multiselectable="true">
         <thead className="sticky top-0 bg-surface">
           <tr className="border-b border-border text-left text-xs font-semibold uppercase text-text-muted">

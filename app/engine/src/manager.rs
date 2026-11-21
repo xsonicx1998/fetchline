@@ -2102,6 +2102,7 @@ impl DownloadManager {
             etag: None,
             last_modified: None,
             filename: filename.clone().filter(|f| !f.trim().is_empty()),
+            content_type: None,
             final_url: url.to_string(),
         };
         self.create_download_from_probe(
@@ -2509,6 +2510,7 @@ impl DownloadManager {
                         etag: None,
                         last_modified: None,
                         filename: row.filename.clone(),
+                        content_type: None,
                         final_url: row.url.clone(),
                     },
                 )),
@@ -2764,6 +2766,7 @@ impl DownloadManager {
                 etag: None,
                 last_modified: None,
                 filename: probe_filename,
+                content_type: None,
                 final_url: row.url.clone(),
             },
             effective_format_id,
@@ -2846,6 +2849,7 @@ impl DownloadManager {
                     etag: None,
                     last_modified: None,
                     filename: probe_filename,
+                    content_type: None,
                     final_url: row.url.clone(),
                 },
             )
@@ -4758,6 +4762,7 @@ impl DownloadManager {
                     etag: row.etag.clone(),
                     last_modified: row.last_modified.clone(),
                     filename: None,
+                    content_type: None,
                     final_url: row.url.clone(),
                 }
             }

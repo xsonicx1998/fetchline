@@ -87,19 +87,22 @@ function isSelected(filename: string): boolean {
   return rowElement(filename).getAttribute('aria-selected') === 'true'
 }
 
-function renderTable(props?: {
-  onSelect?: (id: string | null) => void
-  onSelectionChange?: (ids: string[]) => void
-  onRemove?: (d: DownloadRow) => void
-  onRemoveMany?: (ds: DownloadRow[]) => void
-}) {
+function tableElement(
+  downloads: DownloadRow[],
+  props?: {
+    onSelect?: (id: string | null) => void
+    onSelectionChange?: (ids: string[]) => void
+    onRemove?: (d: DownloadRow) => void
+    onRemoveMany?: (ds: DownloadRow[]) => void
+  },
+) {
   const onSelect = props?.onSelect ?? noop
   const onSelectionChange = props?.onSelectionChange ?? noop
   const onRemove = props?.onRemove ?? noop
   const onRemoveMany = props?.onRemoveMany ?? noop
-  render(
+  return (
     <DownloadTable
-      downloads={DOWNLOADS}
+      downloads={downloads}
       categories={CATEGORIES}
       queues={QUEUES}
       selectedId={null}
@@ -120,8 +123,20 @@ function renderTable(props?: {
       onMoveToQueue={noop}
       onDeleteFromQueue={noop}
       onShowProperties={noop}
-    />,
+    />
   )
+}
+
+function renderTable(
+  props?: {
+    onSelect?: (id: string | null) => void
+    onSelectionChange?: (ids: string[]) => void
+    onRemove?: (d: DownloadRow) => void
+    onRemoveMany?: (ds: DownloadRow[]) => void
+  },
+  downloads: DownloadRow[] = DOWNLOADS,
+) {
+  return render(tableElement(downloads, props))
 }
 
 const fakeDataTransfer = () => ({
@@ -295,5 +310,51 @@ describe('deselecting the last row (Round 87.1)', () => {
     fireEvent.click(rowElement('file-b.zip'), { ctrlKey: true })
     expect(onSelectionChange).toHaveBeenLastCalledWith([])
     expect(onSelect).toHaveBeenLastCalledWith(null)
+  })
+})
+
+describe('empty-space deselect + stale-selection Delete (Round 87.2)', () => {
+  test('clicking empty table space clears the selection and the anchor', () => {
+    const onSelect = vi.fn()
+    const onSelectionChange = vi.fn()
+    renderTable({ onSelect, onSelectionChange })
+    fireEvent.click(rowElement('file-b.zip'))
+    expect(isSelected('file-b.zip')).toBe(true)
+    // Click the table container itself: the click target IS
+    // the container (empty space below the rows), so the
+    // handler fires — unlike a row click, whose target is a
+    // cell and must keep the selection.
+    const container = screen.getByRole('table').parentElement
+    if (!container) throw new Error('no table container')
+    fireEvent.click(container)
+    expect(isSelected('file-b.zip')).toBe(false)
+    expect(onSelectionChange).toHaveBeenLastCalledWith([])
+    expect(onSelect).toHaveBeenLastCalledWith(null)
+  })
+
+  test('clicking a row does not clear the selection', () => {
+    const onSelectionChange = vi.fn()
+    renderTable({ onSelectionChange })
+    fireEvent.click(rowElement('file-b.zip'))
+    expect(isSelected('file-b.zip')).toBe(true)
+    expect(onSelectionChange).toHaveBeenCalledTimes(1)
+  })
+
+  test('Delete with a selection of only stale ids removes nothing', () => {
+    const onRemoveMany = vi.fn()
+    const onRemove = vi.fn()
+    const props = { onRemoveMany, onRemove }
+    const { rerender } = renderTable(props)
+    fireEvent.click(rowElement('file-a.zip'))
+    expect(isSelected('file-a.zip')).toBe(true)
+    // d1 is removed elsewhere; the table's internal selection
+    // still holds the stale id (only a `selectedId` change
+    // clears it, and the anchor did not change).
+    rerender(tableElement(DOWNLOADS.filter((d) => d.id !== 'd1'), props))
+    // Delete on a remaining row must remove NOTHING — the old
+    // fallback deleted the focused row here.
+    fireEvent.keyDown(rowElement('file-b.zip'), { key: 'Delete' })
+    expect(onRemoveMany).not.toHaveBeenCalled()
+    expect(onRemove).not.toHaveBeenCalled()
   })
 })

@@ -102,6 +102,20 @@ const errorId = errorDownloadId()
  *  from `#add-url=<link id>` in the URL — the same Round 57
  *  mechanism as the progress / complete / error windows, with
  *  the same UUID validation. */
+/** Round 87.2 — the manual Add URL window (toolbar Add URL):
+ *  same standalone window as a capture, but with no pending
+ *  link — the user types the URL. The init script sets
+ *  `window.__ADD_URL_MANUAL__` (or the `#add-url=manual`
+ *  hash fallback). Unlike the capture id, "manual" is not a
+ *  UUID, so it gets its own detector instead of reusing
+ *  `addUrlLinkId`. */
+function addUrlManual(): boolean {
+  const fromInit = (window as unknown as { __ADD_URL_MANUAL__?: unknown })
+    .__ADD_URL_MANUAL__
+  if (fromInit === true) return true
+  return window.location.hash === '#add-url=manual'
+}
+
 function addUrlLinkId(): string | null {
   const fromInit = (window as unknown as { __ADD_URL_ID__?: unknown }).__ADD_URL_ID__
   if (typeof fromInit === 'string' && /^[0-9a-fA-F-]+$/.test(fromInit)) return fromInit
@@ -110,6 +124,7 @@ function addUrlLinkId(): string | null {
 }
 
 const addUrlId = addUrlLinkId()
+const addUrlManualFlag = addUrlManual()
 
 /** Webview heartbeat (§7.4, Round 56): this window's JS pings
  *  the backend every 5 s with its label (`main`,
@@ -133,7 +148,7 @@ const addUrlId = addUrlLinkId()
  *  Skipped for the standalone Add URL window too (Round 74):
  *  same reasons — transient, and never a progress window. */
 const windowLabel = progressId !== null ? `progress-${progressId}` : 'main'
-if (completeId === null && errorId === null && addUrlId === null) {
+if (completeId === null && errorId === null && addUrlId === null && !addUrlManualFlag) {
   let pingInFlight = false
   window.setInterval(() => {
     if (pingInFlight) return
@@ -194,6 +209,8 @@ ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
       <DownloadErrorDialog downloadId={errorId} />
     ) : addUrlId !== null ? (
       <StandaloneAddUrlWindow linkId={addUrlId} />
+    ) : addUrlManualFlag ? (
+      <StandaloneAddUrlWindow manual />
     ) : (
       <App />
     )}

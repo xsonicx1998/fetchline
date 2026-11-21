@@ -19,6 +19,7 @@
 
 import { describe, expect, test, vi } from 'vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
+import { getPendingLink } from '../lib/api'
 import { StandaloneAddUrlWindow } from './StandaloneAddUrlWindow'
 
 const startDraggingMock = vi.fn(() => Promise.resolve())
@@ -39,8 +40,9 @@ vi.mock('@tauri-apps/api/core', () => ({
 vi.mock('../lib/api', () => ({
   // Never resolves: the window stays on "Loading captured
   // link…" and the dialog never mounts, so this test pins the
-  // title bar alone.
-  getPendingLink: () => new Promise(() => {}),
+  // title bar alone. A vi.fn so the manual-mode test can prove
+  // it is never called there (Round 87.2).
+  getPendingLink: vi.fn(() => new Promise(() => {})),
   getCategories: () => Promise.resolve([]),
   getSettings: () => Promise.resolve(null),
   resolvePendingLink: () => Promise.resolve(),
@@ -55,5 +57,24 @@ describe('StandaloneAddUrlWindow drag (Round 87)', () => {
     ).toBe('deep')
     fireEvent.mouseDown(title)
     expect(startDraggingMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('StandaloneAddUrlWindow manual mode (Round 87.2)', () => {
+  test('manual mode mounts the dialog at once with an editable URL and never fetches a pending link', () => {
+    vi.mocked(getPendingLink).mockClear()
+    render(<StandaloneAddUrlWindow manual />)
+    // No pending link is fetched — there is none.
+    expect(getPendingLink).not.toHaveBeenCalled()
+    // No "Loading…" — the dialog mounts immediately.
+    expect(screen.queryByText('Loading captured link…')).toBeNull()
+    // The same draggable title bar as a capture.
+    const title = screen.getByText('Add URL')
+    expect(title.closest('div')?.getAttribute('data-tauri-drag-region')).toBe('deep')
+    // The URL field is present, empty and editable (a capture
+    // locks it — `disabled={captureMode}`).
+    const urlField = screen.getByLabelText('URL') as HTMLInputElement
+    expect(urlField.disabled).toBe(false)
+    expect(urlField.value).toBe('')
   })
 })

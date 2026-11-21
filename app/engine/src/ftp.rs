@@ -364,6 +364,7 @@ pub async fn ftp_probe(url: &str, proxy: Option<&ProxyConfig>) -> Result<ProbeIn
         etag: None,
         last_modified: None,
         filename: ftp_filename(&target.path),
+        content_type: None,
         final_url: url.to_string(),
     })
 }

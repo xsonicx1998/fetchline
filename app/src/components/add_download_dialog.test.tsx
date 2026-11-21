@@ -83,6 +83,7 @@ const probeInfo: ProbeInfo = {
   etag: null,
   last_modified: null,
   filename: 'Rick Astley - Never Gonna Give You Up (Official Video) (4K Remaster).mp4',
+  content_type: 'video/mp4',
   final_url: 'https://rr1---sn.googlevideo.com/videoplayback?expire=1&id=137',
 }
 
@@ -115,6 +116,7 @@ beforeEach(() => {
     etag: null,
     last_modified: null,
     filename: 'file.zip',
+    content_type: 'application/zip',
     final_url: 'https://example.com/file.zip',
   })
 })

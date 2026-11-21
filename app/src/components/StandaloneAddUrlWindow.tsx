@@ -32,8 +32,24 @@ import { TitleBar } from './TitleBar'
  *  error windows. Round 76 (7) — Escape has its own listener
  *  here, not just the dialog's: while the link is still
  *  loading (or errored) the dialog is not mounted, so its
- *  Escape handler does not exist yet and Escape did nothing. */
-export function StandaloneAddUrlWindow({ linkId }: { linkId: string }) {
+ *  Escape handler does not exist yet and Escape did nothing.
+ *
+ *  Round 87.2 — MANUAL mode (`manual`, label `add-url-manual`,
+ *  `window.__ADD_URL_MANUAL__`): the toolbar Add URL opens
+ *  this window instead of the in-window overlay, whose header
+ *  is a plain div — no TitleBar, no drag region — so neither
+ *  drag variant could ever move it (the R87/R87.1 failure).
+ *  In manual mode there is no pending link: the fetch is
+ *  skipped, the dialog mounts at once with an empty editable
+ *  URL, and `captureMode` is off — the same TitleBar drag
+ *  code then applies to manual and capture alike. */
+export function StandaloneAddUrlWindow({
+  linkId,
+  manual = false,
+}: {
+  linkId?: string
+  manual?: boolean
+}) {
   const [link, setLink] = useState<PendingLinkRow | null>(null)
   const [linkError, setLinkError] = useState<string | null>(null)
   const [categories, setCategories] = useState<CategoryRow[]>([])
@@ -52,22 +68,27 @@ export function StandaloneAddUrlWindow({ linkId }: { linkId: string }) {
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', 'dark')
     let stopped = false
-    void getPendingLink(linkId)
-      .then((row) => {
-        if (stopped) return
-        // A missing row (expired or already answered elsewhere)
-        // must not leave the window on "Loading…" forever.
-        if (row === null) {
-          setLinkError('This captured link is no longer available.')
-        } else {
-          setLink(row)
-        }
-      })
-      .catch((e: unknown) => {
-        if (!stopped) {
-          setLinkError(e instanceof Error ? e.message : String(e))
-        }
-      })
+    // Round 87.2 — manual mode has no pending link: skip the
+    // fetch (and the "Loading…" state) and mount the dialog
+    // at once with an empty editable URL.
+    if (!manual && linkId) {
+      void getPendingLink(linkId)
+        .then((row) => {
+          if (stopped) return
+          // A missing row (expired or already answered elsewhere)
+          // must not leave the window on "Loading…" forever.
+          if (row === null) {
+            setLinkError('This captured link is no longer available.')
+          } else {
+            setLink(row)
+          }
+        })
+        .catch((e: unknown) => {
+          if (!stopped) {
+            setLinkError(e instanceof Error ? e.message : String(e))
+          }
+        })
+    }
     void getCategories()
       .then((rows) => {
         if (!stopped) setCategories(rows)
@@ -81,7 +102,7 @@ export function StandaloneAddUrlWindow({ linkId }: { linkId: string }) {
     return () => {
       stopped = true
     }
-  }, [linkId])
+  }, [linkId, manual])
 
   // Round 76 (2) — refetch the categories whenever this window
   // regains focus: a window focused from an earlier mount holds
@@ -167,7 +188,7 @@ export function StandaloneAddUrlWindow({ linkId }: { linkId: string }) {
         onClose={handleClose}
       />
       <div className="h-[2px] shrink-0 bg-gradient-to-r from-[#8B20FF] to-[#F02DCD]" />
-      {linkError ? (
+      {linkError && !manual ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
           <p className="text-sm text-danger">
             Could not load this captured link: {linkError}
@@ -176,7 +197,7 @@ export function StandaloneAddUrlWindow({ linkId }: { linkId: string }) {
             Close
           </Button>
         </div>
-      ) : link === null ? (
+      ) : link === null && !manual ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
           <p className="text-sm text-text-muted">Loading captured link…</p>
         </div>
@@ -191,21 +212,21 @@ export function StandaloneAddUrlWindow({ linkId }: { linkId: string }) {
             <AddDownloadDialog
               open
               standalone
-              captureMode
+              captureMode={!manual}
               categories={categories}
               defaultAction={settings?.default_action ?? 'start_now'}
               defaultFolder={settings?.default_download_folder ?? ''}
-              initialUrl={link.url}
-              pendingLinkId={link.id}
-              initialCookies={link.cookies}
+              initialUrl={link?.url}
+              pendingLinkId={link?.id ?? null}
+              initialCookies={link?.cookies ?? null}
               // Round 78 — the row's resolved-video filename
               // prefills the dialog, and its headers ride the
               // size probe.
-              captureTitle={link.filename ?? null}
-              initialHeaders={link.headers ?? null}
+              captureTitle={link?.filename ?? null}
+              initialHeaders={link?.headers ?? null}
               // Round 84 — the resolved format's size: the dialog
               // renders it without probing the stream URL.
-              initialFileSize={link.filesize ?? null}
+              initialFileSize={link?.filesize ?? null}
               onClose={handleClose}
               onAdded={handleAdded}
               onLateError={(message) => setLateError(message)}

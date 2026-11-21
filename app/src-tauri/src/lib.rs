@@ -1647,6 +1647,99 @@ fn build_add_url_window(
     }
 }
 
+/// Build the standalone Add URL window in MANUAL mode (Round
+/// 87.2): same window as a browser capture, but with no pending
+/// link — the user types the URL. Label `add-url-manual`
+/// (covered by the existing `add-url-*` capability grant);
+/// title "Add URL". Mirrors `build_add_url_window` line for
+/// line except the pending-link fetch — kept as a separate
+/// builder, like the other window builders in this file, so
+/// the capture path stays byte-identical.
+fn build_manual_add_url_window(app: &AppHandle) -> Result<WebviewWindow, String> {
+    let log = startup_log_path_from_app(app);
+    let log = log.as_deref();
+    let label = "add-url-manual";
+    // Round 74 (1) — build re-check (see `build_progress_window`):
+    // focus the existing window instead of a second one.
+    if let Some(existing) = app.get_webview_window(label) {
+        log_startup(
+            log,
+            &format!("add URL window {label} already open — focused (build re-check)"),
+        );
+        show_window_ready(&existing);
+        return Ok(existing);
+    }
+    let url = WebviewUrl::App("index.html".into());
+    let init_script = "window.__ADD_URL_MANUAL__ = true;".to_string();
+    let title = "Add URL".to_string();
+    log_startup(
+        log,
+        &format!("creating add URL window {label}: index.html (manual mode)"),
+    );
+    // Round 58 (§9.1): share the main window's WebView2
+    // environment instead of creating a fresh one per window —
+    // a fresh environment creation waits unbounded on the main
+    // thread (`wait_with_pump`), the Round 58 wedge. Windows
+    // only; other platforms build exactly as before.
+    #[cfg(target_os = "windows")]
+    let shared_environment = main_webview_environment(app, log);
+    #[cfg(target_os = "windows")]
+    if shared_environment.is_some() {
+        log_startup(
+            log,
+            &format!("add URL window {label}: sharing main WebView2 environment"),
+        );
+    }
+    let build_started = std::time::Instant::now();
+    let mut builder = WebviewWindowBuilder::new(app, label, url)
+        .initialization_script(init_script)
+        .title(title)
+        .decorations(false)
+        .inner_size(560.0, 520.0)
+        .min_inner_size(460.0, 360.0)
+        .resizable(true)
+        .center()
+        .devtools(true)
+        // Round 71 (C1/C3) — #0B0F24 first paint + hidden until
+        // the frontend signals ready (see the progress window).
+        .background_color(tauri::window::Color(11, 15, 36, 255))
+        .visible(false);
+    #[cfg(target_os = "windows")]
+    if let Some(env) = shared_environment {
+        builder = builder.with_environment(env);
+    }
+    let build_thread_id = std::thread::current().id();
+    log_startup(
+        log,
+        &format!("add URL window {label}: build() entered on thread {build_thread_id:?}"),
+    );
+    match builder.build() {
+        Ok(window) => {
+            let elapsed_ms = build_started.elapsed().as_millis();
+            log_startup(
+                log,
+                &format!(
+                    "add URL window {label} created: index.html in {elapsed_ms}ms on thread {build_thread_id:?}"
+                ),
+            );
+            // Round 71 (C3) — built hidden; shown when the
+            // frontend is ready (3 s fallback).
+            spawn_show_fallback(&window);
+            Ok(window)
+        }
+        Err(e) => {
+            let elapsed_ms = build_started.elapsed().as_millis();
+            log_startup(
+                log,
+                &format!(
+                    "add URL window {label} FAILED to create after {elapsed_ms}ms on thread {build_thread_id:?}: {e}"
+                ),
+            );
+            Err(e.to_string())
+        }
+    }
+}
+
 /// Open (or focus, when it already exists) the standalone Add URL
 /// window for a pending browser-extension or clipboard capture
 /// (Round 74, item 13). The window is independent of the main
@@ -1677,6 +1770,32 @@ async fn open_add_url_window(
         return Ok(());
     }
     build_add_url_window(&app, &state.manager, &link_id)?;
+    Ok(())
+}
+
+/// Open (or focus, when it already exists) the standalone Add
+/// URL window in MANUAL mode (Round 87.2): the toolbar Add URL
+/// used to open the in-window overlay (`AddDownloadDialog`
+/// inside the main window), whose header is a plain div — no
+/// TitleBar, no drag region — so neither
+/// `data-tauri-drag-region` nor `startDragging()` could ever
+/// move it (the R87/R87.1 drag failure, proven in code: the
+/// fix was applied to a component the tested dialog doesn't
+/// use). Manual Add URL now opens the same standalone window
+/// as a browser capture, with an empty editable URL field
+/// instead of a pending link — so the TitleBar drag code
+/// applies to both.
+#[tauri::command]
+async fn open_manual_add_url_window(app: AppHandle) -> Result<(), String> {
+    let _guard = lock_window_build();
+    let log = startup_log_path_from_app(&app);
+    let log = log.as_deref();
+    if let Some(window) = app.get_webview_window("add-url-manual") {
+        show_window_ready(&window);
+        log_startup(log, "manual add URL window already open — focused");
+        return Ok(());
+    }
+    build_manual_add_url_window(&app)?;
     Ok(())
 }
 
@@ -4239,6 +4358,7 @@ pub fn run() {
             open_complete_dialog,
             open_error_dialog,
             open_add_url_window,
+            open_manual_add_url_window,
             enqueue_clipboard_capture,
             get_pending_link,
             window_ready,

@@ -27,6 +27,7 @@ import {
   onQueueAction,
   onUpdateAvailable,
   openAddUrlWindow,
+  openManualAddUrlWindow,
   openFile,
   openFileWith,
   openFolder,
@@ -553,8 +554,10 @@ export default function App() {
   /** Round 74 (13), reworked Round 75 — a queued capture opens
    *  its own standalone Add URL window (`open_add_url_window`),
    *  popped in front over whatever window the user has open —
-   *  never the in-window overlay, which stays for manual Add URL
-   *  only. One capture at a time: the effect takes the next one
+   *  never the in-window overlay: since Round 87.2 manual Add
+   *  URL opens the same standalone window, and the overlay
+   *  stays only for the clipboard-capture fallback and the
+   *  video-grabber pick. One capture at a time: the effect takes the next one
    *  off the queue, and that window resolves it (accepted on
    *  submit, rejected on close). A window that FAILS to open is
    *  remembered in `failedCaptureIds` and is NOT retried — the
@@ -1074,15 +1077,28 @@ export default function App() {
     if (ids.length === 0) setSelectedId(null)
   }
 
+  /** Round 87.2 — manual Add URL opens the standalone window
+   *  (the in-window overlay's header has no TitleBar / drag
+   *  region, so it could never be dragged — the R87/R87.1
+   *  failure). On failure the banner explains instead of
+   *  silently doing nothing. The in-window dialog stays for
+   *  the clipboard-capture fallback and the video-grabber
+   *  pick, which arrive as offers inside the main window. */
+  function openManualAddUrl() {
+    void openManualAddUrlWindow().catch((e: unknown) =>
+      showBannerError('action', e instanceof Error ? e.message : String(e)),
+    )
+  }
+
   const toolbarActions = {
-    add: () => setShowAdd(true),
+    add: () => openManualAddUrl(),
     resume: () => selected && void run(() => resumeDownload(selected.id), { immediate: true }),
     stop: () => selected && void run(() => pauseDownload(selected.id)),
     deleteSelected,
   }
 
   const menuActions: MenuBarActions = {
-    add: () => setShowAdd(true),
+    add: () => openManualAddUrl(),
     downloadAll: () => setShowDownloadAll(true),
     batch: () => setShowBatch(true),
     resume: () => selected && void run(() => resumeDownload(selected.id), { immediate: true }),
@@ -1282,7 +1298,7 @@ export default function App() {
               onSelectionChange={handleSelectionChange}
               onRemoveMany={requestRemoveMany}
               onOpenProgress={(id) => void openProgressWindowFor(id, false)}
-              onAdd={() => setShowAdd(true)}
+              onAdd={() => openManualAddUrl()}
               onOpenFile={(id) => openGuarded(id, openFile)}
               onOpenWith={(id) => openGuarded(id, openFileWith)}
               onOpenFolder={(id) => openGuarded(id, openFolder)}

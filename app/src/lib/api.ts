@@ -276,6 +276,15 @@ export async function openAddUrlWindow(linkId: string): Promise<void> {
   return invoke('open_add_url_window', { linkId })
 }
 
+/** Round 87.2 — open (or focus) the standalone Add URL window
+ *  in MANUAL mode (toolbar Add URL): the in-window overlay's
+ *  header has no TitleBar / drag region, so it could never be
+ *  dragged — manual Add URL now opens the same standalone
+ *  window as a capture, with an empty editable URL field. */
+export async function openManualAddUrlWindow(): Promise<void> {
+  return invoke('open_manual_add_url_window')
+}
+
 /** Round 81 — enqueue a clipboard-copied link as a pending
  *  capture, so it opens in its own standalone Add URL window
  *  (popped in front) instead of the dialog inside the main
