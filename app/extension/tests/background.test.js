@@ -17,7 +17,7 @@ const backgroundSrc = fs.readFileSync(path.join(__dirname, "..", "background.js"
 
 const tick = (ms = 10) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function loadBackground({ nativeReply = { ok: true }, tabs = [], tabSendMessage = null, cookies = [] } = {}) {
+function loadBackground({ nativeReply = { ok: true }, tabs = [], tabSendMessage = null, cookies = [], cookiesError = null, testConsole = console } = {}) {
   const storage = {};
   const sentMessages = [];
   const injected = [];
@@ -40,6 +40,11 @@ function loadBackground({ nativeReply = { ok: true }, tabs = [], tabSendMessage 
     },
     cookies: {
       async getAll({ url }) {
+        // Round 86 — a test can make the call throw (the real
+        // Chrome error when the extension lacks host permission
+        // for the queried URL), so the cookiesFor error path is
+        // testable instead of only the happy path.
+        if (cookiesError) throw cookiesError;
         // Round 78 — the cookies the browser holds for a URL,
         // as the real API returns them (name/value plus the
         // fields the background strips away).
@@ -124,7 +129,7 @@ function loadBackground({ nativeReply = { ok: true }, tabs = [], tabSendMessage 
       },
     },
   };
-  const context = vm.createContext({ chrome, console, setTimeout, clearTimeout, Date, URL });
+  const context = vm.createContext({ chrome, console: testConsole, setTimeout, clearTimeout, Date, URL });
   vm.runInContext(backgroundSrc, context, { filename: "background.js" });
   return {
     storage,
@@ -676,4 +681,104 @@ test("video_found without a cookies field still attaches the media URL's cookies
   await tick(20);
   assert.equal(reply.ok, true);
   assert.equal(JSON.stringify(env.sentMessages[0].cookies), JSON.stringify([{ name: "session", value: "abc" }]));
+});
+
+// -- Round 86 — cookie pipeline checkpoints -------------------------------
+// The R85 retest could not tell whether the CDN GET lacked
+// cookies, because no stage logged even their presence. The
+// refill now logs the count + host (never values), and a
+// cookiesFor failure is logged instead of swallowed.
+
+test("video_found refill logs the cookie count and host, never the values", async () => {
+  const lines = [];
+  const testConsole = {
+    log: (...args) => { lines.push(args.join(" ")); },
+    warn: (...args) => { lines.push(args.join(" ")); },
+    error: (...args) => { lines.push(args.join(" ")); },
+  };
+  const env = loadBackground({
+    nativeReply: { ok: true },
+    cookies: [{ name: "session", value: "abc" }],
+    testConsole,
+  });
+  let reply = null;
+  env.listeners.message(
+    {
+      type: "video_found",
+      page_url: RESOLVE_PAGE,
+      variants: [{ url: "https://cdn.example.com/v1080.mp4", resolved: true }],
+      cookies: [],
+    },
+    {},
+    (r) => { reply = r; },
+  );
+  await tick(20);
+  assert.equal(reply.ok, true);
+  assert.equal(JSON.stringify(env.sentMessages[0].cookies), JSON.stringify([{ name: "session", value: "abc" }]));
+  assert.ok(
+    lines.some((l) => l.includes("cookies for cdn.example.com: 1 cookie(s)")),
+    `the refill must log the count + host, got: ${lines.join(" | ")}`,
+  );
+  assert.ok(
+    !lines.some((l) => l.includes("abc")),
+    `no checkpoint may log a cookie value, got: ${lines.join(" | ")}`,
+  );
+});
+
+test("cookiesFor failure is logged with host + reason, not swallowed", async () => {
+  // The R85 TikTok case: chrome.cookies.getAll throws when the
+  // extension lacks host permission for the queried URL, and the
+  // old bare catch returned [] — indistinguishable from "no
+  // cookies for this URL".
+  const lines = [];
+  const testConsole = {
+    log: (...args) => { lines.push(args.join(" ")); },
+    warn: (...args) => { lines.push(args.join(" ")); },
+    error: (...args) => { lines.push(args.join(" ")); },
+  };
+  const env = loadBackground({
+    nativeReply: { ok: true },
+    cookiesError: new Error("No host permission for this URL"),
+    testConsole,
+  });
+  let reply = null;
+  env.listeners.message(
+    {
+      type: "video_found",
+      page_url: RESOLVE_PAGE,
+      variants: [{ url: "https://cdn.example.com/v1080.mp4", resolved: true }],
+      cookies: [],
+    },
+    {},
+    (r) => { reply = r; },
+  );
+  await tick(20);
+  assert.equal(reply.ok, true);
+  assert.equal(
+    JSON.stringify(env.sentMessages[0].cookies),
+    JSON.stringify([]),
+    "a failed refill still hands over with no cookies, never a crash",
+  );
+  assert.ok(
+    lines.some((l) => l.includes("cookiesFor failed for cdn.example.com") && l.includes("No host permission")),
+    `the failure must be logged with host + reason, got: ${lines.join(" | ")}`,
+  );
+});
+
+test("manifest declares the narrow TikTok host_permissions", async () => {
+  // Round 86 — `chrome.cookies.getAll` needs host permission
+  // for the queried URL; `activeTab` covers only the active tab
+  // host, NOT the v16 CDN host. The narrowest fix is these two
+  // patterns only — no other site is added.
+  const manifest = JSON.parse(
+    fs.readFileSync(path.join(__dirname, "..", "manifest.json"), "utf8"),
+  );
+  assert.deepEqual(manifest.host_permissions, [
+    "https://*.tiktok.com/*",
+    "https://*.tiktokcdn.com/*",
+  ]);
+  assert.ok(
+    (manifest.permissions || []).includes("cookies"),
+    "the cookies permission itself stays declared",
+  );
 });

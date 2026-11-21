@@ -282,12 +282,39 @@ function pingHost() {
 // handed over, and a page the host expands itself (Download All)
 // carries none — the host cannot use them there. Guarded: a
 // context without chrome.cookies simply sends no cookies.
+// Round 86 — cookie pipeline checkpoint: log only the cookie
+// COUNT and the host, NEVER values. The R85 retest could not
+// tell whether the CDN GET lacked cookies, because no stage
+// logged even their presence. `url` may be empty (a message
+// with no URL at all); the count still logs.
+function logCookieCount(url, count) {
+  try {
+    const host = url ? new URL(url).host : "(no url)";
+    console.log(`Sonic Manager: cookies for ${host}: ${count} cookie(s)`);
+  } catch {
+    // URL parsing must never break the hand-off.
+  }
+}
+
 async function cookiesFor(url) {
   try {
     if (!chrome.cookies || typeof chrome.cookies.getAll !== "function") return [];
     const all = await chrome.cookies.getAll({ url });
     return (all || []).map((c) => ({ name: c.name, value: c.value }));
-  } catch {
+  } catch (err) {
+    // Round 86 — the old bare `catch` swallowed the failure
+    // and returned [], so a refill blocked by missing host
+    // permission (the R85 TikTok case: no host_permissions for
+    // the v16 CDN host) looked identical to "no cookies for
+    // this URL". Host + message only — never cookie values.
+    try {
+      const host = new URL(url).host;
+      console.warn(
+        `Sonic Manager: cookiesFor failed for ${host}: ${err && err.message ? err.message : err}`,
+      );
+    } catch {
+      // URL parsing must never break the hand-off.
+    }
     return [];
   }
 }
@@ -353,6 +380,16 @@ async function handToFetchline(message) {
   if (cookieUrl) {
     const cookies = await cookiesFor(cookieUrl);
     if (cookies.length > 0) message.cookies = cookies;
+    // Round 86 — checkpoint the refill (count + host only).
+    logCookieCount(cookieUrl, cookies.length);
+  } else if (hasCookies) {
+    // A non-empty cookie set passes through untouched (Round
+    // 78): log its count at the same checkpoint.
+    const u =
+      message.url ||
+      (message.variants && message.variants[0] && message.variants[0].url) ||
+      "";
+    logCookieCount(u, message.cookies.length);
   }
   let reply;
   try {

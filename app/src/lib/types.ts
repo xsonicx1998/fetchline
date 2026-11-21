@@ -78,6 +78,12 @@ export interface SegmentProgress {
   end_byte: number | null
   downloaded_bytes: number
   status: string
+  /** Round 86 (Fix A) — which DASH child this part belongs to
+   *  ('video' / 'audio'); null for a plain download's parts. The
+   *  engine tags it so the progress window can render two
+   *  labeled groups instead of one flat list where the second
+   *  child's numbering restarts at 1. */
+  child_kind: string | null
 }
 
 /** One segment's retry wait, as the S03 dialog shows it: `attempt`

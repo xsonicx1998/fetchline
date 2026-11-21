@@ -3244,14 +3244,13 @@ fn restore_main_window(app: &AppHandle) {
 /// the tray cannot be created the app still runs — the tray is a
 /// convenience, not a requirement.
 ///
-/// Round 85 — restore handles BOTH left Click Up and left
-/// DoubleClick (a double-click used to restore only incidentally,
-/// via its two Click Up events). Every tray event is logged to
-/// startup.log (except Move, which fires constantly) so the VPS
-/// retest can tell which event actually fired. The Round 65
-/// hide-to-tray design STAYS: no real-minimize / Settings
-/// option was built here — that is a user decision, recorded
-/// in the Round 85 report, not implemented.
+/// Round 86 — minimize now goes to the TASKBAR (a real
+/// `minimize()` in TitleBar.tsx), superseding the Round 65
+/// hide-on-minimize: the old behaviour failed the
+/// taskbar-restore check in four consecutive rounds (R76, R83,
+/// R84, R85). Only X hides to the tray now — see the
+/// CloseRequested handler below, which is unchanged. Exactly
+/// ONE tray icon remains.
 fn build_system_tray(app: &AppHandle) -> Result<(), String> {
     let Some(icon) = app.default_window_icon() else {
         return Err("no default window icon for the tray".to_string());
@@ -4127,6 +4126,9 @@ pub fn run() {
             // out (`app.exit`, not a window close). Progress
             // windows keep the default close behaviour — their X
             // closes just the window, the download keeps running.
+            // Round 86 — MINIMIZE does NOT hide: it is a real
+            // minimize to the taskbar (TitleBar.tsx); only X
+            // hides to the tray.
             if window.label() == "main" {
                 if let WindowEvent::CloseRequested { api, .. } = event {
                     let _ = window.hide();

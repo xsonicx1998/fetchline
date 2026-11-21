@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type MouseEvent } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Copy, Minus, Square, X } from 'lucide-react'
 
@@ -15,20 +15,27 @@ import { Copy, Minus, Square, X } from 'lucide-react'
  *  inside a drag region can swallow the click on Windows).
  *  Double-clicking the drag area toggles maximize, like a native
  *  title bar. The maximize glyph follows the live maximized
- *  state (`isMaximized` + the resize listener).
+ *  state (`isMaximized` + the resize listener). Round 86 — the
+ *  region alone stalls after ~10 px on Windows when child
+ *  elements (the logo img, the title span) intercept
+ *  hit-testing, so a mousedown on the header also calls
+ *  `startDragging()` explicitly (Jumani's fix); buttons and
+ *  inputs are skipped.
  *
  *  The icon is `/icon.png` — the chosen logo, copied into
  *  `app/public/` so Vite bundles it (the src-tauri icons are
  *  not in the frontend dist).
  *
- *  Round 65 — minimize to tray, like IDM: the minimize button
- *  HIDES the window to the system tray instead of dropping it
- *  to the taskbar (the tray icon brings it back). The MAIN
- *  window's X hides it to the tray too (`hideOnClose`) — the
- *  tray menu's Exit is the only way to quit the app. A
- *  progress window's X still closes just that window (the
- *  download keeps running); its minimize hides it to the tray
- *  like the main window's. */
+ *  Round 86 — minimize to the TASKBAR (this supersedes the
+ *  Round 65 hide-to-tray minimize): the minimize button does a
+ *  real minimize, so the window gets a taskbar button and
+ *  clicking it restores the window — the old behaviour failed
+ *  the taskbar-restore check in four consecutive rounds (R76,
+ *  R83, R84, R85). Only X hides to the tray (`hideOnClose` on
+ *  the main window); the tray menu's Exit is the only way to
+ *  quit the app. A progress window's X still closes just that
+ *  window (the download keeps running); its minimize drops it
+ *  to the taskbar like the main window's. */
 export function TitleBar({
   title,
   icon = true,
@@ -84,8 +91,12 @@ export function TitleBar({
     }
   }, [])
 
+  // Round 86 — a REAL minimize to the Windows taskbar (see
+  // the header comment): the old `hide()` here sent the window
+  // to the tray on minimize, where no taskbar button existed
+  // to restore it from.
   function minimize() {
-    void getCurrentWindow().hide().catch(() => undefined)
+    void getCurrentWindow().minimize().catch(() => undefined)
   }
 
   function toggleMaximize() {
@@ -108,7 +119,25 @@ export function TitleBar({
     <div className="flex h-10 shrink-0 items-stretch justify-between border-b border-border bg-surface">
       <div
         {...(draggable
-          ? { 'data-tauri-drag-region': true as const, onDoubleClick: toggleMaximize }
+          ? {
+              'data-tauri-drag-region': true as const,
+              onDoubleClick: toggleMaximize,
+              // Round 86 — reliable drag (Jumani): the drag
+              // region alone stalls after ~10 px on Windows
+              // when child elements (the logo img, the title
+              // span) intercept hit-testing, so a mousedown on
+              // the header also starts the drag explicitly.
+              // Buttons/inputs are skipped (they sit outside
+              // the region anyway).
+              onMouseDown: (e: MouseEvent<HTMLDivElement>) => {
+                if (
+                  e.button === 0 &&
+                  !(e.target as HTMLElement).closest('button, input')
+                ) {
+                  void getCurrentWindow().startDragging().catch(() => undefined)
+                }
+              },
+            }
           : {})}
         className="flex min-w-0 flex-1 items-center gap-2 px-3"
       >
@@ -137,8 +166,8 @@ export function TitleBar({
           <button
             type="button"
             onClick={minimize}
-            aria-label="Minimize to tray"
-            title="Minimize to tray"
+            aria-label="Minimize"
+            title="Minimize"
             className="flex h-10 w-11 items-center justify-center text-text-muted hover:bg-surface-2 hover:text-text"
           >
             <Minus className="h-4 w-4" aria-hidden="true" />

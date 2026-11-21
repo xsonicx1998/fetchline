@@ -633,6 +633,12 @@ async fn confirm_pending_link_resolved_video_skips_probe() {
     // open-ended segment (no `Range` header is ever sent), and
     // a plain capture against the same server still fails its
     // probe — but stays pending now, not rejected.
+    // Round 86 — the page here is deliberately NOT TikTok: a
+    // TikTok pick now routes to the direct yt-dlp path in
+    // `confirm_pending_link` (Claude Q1), so no TikTok row can
+    // reach this segmented no-probe path any more. The path
+    // still exists for every other host, and this test proves
+    // it there.
     let server = MockServer::start(MockConfig {
         fail_status: Some(403),
         size_bytes: Some(512 * 1024),
@@ -641,16 +647,16 @@ async fn confirm_pending_link_resolved_video_skips_probe() {
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
     let store = mgr.store();
-    let page = "https://www.tiktok.com/@user/video/7551233954129399053";
+    let page = "https://www.example.com/watch/7551233954129399053";
     let row = store
         .enqueue_pending_link_resolved(
             &server.url,
             Some(page),
             None,
             &fetchline_engine::store::ResolvedLink {
-                filename: Some("TikTok video.mp4".to_string()),
+                filename: Some("video.mp4".to_string()),
                 headers: Some(
-                    r#"{"User-Agent":"Mozilla/5.0 TestAgent","Referer":"https://www.tiktok.com/"}"#
+                    r#"{"User-Agent":"Mozilla/5.0 TestAgent","Referer":"https://www.example.com/"}"#
                         .to_string(),
                 ),
                 source_url: Some(page.to_string()),
@@ -667,7 +673,7 @@ async fn confirm_pending_link_resolved_video_skips_probe() {
         .unwrap();
     assert_eq!(server.head_requests(), 0, "the probe must not run");
     let dl = mgr.get_download(&download_id).unwrap().unwrap();
-    assert_eq!(dl.filename, "TikTok video.mp4");
+    assert_eq!(dl.filename, "video.mp4");
     assert_eq!(dl.size_bytes, Some(512 * 1024));
     let segments = store.get_segments(&download_id).unwrap();
     assert_eq!(segments.len(), 1);
@@ -702,6 +708,13 @@ async fn resolved_video_headers_and_cookies_reach_the_worker() {
     // against it proves both reached the worker. The confirm
     // never probes (zero HEADs) — the gate would refuse a bare
     // probe too.
+    // Round 86 — the page here is deliberately NOT TikTok: a
+    // TikTok pick now routes to the direct yt-dlp path in
+    // `confirm_pending_link` (Claude Q1), so no TikTok row can
+    // reach the segmented worker any more — and the direct
+    // runner needs a yt-dlp binary this test does not install.
+    // The segmented path still exists for every other host, and
+    // this test proves its header forwarding there.
     let server = MockServer::start(MockConfig {
         size_bytes: Some(512 * 1024),
         require_headers: vec![
@@ -716,16 +729,16 @@ async fn resolved_video_headers_and_cookies_reach_the_worker() {
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
     let store = mgr.store();
-    let page = "https://www.tiktok.com/@user/video/7551233954129399053";
+    let page = "https://www.example.com/watch/7551233954129399053";
     let row = store
         .enqueue_pending_link_resolved(
             &server.url,
             Some(page),
             Some(r#"[{"name":"sessionid","value":"abc"}]"#),
             &fetchline_engine::store::ResolvedLink {
-                filename: Some("TikTok video.mp4".to_string()),
+                filename: Some("video.mp4".to_string()),
                 headers: Some(
-                    r#"{"User-Agent":"Mozilla/5.0 TestAgent","Referer":"https://www.tiktok.com/"}"#
+                    r#"{"User-Agent":"Mozilla/5.0 TestAgent","Referer":"https://www.example.com/"}"#
                         .to_string(),
                 ),
                 source_url: Some(page.to_string()),
@@ -1155,9 +1168,28 @@ fn extension_manifest_is_mv3_and_minimal() {
         !gecko_id.is_empty(),
         "browser_specific_settings.gecko.id must be set"
     );
-    assert!(
-        m.get("host_permissions").is_none(),
-        "no host_permissions expected"
+    // Round 86 — host_permissions is allowed ONLY for the two
+    // narrow TikTok patterns (`chrome.cookies.getAll` needs host
+    // permission for the queried CDN URL; `activeTab` covers only
+    // the active tab host). Anything broader — above all
+    // <all_urls> — still fails. (validate_manifest.py pins the
+    // same set.)
+    let hosts = m
+        .get("host_permissions")
+        .and_then(|h| h.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        hosts,
+        vec![
+            "https://*.tiktok.com/*".to_string(),
+            "https://*.tiktokcdn.com/*".to_string(),
+        ],
+        "host_permissions must be exactly the two narrow TikTok patterns (Round 86)"
     );
     for size in ["16", "32", "48", "128"] {
         assert!(

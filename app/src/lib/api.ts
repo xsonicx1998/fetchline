@@ -163,6 +163,31 @@ export async function ytdlpVersion(): Promise<YtdlpStatus> {
   return invoke<YtdlpStatus>('ytdlp_version')
 }
 
+/** Round 86 — the bundled yt-dlp's status, cached for the app
+ *  session. `ytdlp_version` spawns the PyInstaller onefile exe,
+ *  which extracts its Python runtime on every launch (~1–2 s
+ *  cold start on Windows, plus Defender scanning), so fetching
+ *  it on every Settings open held the whole form behind
+ *  "Loading settings...". The first call fetches and caches the
+ *  promise (concurrent opens share one spawn); later calls reuse
+ *  it. A failed fetch is NOT cached — the next open retries.
+ *  `invalidateYtdlpVersion` clears it after an update, so the
+ *  next open re-fetches the new version once. */
+let cachedYtdlpVersion: Promise<YtdlpStatus> | null = null
+export function ytdlpVersionCached(): Promise<YtdlpStatus> {
+  if (!cachedYtdlpVersion) {
+    cachedYtdlpVersion = ytdlpVersion().catch((e: unknown) => {
+      cachedYtdlpVersion = null
+      throw e
+    })
+  }
+  return cachedYtdlpVersion
+}
+
+export function invalidateYtdlpVersion(): void {
+  cachedYtdlpVersion = null
+}
+
 /** Round 78 — resolve a platform video page from the app
  *  itself (a YouTube URL pasted into Add URL): title + trimmed
  *  quality list. No cookies — the app has no browser session. */

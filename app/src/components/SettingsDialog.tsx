@@ -17,7 +17,8 @@ import {
   updateCategory,
   updateSettings,
   ytdlpUpdate,
-  ytdlpVersion,
+  ytdlpVersionCached,
+  invalidateYtdlpVersion,
 } from '../lib/api'
 import type {
   CategoryRow,
@@ -157,11 +158,19 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
       edits[c.id] = { folder: c.default_folder, extensions: c.file_extensions.join(', ') }
     }
     setCatEdits(edits)
-    void Promise.all([getSettings(), getProxyConfig(), listSiteLogins(), getSoundSettings(), getQuotaStatus(), ytdlpVersion().catch(() => null)])
-      .then(([s, p, loginsList, soundList, quota, ytdlpStatus]) => {
+    // Round 86 — the five DB fetches render the form as soon as
+    // they resolve; the yt-dlp version is fetched SEPARATELY and
+    // fills in the "Video downloads" section when it arrives.
+    // It used to ride in this Promise.all, so the ~1–2 s cold
+    // start of `yt-dlp --version` (PyInstaller onefile exe)
+    // held the whole form behind "Loading settings..." on every
+    // open. The version is cached for the session (first open
+    // fetches once), and the section already shows "unknown"
+    // while `ytdlp` is null, so nothing here waits on it.
+    void Promise.all([getSettings(), getProxyConfig(), listSiteLogins(), getSoundSettings(), getQuotaStatus()])
+      .then(([s, p, loginsList, soundList, quota]) => {
         setSettings(s)
         setQuotaStatus(quota)
-        setYtdlp(ytdlpStatus)
         setLogins(loginsList)
         const loginDrafts: Record<string, LoginDraft> = {}
         for (const l of loginsList) {
@@ -193,6 +202,12 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
       })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setLoading(false))
+    // Round 86 — see above: the version arrives on its own
+    // schedule and only ever touches the Video section. A failed
+    // fetch leaves `ytdlp` null ("unknown"), exactly as before.
+    void ytdlpVersionCached()
+      .then((status) => setYtdlp(status))
+      .catch(() => setYtdlp(null))
   }, [open, categories])
 
   useEffect(() => {
@@ -252,6 +267,11 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
     try {
       const status = await ytdlpUpdate()
       setYtdlp(status)
+      // Round 86 — the update replaced the binary, so the
+      // session-cached version is stale: clear it so the next
+      // Settings open re-fetches the new version once. (This
+      // dialog already shows the fresh status directly.)
+      invalidateYtdlpVersion()
       if (!status.version) {
         setYtdlpMessage('yt-dlp updated.')
       } else if (before !== null && status.version === before) {

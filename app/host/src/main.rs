@@ -214,6 +214,18 @@ fn is_browser_launch_arg(arg: &str) -> bool {
         || arg.starts_with("--parent-window=")
 }
 
+/// Round 86 — the host of a URL for a log line (count + host
+/// only, never values, never the full URL): strip the scheme,
+/// take up to the first `/`, `?` or `#`. A bare host stays
+/// itself; an unparseable string logs as-is.
+fn host_of(url: &str) -> &str {
+    let after_scheme = url.split("://").nth(1).unwrap_or(url);
+    after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme)
+}
+
 /// Append one line to the host log, best-effort: the file lives next
 /// to the database (host.log beside app.db). Never stdout — anything
 /// but framed replies on stdout corrupts the native-messaging
@@ -543,6 +555,45 @@ async fn main() {
             }
             Ok(m) => match ensure_store(&db_path, &log_path, &mut store, &mut manager) {
                 Ok((store, _)) => {
+                    // Round 86 — cookie pipeline checkpoint
+                    // (count + host only, NEVER values): the
+                    // message as the host RECEIVED it. A 0 here
+                    // with a logged-in browser means the
+                    // extension never sent them (or the refill
+                    // failed — see the extension console); a >0
+                    // here that the engine later reports as
+                    // absent means the host dropped them.
+                    let (kind, url, count) = match &m {
+                        HostMessage::DownloadLink { url, cookies, .. } => {
+                            ("download_link", url.clone(), cookies.len())
+                        }
+                        HostMessage::VideoFound {
+                            page_url,
+                            variants,
+                            cookies,
+                        } => (
+                            "video_found",
+                            variants
+                                .first()
+                                .map(|v| v.url.clone())
+                                .unwrap_or_else(|| page_url.clone()),
+                            cookies.len(),
+                        ),
+                        HostMessage::ResolveVideo {
+                            page_url, cookies, ..
+                        } => ("resolve_video", page_url.clone(), cookies.len()),
+                        _ => ("other", String::new(), 0),
+                    };
+                    if !url.is_empty() {
+                        log_line(
+                            &log_path,
+                            &format!(
+                                "host received {kind}: {} cookie(s) for host {}",
+                                count,
+                                host_of(&url),
+                            ),
+                        );
+                    }
                     let reply = handle_host_message(&store, &m);
                     serde_json::to_value(reply).unwrap_or_else(|_| {
                         serde_json::json!({"type": "error", "ok": false, "error": "Could not serialise the reply"})
@@ -766,5 +817,23 @@ mod tests {
         assert_eq!(gone["needs_login"], false);
         assert_eq!(gone["error_kind"], "video_unavailable");
         assert!(gone["error"].as_str().unwrap().contains("unavailable"));
+    }
+
+    /// Round 86 — the host checkpoint logs only the host of a
+    /// URL (count + host, never values, never the full URL):
+    /// a CDN URL reduces to its host, a bare host stays itself,
+    /// and query/fragment never leak into the log.
+    #[test]
+    fn host_of_returns_only_the_host() {
+        assert_eq!(
+            host_of("https://v16-webapp-prime.us.tiktok.com/video/tos/abc?expire=1"),
+            "v16-webapp-prime.us.tiktok.com"
+        );
+        assert_eq!(
+            host_of("https://www.tiktok.com/@user/video/123"),
+            "www.tiktok.com"
+        );
+        assert_eq!(host_of("127.0.0.1:51234/file.bin"), "127.0.0.1:51234");
+        assert_eq!(host_of("not-a-url"), "not-a-url");
     }
 }

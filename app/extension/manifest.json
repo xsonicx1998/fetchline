@@ -31,6 +31,10 @@
     "nativeMessaging",
     "scripting"
   ],
+  "host_permissions": [
+    "https://*.tiktok.com/*",
+    "https://*.tiktokcdn.com/*"
+  ],
   "content_scripts": [
     {
       "matches": ["http://*/*", "https://*/*"],

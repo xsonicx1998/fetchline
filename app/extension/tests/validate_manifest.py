@@ -2,7 +2,8 @@
 """Validate app/extension/manifest.json (S13 + S08 + S13 finish + Round 72 + Round 73).
 
 Checks the Manifest V3 shape and that the permission set stays
-minimal: no host permissions, no tabs. `scripting` is allowed
+minimal: no tabs, and host permissions ONLY for the two narrow
+TikTok patterns (Round 86 — see below). `scripting` is allowed
 since S08, and only for one thing — injecting the video detector
 into the ACTIVE tab when the user clicks "Find videos on this page"
 in the popup (activeTab grants that one tab, on that one gesture).
@@ -81,8 +82,18 @@ def main() -> int:
             problems.append(f"permission must not be requested: {p}")
         if p not in ALLOWED_PERMISSIONS:
             problems.append(f"unexpected permission (justify it or remove it): {p}")
-    if "host_permissions" in manifest:
-        problems.append("host_permissions must not be present (no <all_urls>)")
+    # Round 86 — host_permissions is allowed ONLY for the two
+    # narrow TikTok patterns: `chrome.cookies.getAll` needs host
+    # permission for the queried URL, and `activeTab` covers only
+    # the active tab host (www.tiktok.com), NOT the v16 CDN host
+    # — so the R85 cookie refill threw and was swallowed. Anything
+    # else — above all <all_urls> — still fails the validation.
+    allowed_hosts = {"https://*.tiktok.com/*", "https://*.tiktokcdn.com/*"}
+    host_permissions = manifest.get("host_permissions", [])
+    if not isinstance(host_permissions, list) or set(host_permissions) != allowed_hosts:
+        problems.append(
+            "host_permissions must be exactly the two narrow TikTok patterns (Round 86), nothing broader"
+        )
     # Round 72 (A) — the auto-injection entry, pinned exactly: one
     # entry, http(s) matches only, document_idle, video-detect.js
     # + content.js. Anything else (another match pattern, another

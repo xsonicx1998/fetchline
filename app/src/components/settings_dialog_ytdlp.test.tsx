@@ -34,6 +34,8 @@ vi.mock('../lib/api', () => ({
   updateSettings: vi.fn(),
   ytdlpUpdate: vi.fn(),
   ytdlpVersion: vi.fn(),
+  ytdlpVersionCached: vi.fn(),
+  invalidateYtdlpVersion: vi.fn(),
 }))
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({
@@ -111,6 +113,7 @@ beforeEach(() => {
     quota_paused_downloads: 0,
   })
   vi.mocked(api.ytdlpVersion).mockResolvedValue(ytdlpStatus('2026.10.26'))
+  vi.mocked(api.ytdlpVersionCached).mockResolvedValue(ytdlpStatus('2026.10.26'))
 })
 
 function renderDialog() {
@@ -164,6 +167,9 @@ describe('Update yt-dlp button', () => {
       () => expect(screen.getByText('yt-dlp updated to 2026.11.01.')).toBeTruthy(),
       { timeout: 5000 },
     )
+    // Round 86 — the update replaced the binary, so the
+    // session-cached version must be cleared for the next open.
+    expect(vi.mocked(api.invalidateYtdlpVersion)).toHaveBeenCalled()
   })
 
   test('a failed update shows the reason', async () => {
@@ -180,5 +186,47 @@ describe('Update yt-dlp button', () => {
         ).toBeTruthy(),
       { timeout: 5000 },
     )
+  })
+})
+
+describe('Settings load does not wait for the yt-dlp version', () => {
+  // Round 86 — the version fetch spawns `yt-dlp --version`
+  // (~1–2 s cold start on Windows) and used to ride in the
+  // dialog's Promise.all, so the whole form sat behind
+  // "Loading settings..." on every open. The form must render
+  // as soon as the five DB fetches resolve, and the Video
+  // section fills in when the version arrives.
+  test('the form renders while the version is still pending', async () => {
+    const pending = deferred<YtdlpStatus>()
+    vi.mocked(api.ytdlpVersionCached).mockReturnValue(pending.promise)
+    renderDialog()
+
+    await waitFor(
+      () => expect(screen.getByLabelText('Default download folder')).toBeTruthy(),
+      { timeout: 5000 },
+    )
+    expect(screen.queryByText('Loading settings…')).toBeNull()
+    // The Video section shows its pre-existing "unknown" state
+    // until the version arrives — it never blocks the form.
+    expect(screen.getByText('Video component status is unknown.')).toBeTruthy()
+  })
+
+  test('the video section fills in when the version arrives', async () => {
+    const pending = deferred<YtdlpStatus>()
+    vi.mocked(api.ytdlpVersionCached).mockReturnValue(pending.promise)
+    renderDialog()
+
+    await waitFor(
+      () => expect(screen.getByLabelText('Default download folder')).toBeTruthy(),
+      { timeout: 5000 },
+    )
+    expect(screen.getByText('Video component status is unknown.')).toBeTruthy()
+
+    pending.resolve(ytdlpStatus('2026.10.26'))
+    await waitFor(
+      () => expect(screen.getByText(/yt-dlp 2026\.10\.26/)).toBeTruthy(),
+      { timeout: 5000 },
+    )
+    expect(screen.queryByText('Video component status is unknown.')).toBeNull()
   })
 })

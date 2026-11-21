@@ -626,6 +626,28 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
       : freshEta
   const percent = progressPercent(downloaded, size)
   const segments = live?.segments ?? []
+  // Round 86 (Fix A) — group the parts by DASH child kind so a
+  // YouTube download shows "Video parts" and "Audio parts" as two
+  // labeled groups instead of one flat list where the audio
+  // child's numbering restarts at 1. A plain download has no
+  // child_kind on any part, so it stays a single unlabeled group
+  // (the "Parts (N parts)" header already covers it). Groups keep
+  // first-appearance order (video before audio, as the engine
+  // emits them).
+  const segmentGroups: { key: string; label: string | null; parts: SegmentProgress[] }[] = []
+  for (const s of segments) {
+    const key = s.child_kind ?? ''
+    let group = segmentGroups.find((g) => g.key === key)
+    if (!group) {
+      const label =
+        key === ''
+          ? null
+          : `${key.charAt(0).toUpperCase()}${key.slice(1)} parts`
+      group = { key, label, parts: [] }
+      segmentGroups.push(group)
+    }
+    group.parts.push(s)
+  }
   // The countdown is the engine's: `retry` arrives on the live
   // snapshot (every 500 ms) with seconds left until the next
   // attempt, counted down from the engine's backoff deadline.
@@ -742,7 +764,13 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
         {tab === 'status' ? (
           <>
             {segments.length > 0 ? (
-              <div>
+              // Round 86 (Fix B) — this block is a direct flex item
+              // of the window's outer column, so it takes the free
+              // height (`flex-1 min-h-0`) and the table wrapper
+              // below stretches with it instead of capping at
+              // 140px: at the default 660×480 the table looks the
+              // same as before, and maximized it fills the window.
+              <div className="flex min-h-0 flex-1 flex-col">
                 <div className="mb-1 flex items-baseline justify-between gap-2">
                   {/* Round 70 — "Parts (N parts)", not "connections":
                       the engine splits the largest remaining segment
@@ -766,30 +794,51 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
                     {segments.filter((s) => s.status === 'done').length}/{segments.length} completed
                   </p>
                 </div>
-                <div className="max-h-[140px] overflow-y-auto rounded-md border border-border">
-                  <table className="w-full border-collapse text-sm" aria-label="Download parts">
-                    <thead className="sticky top-0 bg-surface">
-                      <tr className="border-b border-border text-left text-xs text-text-muted">
-                        <th scope="col" className="px-3 py-1.5">N.</th>
-                        <th scope="col" className="px-3 py-1.5">Downloaded</th>
-                        <th scope="col" className="px-3 py-1.5">Info</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {segments.map((s) => {
-                        const info = partInfo(s, download.status, retry !== null)
-                        return (
-                          <tr key={s.segment_index} className="border-b border-border last:border-0">
-                            <td className="px-3 py-1.5 font-mono text-xs text-text-muted">
-                              {s.segment_index + 1}
-                            </td>
-                            <td className="px-3 py-1.5 font-mono text-xs">{formatBytes(s.downloaded_bytes)}</td>
-                            <td className={`px-3 py-1.5 text-xs ${info.className}`}>{info.label}</td>
+                <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-border">
+                  {/* Round 86 (Fix A) — one table per DASH child
+                      group, each numbered from 1 within its group
+                      and keyed by child kind + segment index (the
+                      old `key={s.segment_index}` collided across
+                      the two children, and the flat list showed the
+                      audio parts numbered 1..6 under the video
+                      parts with no label). A plain download has a
+                      single unlabeled group, so it renders exactly
+                      as before. */}
+                  {segmentGroups.map((group) => (
+                    <div key={group.key || 'plain'}>
+                      {group.label ? (
+                        <p className="border-b border-border bg-surface px-3 py-1.5 text-xs font-semibold text-text-muted">
+                          {group.label} ({group.parts.length})
+                        </p>
+                      ) : null}
+                      <table className="w-full border-collapse text-sm" aria-label="Download parts">
+                        <thead className="sticky top-0 bg-surface">
+                          <tr className="border-b border-border text-left text-xs text-text-muted">
+                            <th scope="col" className="px-3 py-1.5">N.</th>
+                            <th scope="col" className="px-3 py-1.5">Downloaded</th>
+                            <th scope="col" className="px-3 py-1.5">Info</th>
                           </tr>
-                        )
-                      })}
-                    </tbody>
-                  </table>
+                        </thead>
+                        <tbody>
+                          {group.parts.map((s, i) => {
+                            const info = partInfo(s, download.status, retry !== null)
+                            return (
+                              <tr
+                                key={`${group.key || 'plain'}-${s.segment_index}`}
+                                className="border-b border-border last:border-0"
+                              >
+                                <td className="px-3 py-1.5 font-mono text-xs text-text-muted">
+                                  {i + 1}
+                                </td>
+                                <td className="px-3 py-1.5 font-mono text-xs">{formatBytes(s.downloaded_bytes)}</td>
+                                <td className={`px-3 py-1.5 text-xs ${info.className}`}>{info.label}</td>
+                              </tr>
+                            )
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  ))}
                 </div>
               </div>
             ) : null}
