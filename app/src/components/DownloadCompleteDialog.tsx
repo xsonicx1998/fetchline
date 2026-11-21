@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Check } from 'lucide-react'
 import { formatBytes } from '../lib/format'
@@ -45,7 +46,17 @@ import { TitleBar } from './TitleBar'
  *
  *  The row is polled until it appears (same pattern as the
  *  progress window); a download that vanished from the list
- *  shows the empty state instead of the dialog. */
+ *  shows the empty state instead of the dialog.
+ *
+ *  Round 87 (10) — ONE dialog for every completion, like the
+ *  R85 error-dialog queue: several downloads finishing together
+ *  used to stack one OS window each, so one Close click only
+ *  dismissed the top copy. `open_complete_dialog` now opens a
+ *  single window and emits `complete-dialog-queued` for later
+ *  completions; this dialog keeps them in a queue and Close
+ *  steps through them in the SAME window ("N more completed" +
+ *  a "Dismiss all" button), so one click is always exactly one
+ *  completion and the last Close closes the window. */
 export function DownloadCompleteDialog({ downloadId }: { downloadId: string }) {
   const [download, setDownload] = useState<DownloadRow | null>(null)
   const [loaded, setLoaded] = useState(false)
@@ -55,6 +66,14 @@ export function DownloadCompleteDialog({ downloadId }: { downloadId: string }) {
   const [pollError, setPollError] = useState<string | null>(null)
   const soundPlayedRef = useRef(false)
   const foundRef = useRef(false)
+  /** Round 87 (10) — the queue of finished download ids this
+   *  ONE window shows, head first. It starts with the id the
+   *  window was opened for; later completions arrive through
+   *  the `complete-dialog-queued` event (see the listener
+   *  below). */
+  const [queue, setQueue] = useState<string[]>([downloadId])
+  const currentId = queue[0]
+  const queuedCount = queue.length > 0 ? queue.length - 1 : 0
 
   // Dark only (Round 45): same as the progress window.
   useEffect(() => {
@@ -64,16 +83,40 @@ export function DownloadCompleteDialog({ downloadId }: { downloadId: string }) {
       .catch(() => undefined)
   }, [])
 
+  // Round 87 (10) — later completions queue into this window
+  // instead of opening another one (Rust emits the event from
+  // `open_complete_dialog`). Duplicates are ignored — the same
+  // completion re-noticed across polls must not show twice.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined
+    void listen<{ download_id: string }>('complete-dialog-queued', (e) => {
+      const id = e.payload.download_id
+      if (typeof id === 'string' && id.length > 0) {
+        setQueue((q) => (q.includes(id) ? q : [...q, id]))
+      }
+    })
+      .then((fn) => {
+        unlisten = fn
+      })
+      .catch(() => undefined)
+    return () => {
+      unlisten?.()
+    }
+  }, [])
+
   // Round 74 (14) — Escape closes the dialog, like X and Close.
   // (The error dialog already had this; the complete dialog did
-  // not.)
+  // not.) Round 87 (10) — Escape dismisses the current
+  // completion like Close does (steps through the queue, closes
+  // on the last).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') closeDialog()
+      if (e.key === 'Escape') dismissCurrent()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queue])
 
   // The completion sound, once, when the dialog shows.
   useEffect(() => {
@@ -83,6 +126,13 @@ export function DownloadCompleteDialog({ downloadId }: { downloadId: string }) {
   }, [])
 
   useEffect(() => {
+    // Round 87 (10) — the queue's head changed (Close stepped
+    // to the next completion): forget the previous row and poll
+    // for this one.
+    foundRef.current = false
+    setDownload(null)
+    setLoaded(false)
+    setPollError(null)
     let stopped = false
     async function poll() {
       if (foundRef.current) return
@@ -93,7 +143,7 @@ export function DownloadCompleteDialog({ downloadId }: { downloadId: string }) {
           'Backend did not respond within 5 seconds',
         )
         if (stopped) return
-        const row = rows.find((d) => d.id === downloadId) ?? null
+        const row = rows.find((d) => d.id === currentId) ?? null
         if (row) {
           foundRef.current = true
           setDownload(row)
@@ -112,7 +162,7 @@ export function DownloadCompleteDialog({ downloadId }: { downloadId: string }) {
       stopped = true
       window.clearInterval(timer)
     }
-  }, [downloadId])
+  }, [currentId])
 
   // Round 84 — the R83 retest's Close button did not dismiss
   // the dialog while the X did, although both already called
@@ -128,10 +178,30 @@ export function DownloadCompleteDialog({ downloadId }: { downloadId: string }) {
       .catch(() => getCurrentWindow().destroy().catch(() => undefined))
   }
 
+  /** Round 87 (10) — Close / X / Escape dismisses THIS
+   *  completion; when more are queued the dialog steps to the
+   *  next one in the same window instead of closing, so one
+   *  click is always exactly one completion. The last one
+   *  closes the dialog. */
+  function dismissCurrent() {
+    if (queue.length > 1) {
+      setQueue((q) => q.slice(1))
+      return
+    }
+    closeDialog()
+  }
+
+  /** Round 87 (10) — "Dismiss all" clears the whole queue at
+   *  once: the remaining completions stay visible as Finished
+   *  rows in the main window, so nothing is lost. */
+  function dismissAll() {
+    closeDialog()
+  }
+
   async function handleOpenFile() {
     setActionError(null)
     try {
-      await openFile(downloadId)
+      await openFile(currentId)
     } catch (e) {
       setActionError(e instanceof Error ? e.message : String(e))
     }
@@ -140,7 +210,7 @@ export function DownloadCompleteDialog({ downloadId }: { downloadId: string }) {
   async function handleOpenWith() {
     setActionError(null)
     try {
-      await openFileWith(downloadId)
+      await openFileWith(currentId)
     } catch (e) {
       setActionError(e instanceof Error ? e.message : String(e))
     }
@@ -149,7 +219,7 @@ export function DownloadCompleteDialog({ downloadId }: { downloadId: string }) {
   async function handleOpenFolder() {
     setActionError(null)
     try {
-      await openFolder(downloadId)
+      await openFolder(currentId)
     } catch (e) {
       setActionError(e instanceof Error ? e.message : String(e))
     }
@@ -177,7 +247,7 @@ export function DownloadCompleteDialog({ downloadId }: { downloadId: string }) {
       <div className="flex h-full flex-col bg-bg text-text">
         {/* Round 76 (3) — draggable: the user overrides Round 74
             (16) for this dialog, like the standalone Add URL. */}
-        <TitleBar title="Download complete" showMinimize={false} showMaximize={false} draggable />
+        <TitleBar title="Download complete" showMinimize={false} showMaximize={false} draggable onClose={dismissCurrent} />
         <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
           {pollError ? (
             <p className="text-sm text-danger">{pollError}</p>
@@ -188,7 +258,7 @@ export function DownloadCompleteDialog({ downloadId }: { downloadId: string }) {
                 : 'Loading download…'}
             </p>
           )}
-          <Button variant="secondary" onClick={closeDialog}>
+          <Button variant="secondary" onClick={dismissCurrent}>
             Close
           </Button>
         </div>
@@ -200,7 +270,7 @@ export function DownloadCompleteDialog({ downloadId }: { downloadId: string }) {
     <div className="flex h-full flex-col bg-bg text-text">
       {/* Round 76 (3) — draggable: the user overrides Round 74
           (16) for this dialog, like the standalone Add URL. */}
-      <TitleBar title="Download complete" showMinimize={false} showMaximize={false} draggable />
+      <TitleBar title="Download complete" showMinimize={false} showMaximize={false} draggable onClose={dismissCurrent} />
       {/* Purple→pink divider under the title bar, like the
           progress bar (approved mockup). */}
       <div
@@ -240,7 +310,23 @@ export function DownloadCompleteDialog({ downloadId }: { downloadId: string }) {
         </div>
         {actionError ? <p className="mt-3 text-[13px] text-danger">{actionError}</p> : null}
       </div>
-      <div className="flex shrink-0 justify-end gap-2.5 px-5 pb-3 pt-1">
+      {/* Round 87 (10) — the queue: while more completions wait,
+          the footer says how many and offers "Dismiss all";
+          Close dismisses just this one and steps to the next. */}
+      <div className="flex shrink-0 items-center justify-between gap-3 px-5 pb-3 pt-1">
+        {queuedCount > 0 ? (
+          <p className="text-[13px] text-text-muted">
+            {queuedCount} more completed
+          </p>
+        ) : (
+          <span />
+        )}
+        <div className="flex shrink-0 items-center gap-2.5">
+          {queuedCount > 0 ? (
+            <Button variant="ghost" size="md" onClick={dismissAll}>
+              Dismiss all
+            </Button>
+          ) : null}
         <Button
           variant="primary"
           size="md"
@@ -259,9 +345,10 @@ export function DownloadCompleteDialog({ downloadId }: { downloadId: string }) {
         <Button variant="secondary" size="md" onClick={handleOpenFolder}>
           Open folder
         </Button>
-        <Button variant="secondary" size="md" onClick={closeDialog}>
+        <Button variant="secondary" size="md" onClick={dismissCurrent}>
           Close
         </Button>
+        </div>
       </div>
       <label className="flex shrink-0 cursor-pointer items-center gap-2 px-5 pb-4 text-xs text-text-muted">
         <input

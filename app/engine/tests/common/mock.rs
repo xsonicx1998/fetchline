@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -82,6 +82,11 @@ pub struct MockServer {
     etag_version: Arc<AtomicU64>,
     /// When set, GET requests fail with 500 (HEAD still works).
     fail_get: Arc<AtomicBool>,
+    /// Round 87 — when non-zero, GET requests fail with THIS
+    /// status (HEAD still works), so a test can make segment
+    /// GETs 403 — the re-resolvable error — while the probe
+    /// HEAD succeeds and child creation works. 0 = off.
+    fail_get_status: Arc<AtomicU16>,
     /// When set, GET responses are cut off mid-body (S03): the
     /// socket is closed without a response or part-way through the
     /// body, so the client sees a dropped connection, not an HTTP
@@ -148,6 +153,7 @@ impl MockServer {
         let version = Arc::new(AtomicU64::new(1));
         let etag_version = Arc::new(AtomicU64::new(1));
         let fail_get = Arc::new(AtomicBool::new(false));
+        let fail_get_status = Arc::new(AtomicU16::new(0));
         let drop_get = Arc::new(AtomicBool::new(false));
         let drop_probe_attempts = Arc::new(AtomicUsize::new(0));
         let stall_get = Arc::new(AtomicBool::new(false));
@@ -169,6 +175,7 @@ impl MockServer {
         let lm = Arc::clone(&lm_version);
         let so = Arc::clone(&size_override);
         let fg = Arc::clone(&fail_get);
+        let fgs0 = Arc::clone(&fail_get_status);
         let dg0 = Arc::clone(&drop_get);
         let dpa0 = Arc::clone(&drop_probe_attempts);
         let sg0 = Arc::clone(&stall_get);
@@ -193,6 +200,7 @@ impl MockServer {
                         let ll = Arc::clone(&lm);
                         let oo = Arc::clone(&so);
                         let ff = Arc::clone(&fg);
+                        let fgs = Arc::clone(&fgs0);
                         let dg = Arc::clone(&dg0);
                         let dpa = Arc::clone(&dpa0);
                         let sg = Arc::clone(&sg0);
@@ -215,6 +223,7 @@ impl MockServer {
                                 ll.load(Ordering::SeqCst),
                                 oo.load(Ordering::SeqCst),
                                 ff.load(Ordering::SeqCst),
+                                fgs.load(Ordering::SeqCst),
                                 Arc::clone(&dg),
                                 Arc::clone(&dpa),
                                 Arc::clone(&sg),
@@ -239,6 +248,7 @@ impl MockServer {
             version,
             etag_version,
             fail_get,
+            fail_get_status,
             drop_get,
             drop_probe_attempts,
             stall_get,
@@ -294,6 +304,15 @@ impl MockServer {
     /// Make GET requests fail with 500 from now on (HEAD still works).
     pub fn set_fail_get(&self, fail: bool) {
         self.fail_get.store(fail, Ordering::SeqCst);
+    }
+
+    /// Round 87 — make GET requests fail with `code` from now on
+    /// (HEAD still works). 0 turns it off. A 403 here is the
+    /// re-resolvable error: segment GETs 403 while the probe
+    /// HEAD succeeds, so a child can prove the run-level
+    /// re-resolve.
+    pub fn set_fail_get_status(&self, code: u16) {
+        self.fail_get_status.store(code, Ordering::SeqCst);
     }
 
     /// Drop GET connections from now on (S03): a GET that arrives
@@ -404,6 +423,7 @@ pub fn handle(
     lm_version: u64,
     size_override: usize,
     fail_get: bool,
+    fail_get_status: u16,
     drop_get: Arc<AtomicBool>,
     drop_probe_attempts: Arc<AtomicUsize>,
     stall_get: Arc<AtomicBool>,
@@ -538,6 +558,24 @@ pub fn handle(
     if method == "GET" && fail_get {
         let head =
             "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let _ = stream.write_all(head.as_bytes());
+        return;
+    }
+    // Round 87 — GET failures with a chosen status (probe HEAD
+    // still works): a 403 here is the re-resolvable error, so a
+    // child whose segments 403 can prove the run-level
+    // re-resolve while its probe succeeds.
+    if method == "GET" && fail_get_status != 0 {
+        let reason = match fail_get_status {
+            403 => "Forbidden",
+            404 => "Not Found",
+            410 => "Gone",
+            500 => "Internal Server Error",
+            _ => "Error",
+        };
+        let head = format!(
+            "HTTP/1.1 {fail_get_status} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
         let _ = stream.write_all(head.as_bytes());
         return;
     }

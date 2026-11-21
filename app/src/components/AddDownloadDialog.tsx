@@ -392,11 +392,19 @@ export function AddDownloadDialog({
             // Facebook watch/ URL) used to show nothing at all:
             // no quality line, no error, so the dialog looked
             // hung. Say so plainly instead.
+            // Round 87 — two different zeroes: when the resolver
+            // DID find something but could use none of it, it
+            // says so in `warning` (the zero-format diagnosis
+            // from the engine) — that is a video the app cannot
+            // download, not a feed. Only a warning-less zero is
+            // "no video here".
             resolvedForUrl.current = ''
             setResolved(null)
             setFileSize(null)
             setResolveError(
-              'No downloadable video was found on this page — it may be a feed or a page, not a video.',
+              result.warning
+                ? 'This video was found, but none of its formats could be downloaded.'
+                : 'No downloadable video was found on this page — it may be a feed or a page, not a video.',
             )
             return
           }
@@ -623,7 +631,15 @@ export function AddDownloadDialog({
         }
         const row = bestQualityRow(result)
         if (!row) {
-          throw new Error('No downloadable qualities were found for this video.')
+          // Round 87 — same distinction as the probe above: a
+          // warning means the resolver found formats it could
+          // not use; without one, nothing downloadable was
+          // found at all.
+          throw new Error(
+            result.warning
+              ? 'This video was found, but none of its formats could be downloaded.'
+              : 'No downloadable qualities were found for this video.',
+          )
         }
         const videoFilename = filename.trim() || `${result.title}.${row.ext}`
         const [id] = await addResolvedVideoDownload({

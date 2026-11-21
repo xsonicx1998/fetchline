@@ -413,7 +413,9 @@ function degradedWarningText(resolved) {
 function filterResolvableFormats(formats) {
   return (formats || []).filter((f) => {
     if (!f) return false;
-    if (typeof f.height === "number") return f.height >= 360;
+    // Round 87 — height 0 means "unknown" (the Facebook
+    // height-less fallback rows), not "tiny": keep it.
+    if (typeof f.height === "number" && f.height > 0) return f.height >= 360;
     return true;
   });
 }

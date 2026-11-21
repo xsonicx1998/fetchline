@@ -234,8 +234,9 @@ test("watcher attaches the target URL's cookies to the hand-off", async () => {
     JSON.stringify(env.sentMessages[1].cookies),
     JSON.stringify(DUMMY_COOKIES),
   );
-  // Only name/value pairs travel — no domain, path, expiry or flags.
-  assert.deepEqual(Object.keys(env.sentMessages[1].cookies[0]).sort(), ["name", "value"]);
+  // Round 87 — domain/path now travel with each cookie (the
+  // scoped writer needs them); values are never logged.
+  assert.deepEqual(Object.keys(env.sentMessages[1].cookies[0]).sort(), ["domain", "name", "path", "value"]);
 });
 
 test("watcher sends no cookies field when the browser has none for the URL", async () => {

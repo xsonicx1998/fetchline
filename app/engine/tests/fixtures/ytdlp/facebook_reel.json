@@ -1,0 +1,120 @@
+{
+ "title": "🎵 ភ្នំភ្លើងស្នេហា Tiếng Việt (Singable) | Cover by Pubol Mus …",
+ "uploader": "ពូបុល",
+ "uploader_id": "61578140214486",
+ "thumbnail": "https://scontent-ord5-2.xx.fbcdn.net/v/t15.5256-10/660932889_1483600929819357_359860407243695489_n.jpg?redacted",
+ "view_count": 125,
+ "concurrent_view_count": 0,
+ "duration": 217.687,
+ "id": "2141490136612275",
+ "formats": [
+  {
+   "format_id": "sd",
+   "quality": -3,
+   "url": "https://video-ord5-2.xx.fbcdn.net/o1/v/t2/f2/m412/AQMuH_P5kLKKQmWbPQBVBTnsJtO-JgtnY-THiCnQRtnaTPuOTdmLHVX0kd7GyYHDdLVU1hae7xluCNBA_HKxq-BnEKJBEkImNYxZwc9TKw.mp4?redacted",
+   "http_headers": {
+    "User-Agent": "facebookexternalhit/1.1",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-us,en;q=0.5",
+    "Sec-Fetch-Mode": "navigate"
+   },
+   "downloader_options": {
+    "http_chunk_size": 262144000
+   },
+   "protocol": "https",
+   "ext": "mp4",
+   "video_ext": "mp4",
+   "audio_ext": "none",
+   "vbr": null,
+   "abr": null,
+   "tbr": null,
+   "resolution": null,
+   "dynamic_range": "SDR",
+   "aspect_ratio": null,
+   "filesize_approx": null,
+   "format": "sd - unknown"
+  },
+  {
+   "format_id": "hd",
+   "quality": -2,
+   "url": "https://video-ord5-1.xx.fbcdn.net/o1/v/t2/f2/m366/AQMR834N-nWO61ugsRAlZB8Tj3BDU5T0bOiVhRkTynbkecx8nblB-ZruH00Tf3Q5JDX2aa5mNakf9XZ_7bWYYaT9QWr2oVATXBk.mp4?redacted",
+   "http_headers": {
+    "User-Agent": "facebookexternalhit/1.1",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-us,en;q=0.5",
+    "Sec-Fetch-Mode": "navigate"
+   },
+   "downloader_options": {
+    "http_chunk_size": 262144000
+   },
+   "protocol": "https",
+   "ext": "mp4",
+   "video_ext": "mp4",
+   "audio_ext": "none",
+   "vbr": null,
+   "abr": null,
+   "tbr": null,
+   "resolution": null,
+   "dynamic_range": "SDR",
+   "aspect_ratio": null,
+   "filesize_approx": null,
+   "format": "hd - unknown"
+  }
+ ],
+ "timestamp": 1774941120,
+ "automatic_captions": {},
+ "subtitles": {},
+ "original_url": "https://www.facebook.com/reel/2141490136612275/",
+ "webpage_url": "https://m.facebook.com/watch/?v=2141490136612275&_rdr",
+ "webpage_url_basename": "watch",
+ "webpage_url_domain": "m.facebook.com",
+ "extractor": "facebook",
+ "extractor_key": "Facebook",
+ "playlist": null,
+ "playlist_index": null,
+ "thumbnails": [
+  {
+   "url": "https://scontent-ord5-2.xx.fbcdn.net/v/t15.5256-10/660932889_1483600929819357_359860407243695489_n.jpg?redacted",
+   "id": "0"
+  }
+ ],
+ "display_id": "2141490136612275",
+ "fulltitle": "🎵 ភ្នំភ្លើងស្នេហា Tiếng Việt (Singable) | Cover by Pubol Mus …",
+ "duration_string": "3:37",
+ "upload_date": "20260331",
+ "release_year": null,
+ "requested_subtitles": null,
+ "_has_drm": null,
+ "epoch": 1795278693,
+ "format_id": "hd",
+ "quality": -2,
+ "url": "https://video-ord5-1.xx.fbcdn.net/o1/v/t2/f2/m366/AQMR834N-nWO61ugsRAlZB8Tj3BDU5T0bOiVhRkTynbkecx8nblB-ZruH00Tf3Q5JDX2aa5mNakf9XZ_7bWYYaT9QWr2oVATXBk.mp4?redacted",
+ "http_headers": {
+  "User-Agent": "facebookexternalhit/1.1",
+  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  "Accept-Language": "en-us,en;q=0.5",
+  "Sec-Fetch-Mode": "navigate"
+ },
+ "downloader_options": {
+  "http_chunk_size": 262144000
+ },
+ "protocol": "https",
+ "ext": "mp4",
+ "video_ext": "mp4",
+ "audio_ext": "none",
+ "vbr": null,
+ "abr": null,
+ "tbr": null,
+ "resolution": null,
+ "dynamic_range": "SDR",
+ "aspect_ratio": null,
+ "filesize_approx": null,
+ "format": "hd - unknown",
+ "_type": "video",
+ "_version": {
+  "version": "2026.10.26",
+  "current_git_head": null,
+  "release_git_head": "c91f8de0bfb3577894abad716eaaa01659e6bd14",
+  "repository": "yt-dlp/yt-dlp"
+ }
+}

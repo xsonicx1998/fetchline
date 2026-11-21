@@ -47,10 +47,17 @@ function loadBackground({ nativeReply = { ok: true }, tabs = [], tabSendMessage 
         if (cookiesError) throw cookiesError;
         // Round 78 — the cookies the browser holds for a URL,
         // as the real API returns them (name/value plus the
-        // fields the background strips away).
+        // scope fields the background keeps). A test cookie
+        // without its own domain/path gets the old defaults,
+        // so older tests keep passing unchanged.
         return cookies
           .filter((c) => !c.url || c.url === url)
-          .map((c) => ({ name: c.name, value: c.value, domain: "example.com", path: "/" }));
+          .map((c) => ({
+            name: c.name,
+            value: c.value,
+            domain: c.domain ?? "example.com",
+            path: c.path ?? "/",
+          }));
       },
     },
     runtime: {
@@ -567,6 +574,10 @@ test("a retry with cookies forwards them to the host", async () => {
   await tick(20);
   const request = env.nativePorts[0].messages[0];
   assert.equal(request.with_cookies, true);
+  // The retry forwards exactly the cookies the content script
+  // sent (name/value only here) — the background does not
+  // re-scope them; `cookiesFor` scoping applies to the
+  // hand-off refill, not to a resolve retry's pass-through.
   assert.equal(JSON.stringify(request.cookies), JSON.stringify([{ name: "session", value: "abc" }]));
   assert.equal(request.request_id, "req-2");
   // Finish the resolve so no 32 s timeout timer lingers.
@@ -597,16 +608,28 @@ test("the host dying mid-resolve surfaces as an error, not a silent hang", async
   assert.match(port.messages[0].error, /stopped answering/);
 });
 
-test("cookies_for returns the page's cookies as name/value pairs", async () => {
+test("cookies_for returns the page's cookies with their own domain and path", async () => {
+  // Round 87 — the reply keeps each cookie's scope, not
+  // name/value only: a CDN-bound cookie and a cookie with a
+  // non-root path must both survive the round trip, or the
+  // host's Netscape file rebuilds them to the page host.
   const env = loadBackground({
-    cookies: [{ name: "session", value: "abc" }, { name: "prefs", value: "dark" }],
+    cookies: [
+      { name: "session", value: "abc" },
+      { name: "cdn_session", value: "def", domain: "video-ord5-2.xx.fbcdn.net", path: "/o1/v/t2/" },
+      { name: "prefs", value: "dark", domain: ".facebook.com", path: "/settings" },
+    ],
   });
   let reply = null;
   env.listeners.message({ type: "cookies_for", url: RESOLVE_PAGE }, {}, (r) => { reply = r; });
   await tick(20);
   assert.equal(JSON.stringify(reply), JSON.stringify({
     ok: true,
-    cookies: [{ name: "session", value: "abc" }, { name: "prefs", value: "dark" }],
+    cookies: [
+      { name: "session", value: "abc", domain: "example.com", path: "/" },
+      { name: "cdn_session", value: "def", domain: "video-ord5-2.xx.fbcdn.net", path: "/o1/v/t2/" },
+      { name: "prefs", value: "dark", domain: ".facebook.com", path: "/settings" },
+    ],
   }));
 });
 
@@ -636,7 +659,7 @@ test("video_found with an empty cookies array is re-filled from the media URL", 
   );
   await tick(20);
   assert.equal(reply.ok, true);
-  assert.equal(JSON.stringify(env.sentMessages[0].cookies), JSON.stringify([{ name: "session", value: "abc" }]));
+  assert.equal(JSON.stringify(env.sentMessages[0].cookies), JSON.stringify([{ name: "session", value: "abc", domain: "example.com", path: "/" }]));
 });
 
 test("video_found with non-empty cookies is passed through, never re-filled", async () => {
@@ -660,6 +683,10 @@ test("video_found with non-empty cookies is passed through, never re-filled", as
   );
   await tick(20);
   assert.equal(reply.ok, true);
+  // Passed through byte-identical: the background never
+  // re-scopes cookies the content script already attached —
+  // those carry whatever scope the resolve gave them (here
+  // name/value only, as the message sent them).
   assert.equal(JSON.stringify(env.sentMessages[0].cookies), JSON.stringify([{ name: "session", value: "abc" }]));
 });
 
@@ -680,7 +707,40 @@ test("video_found without a cookies field still attaches the media URL's cookies
   );
   await tick(20);
   assert.equal(reply.ok, true);
-  assert.equal(JSON.stringify(env.sentMessages[0].cookies), JSON.stringify([{ name: "session", value: "abc" }]));
+  assert.equal(JSON.stringify(env.sentMessages[0].cookies), JSON.stringify([{ name: "session", value: "abc", domain: "example.com", path: "/" }]));
+});
+
+// -- Round 87 — cookie scope ------------------------------------------------
+// The refill must keep each cookie's own domain and path: a
+// CDN-bound cookie refilled from the media URL keeps its CDN
+// host, or the host's Netscape file rebuilds it to the page
+// host and yt-dlp never sends it to the CDN.
+
+test("video_found refill keeps each cookie's own domain and path", async () => {
+  const env = loadBackground({
+    nativeReply: { ok: true },
+    cookies: [
+      { name: "session", value: "abc", domain: ".example.com", path: "/" },
+      { name: "cdn_session", value: "def", domain: "cdn.example.com", path: "/v/" },
+    ],
+  });
+  let reply = null;
+  env.listeners.message(
+    {
+      type: "video_found",
+      page_url: RESOLVE_PAGE,
+      variants: [{ url: "https://cdn.example.com/v1080.mp4", resolved: true }],
+      cookies: [],
+    },
+    {},
+    (r) => { reply = r; },
+  );
+  await tick(20);
+  assert.equal(reply.ok, true);
+  assert.equal(JSON.stringify(env.sentMessages[0].cookies), JSON.stringify([
+    { name: "session", value: "abc", domain: ".example.com", path: "/" },
+    { name: "cdn_session", value: "def", domain: "cdn.example.com", path: "/v/" },
+  ]));
 });
 
 // -- Round 86 — cookie pipeline checkpoints -------------------------------
@@ -714,7 +774,7 @@ test("video_found refill logs the cookie count and host, never the values", asyn
   );
   await tick(20);
   assert.equal(reply.ok, true);
-  assert.equal(JSON.stringify(env.sentMessages[0].cookies), JSON.stringify([{ name: "session", value: "abc" }]));
+  assert.equal(JSON.stringify(env.sentMessages[0].cookies), JSON.stringify([{ name: "session", value: "abc", domain: "example.com", path: "/" }]));
   assert.ok(
     lines.some((l) => l.includes("cookies for cdn.example.com: 1 cookie(s)")),
     `the refill must log the count + host, got: ${lines.join(" | ")}`,

@@ -13,6 +13,13 @@ interface DownloadTableProps {
   queues: QueueRow[]
   selectedId: string | null
   onSelect: (id: string) => void
+  /** Round 87 (13b) — multi-select: the table reports the
+   *  whole selection (not just the anchor) so the toolbar /
+   *  menu Delete removes ALL selected rows at once. */
+  onSelectionChange?: (ids: string[]) => void
+  /** Round 87 (13b) — Delete key with a multi-selection:
+   *  remove every selected row, in table order. */
+  onRemoveMany?: (downloads: DownloadRow[]) => void
   onOpenProgress: (id: string) => void
   onAdd: () => void
   /** Right-click menu: open the finished file. */
@@ -81,6 +88,8 @@ export function DownloadTable({
   queues,
   selectedId,
   onSelect,
+  onSelectionChange,
+  onRemoveMany,
   onOpenProgress,
   onAdd,
   onOpenFile,
@@ -98,6 +107,24 @@ export function DownloadTable({
 }: DownloadTableProps) {
   const [menu, setMenu] = useState<{ x: number; y: number; download: DownloadRow } | null>(null)
   const menuRef = useRef<HTMLDivElement | null>(null)
+  /** Round 87 (13b) — multi-select. The Set is the backing
+   *  store for the table's selection: a plain click selects
+   *  one row, Ctrl/Cmd-click toggles one row, Shift-click
+   *  selects the range from the anchor, and dragging across
+   *  rows extends the range (see onDragEnter). The anchor
+   *  (`onSelect`) is still reported for the toolbar / menu
+   *  actions that act on one row. `onSelectionChange` mirrors
+   *  the set to App so its Delete removes all selected rows.
+   *  Dragging here selects ROWS, never text (13a sets
+   *  `user-select: none` page-wide). */
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() =>
+    selectedId === null ? new Set() : new Set([selectedId]),
+  )
+  /** The Shift-click / drag-select range anchor. */
+  const anchorRef = useRef<string | null>(selectedId)
+  /** True between a row's dragstart and dragend: a drag over
+   *  further rows extends the selection (13b). */
+  const dragSelectingRef = useRef(false)
   /** Round 65 — the "Move to queue" section of the row menu is
    *  collapsed until the user opens it, like a submenu; it
    *  resets whenever the menu opens on another row. */
@@ -141,6 +168,67 @@ export function DownloadTable({
     }
   }, [menu])
 
+  function commitSelection(next: Set<string>) {
+    setSelectedIds(next)
+    onSelectionChange?.([...next])
+  }
+
+  /** Round 87 (13b) — App clears the anchor after a remove
+   *  (or a delete-completed): the table's set goes with it.
+   *  Nothing else syncs in: App reports EVERY click as the
+   *  anchor (including a Ctrl+click that toggled a row OFF),
+   *  so expanding the set to the anchor here would re-select
+   *  a row the user just toggled off. */
+  useEffect(() => {
+    if (selectedId === null && selectedIds.size > 0) {
+      commitSelection(new Set())
+    }
+    // The set is read, not watched: a user click already
+    // commits, so re-running on it would echo back.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId])
+
+  function rangeIds(fromId: string, toId: string): string[] {
+    const ids = downloads.map((d) => d.id)
+    const a = ids.indexOf(fromId)
+    const b = ids.indexOf(toId)
+    if (a === -1 || b === -1) return [toId]
+    const [lo, hi] = a < b ? [a, b] : [b, a]
+    return ids.slice(lo, hi + 1)
+  }
+
+  function handleRowClick(e: React.MouseEvent, d: DownloadRow) {
+    const next = new Set(selectedIds)
+    if (e.ctrlKey || e.metaKey) {
+      // Ctrl/Cmd-click toggles just this row.
+      if (next.has(d.id)) next.delete(d.id)
+      else next.add(d.id)
+      anchorRef.current = d.id
+    } else if (e.shiftKey && anchorRef.current !== null) {
+      // Shift-click selects the range from the anchor.
+      for (const id of rangeIds(anchorRef.current, d.id)) next.add(id)
+    } else {
+      // Plain click selects one row.
+      next.clear()
+      next.add(d.id)
+      anchorRef.current = d.id
+    }
+    commitSelection(next)
+    onSelect(d.id)
+  }
+
+  /** Round 87 (13b) — Delete removes ALL selected rows at
+   *  once (in table order); with no multi-selection it removes
+   *  just this row, as before. */
+  function removeSelected(d: DownloadRow) {
+    if (selectedIds.size > 0 && onRemoveMany) {
+      const rows = downloads.filter((row) => selectedIds.has(row.id))
+      onRemoveMany(rows.length > 0 ? rows : [d])
+    } else {
+      onRemove(d)
+    }
+  }
+
   function closeMenu(action: () => void) {
     return () => {
       setMenu(null)
@@ -173,7 +261,7 @@ export function DownloadTable({
 
   return (
     <div className="relative bg-[#0B0F24]">
-      <table className="w-full border-collapse text-base" aria-label="Downloads">
+      <table className="w-full border-collapse text-base" aria-label="Downloads" aria-multiselectable="true">
         <thead className="sticky top-0 bg-surface">
           <tr className="border-b border-border text-left text-xs font-semibold uppercase text-text-muted">
             <th scope="col" className="px-3 py-2">File Name</th>
@@ -186,7 +274,7 @@ export function DownloadTable({
         <tbody>
           {downloads.map((d) => {
             const percent = progressPercent(d.downloaded_bytes, d.size_bytes)
-            const selected = d.id === selectedId
+            const selected = selectedIds.has(d.id)
             const description = descriptionFor(d)
             const showBar = percent !== null && (d.status === 'downloading' || d.status === 'paused')
             // Round 64 — displayed rate / ETA: while downloading,
@@ -206,11 +294,43 @@ export function DownloadTable({
                 onDragStart={(e) => {
                   e.dataTransfer.setData('text/plain', JSON.stringify({ type: 'download', id: d.id }))
                   e.dataTransfer.effectAllowed = 'move'
+                  // Round 87 (13b) — a drag starts a row drag:
+                  // dragging a row that is not selected selects
+                  // just it; dragging a selected row keeps the
+                  // multi-selection, and rows the drag passes
+                  // over join it (onDragEnter below). The drop
+                  // itself still moves the dragged row (the
+                  // sidebar reads one id, unchanged).
+                  dragSelectingRef.current = true
+                  if (!selectedIds.has(d.id)) {
+                    anchorRef.current = d.id
+                    commitSelection(new Set([d.id]))
+                    onSelect(d.id)
+                  } else {
+                    anchorRef.current = d.id
+                  }
                 }}
-                onClick={() => onSelect(d.id)}
+                onDragEnter={() => {
+                  // Round 87 (13b) — drag selects ROWS: while a
+                  // row drag is in progress, every row it passes
+                  // over joins the range from the anchor.
+                  if (!dragSelectingRef.current || anchorRef.current === null) return
+                  const next = new Set(selectedIds)
+                  for (const id of rangeIds(anchorRef.current, d.id)) next.add(id)
+                  commitSelection(next)
+                }}
+                onDragEnd={() => {
+                  dragSelectingRef.current = false
+                }}
+                onClick={(e) => handleRowClick(e, d)}
                 onDoubleClick={() => onOpenProgress(d.id)}
                 onContextMenu={(e) => {
                   e.preventDefault()
+                  // A right-click selects just this row (so the
+                  // menu's Remove acts on it, not on a stale
+                  // multi-selection).
+                  anchorRef.current = d.id
+                  commitSelection(new Set([d.id]))
                   onSelect(d.id)
                   setQueueSubOpen(false)
                   setMenu({ x: e.clientX, y: e.clientY, download: d })
@@ -218,6 +338,9 @@ export function DownloadTable({
                 tabIndex={0}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') onOpenProgress(d.id)
+                  // Round 87 (13b) — Delete removes ALL selected
+                  // rows at once.
+                  else if (e.key === 'Delete') removeSelected(d)
                 }}
                 className={`cursor-pointer border-b border-border ${selected ? 'bg-accent-soft' : 'hover:bg-surface'}`}
                 aria-selected={selected}
@@ -278,7 +401,9 @@ export function DownloadTable({
           x={menu.x}
           y={menu.y}
           download={menu.download}
-          queues={queues}
+          // Round 87 (13c) — the main queue is hidden from the
+          // queue list, so it is not a move target either.
+          queues={queues.filter((q) => !q.is_main)}
           queueSubOpen={queueSubOpen}
           onToggleQueueSub={() => setQueueSubOpen((open) => !open)}
           onOpenProgress={() => onOpenProgress(menu.download.id)}

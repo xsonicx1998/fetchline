@@ -252,7 +252,14 @@ export default function App() {
    *  when a quota is enabled; refreshed with the settings. */
   const [quotaStatus, setQuotaStatus] = useState<QuotaStatus | null>(null)
   const [showSettings, setShowSettings] = useState(false)
-  const [confirmRemove, setConfirmRemove] = useState<DownloadRow | null>(null)
+  /** Round 87 (13b) — the remove confirm holds a LIST now: one
+   *  row for a single Remove, every selected row for a
+   *  multi-select Delete. The dialog says how many it removes. */
+  const [confirmRemove, setConfirmRemove] = useState<DownloadRow[] | null>(null)
+  /** Round 87 (13b) — the table's multi-selection, mirrored
+   *  here via `onSelectionChange` so the toolbar / menu Delete
+   *  removes ALL selected rows, not just the anchor. */
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
   /** Round 73 — the Redownload warning dialog's row, if open. */
   const [confirmRedownload, setConfirmRedownload] = useState<DownloadRow | null>(null)
 
@@ -660,14 +667,27 @@ export default function App() {
   /** Remove a download. When the "ask before removing" setting is
    *  on, the confirm dialog below runs first. */
   function requestRemove(download: DownloadRow) {
+    requestRemoveMany([download])
+  }
+
+  /** Round 87 (13b) — remove every selected row at once. The
+   *  confirm (when on) lists the count; the files on disk are
+   *  kept, as for a single remove. */
+  function requestRemoveMany(rows: DownloadRow[]) {
+    const targets = rows.filter((row) => downloads.some((d) => d.id === row.id))
+    if (targets.length === 0) return
     if (settings?.confirm_delete) {
-      setConfirmRemove(download)
+      setConfirmRemove(targets)
     } else {
       // Round 74 (2) — refresh the free-space figure once the
       // remove lands, not only on the 30 s poll.
-      void run(() => deleteDownload(download.id, false).then(() => setSelectedId(null))).then(() =>
-        void refreshFreeSpace(),
-      )
+      void run(async () => {
+        for (const row of targets) {
+          await deleteDownload(row.id, false)
+        }
+        setSelectedId(null)
+        setSelectedIds([])
+      }).then(() => void refreshFreeSpace())
     }
   }
 
@@ -715,13 +735,12 @@ export default function App() {
       }),
     [downloads, selectedCategory, selectedQueue, selectedFilter, selectedGrabberId, queueFiles, searchQuery],
   )
-  /** The queue Start/Stop/Sync act on: the selected queue, else
-   *  the main queue. */
+  /** The queue Start/Stop/Sync act on: the selected queue.
+   *  Round 87 (13c) — NO main-queue fallback: the main queue is
+   *  hidden from the sidebar, so with no queue selected there is
+   *  no queue to act on (the TOOLS strip opens Add Queue). */
   const activeQueueRow = useMemo(
-    () =>
-      queues.find((q) => q.id === selectedQueue) ??
-      queues.find((q) => q.is_main) ??
-      null,
+    () => queues.find((q) => q.id === selectedQueue) ?? null,
     [queues, selectedQueue],
   )
   const totalSpeed = downloads
@@ -765,7 +784,13 @@ export default function App() {
    *  useSidebarSelection (Round 75) and clear the other selections
    *  themselves, so the sidebar calls exactly one per click. */
   function openScheduler(queueId?: string) {
-    setSchedulerQueueId(queueId ?? selectedQueue ?? 'queue-main')
+    // Round 87 (13c) — no 'queue-main' default: the main queue
+    // is hidden, so the scheduler opens on the selected queue,
+    // else the first visible queue, else none (the dialog then
+    // says "No queues yet — create one to begin").
+    setSchedulerQueueId(
+      queueId ?? selectedQueue ?? queues.find((q) => !q.is_main)?.id ?? null,
+    )
     setShowScheduler(true)
   }
 
@@ -812,6 +837,7 @@ export default function App() {
         await deleteDownload(d.id, false)
       }
       setSelectedId(null)
+      setSelectedIds([])
       await refreshAll()
       // Round 74 (2) — the free-space figure follows the removals.
       await refreshFreeSpace()
@@ -909,9 +935,18 @@ export default function App() {
       // Round 74 (2) — a finished download frees its temp space
       // and lands its file: refresh the free-space figure now.
       void refreshFreeSpace()
-      if (!settings.show_download_complete_dialog) continue
       void (async () => {
         try {
+          // Round 87 (9) — read the setting FRESH here, not from
+          // this window's `settings` state: that state is fetched
+          // once at mount, so a "Don't show this dialog again"
+          // checked in a dialog window (a different OS window
+          // writing the same Settings store) never reached it
+          // and the next completion still popped a dialog. The
+          // backend also gates in `open_complete_dialog` — this
+          // read keeps the frontend from even asking.
+          const fresh = await getSettings()
+          if (!fresh.show_download_complete_dialog) return
           const opts = await getDownloadCompletionOptions(d.id)
           if (opts.close_after || opts.shutdown_after) return
           await openCompleteDialog(d.id)
@@ -1020,11 +1055,20 @@ export default function App() {
     void run(() => open(id))
   }
 
+  /** Round 87 (13b) — toolbar / menu Delete removes ALL
+   *  selected rows; with no multi-selection it removes the
+   *  anchor row, as before. */
+  function deleteSelected() {
+    const rows = downloads.filter((d) => selectedIds.includes(d.id))
+    if (rows.length > 0) requestRemoveMany(rows)
+    else if (selected) requestRemove(selected)
+  }
+
   const toolbarActions = {
     add: () => setShowAdd(true),
     resume: () => selected && void run(() => resumeDownload(selected.id), { immediate: true }),
     stop: () => selected && void run(() => pauseDownload(selected.id)),
-    deleteSelected: () => selected && requestRemove(selected),
+    deleteSelected,
   }
 
   const menuActions: MenuBarActions = {
@@ -1034,7 +1078,7 @@ export default function App() {
     resume: () => selected && void run(() => resumeDownload(selected.id), { immediate: true }),
     stop: () => selected && void run(() => pauseDownload(selected.id)),
     stopAll: () => void handleStopAll(),
-    deleteSelected: () => selected && requestRemove(selected),
+    deleteSelected,
     deleteCompleted: () => void handleDeleteCompleted(),
     showHistory: () => selectFilter('history'),
     refresh: () => void refreshAll(),
@@ -1225,6 +1269,8 @@ export default function App() {
               queues={queues}
               selectedId={selectedId}
               onSelect={setSelectedId}
+              onSelectionChange={setSelectedIds}
+              onRemoveMany={requestRemoveMany}
               onOpenProgress={(id) => void openProgressWindowFor(id, false)}
               onAdd={() => setShowAdd(true)}
               onOpenFile={(id) => openGuarded(id, openFile)}
@@ -1403,7 +1449,9 @@ export default function App() {
       />
       <SchedulerDialog
         open={showScheduler}
-        queues={queues}
+        // Round 87 (13c) — the main queue is hidden from the
+        // queue lists, including the scheduler's dropdown.
+        queues={queues.filter((q) => !q.is_main)}
         initialQueueId={schedulerQueueId}
         onClose={() => setShowScheduler(false)}
         onChanged={() => void refreshAll()}
@@ -1437,7 +1485,9 @@ export default function App() {
           <div className="w-full max-w-md rounded-lg border border-border bg-surface-raised p-6 shadow-pop">
             <div className="flex items-start justify-between gap-4">
               <h2 id="confirm-remove-title" className="text-lg font-semibold">
-                Remove this download?
+                {confirmRemove.length === 1
+                  ? 'Remove this download?'
+                  : `Remove ${confirmRemove.length} downloads?`}
               </h2>
               <button
                 type="button"
@@ -1449,7 +1499,9 @@ export default function App() {
               </button>
             </div>
             <p className="mt-2 text-sm text-text-muted">
-              “{confirmRemove.filename}” will be removed from the list. The file on disk is kept.
+              {confirmRemove.length === 1
+                ? `“${confirmRemove[0].filename}” will be removed from the list. The file on disk is kept.`
+                : `${confirmRemove.length} downloads will be removed from the list. The files on disk are kept.`}
             </p>
             <div className="mt-6 flex justify-end gap-2">
               <Button variant="ghost" onClick={() => setConfirmRemove(null)}>
@@ -1458,11 +1510,15 @@ export default function App() {
               <Button
                 variant="danger"
                 onClick={() => {
-                  const row = confirmRemove
+                  const rows = confirmRemove
                   setConfirmRemove(null)
-                  void run(() => deleteDownload(row.id, false).then(() => setSelectedId(null))).then(
-                    () => void refreshFreeSpace(),
-                  )
+                  void run(async () => {
+                    for (const row of rows) {
+                      await deleteDownload(row.id, false)
+                    }
+                    setSelectedId(null)
+                    setSelectedIds([])
+                  }).then(() => void refreshFreeSpace())
                 }}
               >
                 Remove

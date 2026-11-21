@@ -1236,6 +1236,8 @@ fn dummy_cookies() -> Vec<CookiePair> {
     vec![CookiePair {
         name: DUMMY_COOKIE_NAME.to_string(),
         value: DUMMY_COOKIE_VALUE.to_string(),
+        domain: None,
+        path: None,
     }]
 }
 
@@ -1388,11 +1390,15 @@ fn cookies_to_header_validates_pairs() {
         cookies_to_header(&[
             CookiePair {
                 name: "a".into(),
-                value: "1".into()
+                value: "1".into(),
+                domain: None,
+                path: None,
             },
             CookiePair {
                 name: "b".into(),
-                value: "2".into()
+                value: "2".into(),
+                domain: None,
+                path: None,
             },
         ])
         .unwrap(),
@@ -1401,13 +1407,17 @@ fn cookies_to_header_validates_pairs() {
     // A ';' in a value would smuggle a second cookie in.
     assert!(cookies_to_header(&[CookiePair {
         name: "session".into(),
-        value: "a;b".into()
+        value: "a;b".into(),
+        domain: None,
+        path: None,
     }])
     .is_err());
     // A space in a name would split the header.
     assert!(cookies_to_header(&[CookiePair {
         name: "bad name".into(),
-        value: "x".into()
+        value: "x".into(),
+        domain: None,
+        path: None,
     }])
     .is_err());
     // 33 pairs is too many.
@@ -1415,6 +1425,8 @@ fn cookies_to_header_validates_pairs() {
         .map(|i| CookiePair {
             name: format!("c{i}"),
             value: "x".into(),
+            domain: None,
+            path: None,
         })
         .collect();
     assert!(cookies_to_header(&many).is_err());
@@ -1453,10 +1465,14 @@ fn host_download_link_rejects_an_invalid_cookie() {
         vec![CookiePair {
             name: "session".into(),
             value: "a;b".into(),
+            domain: None,
+            path: None,
         }],
         vec![CookiePair {
             name: "bad name".into(),
             value: "x".into(),
+            domain: None,
+            path: None,
         }],
     ] {
         let reply = handle_host_message(

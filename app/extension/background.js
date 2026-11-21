@@ -271,22 +271,32 @@ function pingHost() {
 }
 
 // Cookies for one hand-off (S13 finish): the cookies the browser
-// holds for the exact URL being handed over, as name/value pairs
-// only — no domain, path, expiry or flags, because the Cookie
-// header needs nothing else and the host must never learn more
-// than it needs. The host attaches them to that download's probe
-// and segment requests, for that host only; it never logs them,
-// and the desktop app keeps them in memory only (a restart drops
-// them) and wipes them from the pending row when the drain decides
-// the link. No cookies are ever read for a URL that is not being
-// handed over, and a page the host expands itself (Download All)
-// carries none — the host cannot use them there. Guarded: a
-// context without chrome.cookies simply sends no cookies.
+// holds for the exact URL being handed over. The `Cookie`
+// header needs name/value only — but the temp Netscape file
+// yt-dlp reads (`--cookies`) needs each cookie's OWN domain
+// and path, so those ride along too: a cookie bound to a CDN
+// host keeps that host (yt-dlp only sends a cookie to a host
+// its domain matches — rewriting every cookie to the page
+// host made CDN cookies match nothing), and a cookie with a
+// non-root path keeps that path. The host attaches them to
+// that download's probe and segment requests, for that host
+// only; it never logs them, and the desktop app keeps them
+// in memory only (a restart drops them) and wipes them from
+// the pending row when the drain decides the link. No cookies
+// are ever read for a URL that is not being handed over, and
+// a page the host expands itself (Download All) carries none
+// — the host cannot use them there. Guarded: a context
+// without chrome.cookies simply sends no cookies.
 // Round 86 — cookie pipeline checkpoint: log only the cookie
 // COUNT and the host, NEVER values. The R85 retest could not
 // tell whether the CDN GET lacked cookies, because no stage
 // logged even their presence. `url` may be empty (a message
 // with no URL at all); the count still logs.
+// Round 87 — `cookiesFor` keeps each cookie's domain and
+// path (name/value/domain/path), not name/value only: the
+// old strip is exactly what lost the CDN scope (see
+// background.js:275,908 in the R86 head — the host rebuilt
+// every cookie as `.{page host}` + `/`).
 function logCookieCount(url, count) {
   try {
     const host = url ? new URL(url).host : "(no url)";
@@ -300,7 +310,17 @@ async function cookiesFor(url) {
   try {
     if (!chrome.cookies || typeof chrome.cookies.getAll !== "function") return [];
     const all = await chrome.cookies.getAll({ url });
-    return (all || []).map((c) => ({ name: c.name, value: c.value }));
+    // Round 87 — keep each cookie's own domain and path
+    // (see the block comment above): the host writes them
+    // into the Netscape file verbatim, and dropping them
+    // here is what lost the CDN scope. Name/value/domain/
+    // path only — no expiry, no flags, no values in logs.
+    return (all || []).map((c) => ({
+      name: c.name,
+      value: c.value,
+      domain: c.domain,
+      path: c.path,
+    }));
   } catch (err) {
     // Round 86 — the old bare `catch` swallowed the failure
     // and returned [], so a refill blocked by missing host
@@ -905,7 +925,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   // Round 78 — the content script cannot read chrome.cookies
   // itself, so it asks here for a page's cookies when (and only
   // when) the user granted the needs-login retry for that site.
-  // The reply is name/value pairs only, like cookiesFor.
+  // The reply is the scoped pairs from `cookiesFor`
+  // (name/value/domain/path), so the host's Netscape file
+  // keeps each cookie's own scope.
   if (message && message.type === "cookies_for") {
     cookiesFor(message.url || "")
       .then((cookies) => sendResponse({ ok: true, cookies }))

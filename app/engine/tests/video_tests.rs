@@ -1448,12 +1448,16 @@ async fn direct_ytdlp_failure_surfaces_stderr_tail_and_logs_argv() {
 
 #[tokio::test]
 #[cfg(unix)]
-async fn direct_ytdlp_download_forwards_capture_cookies_and_headers() {
-    // Round 83 — a direct download created from a browser
-    // capture must run yt-dlp WITH the capture's cookies and
-    // the format's headers: the old code created the row with
-    // neither, so a cookie-gated format failed with exit code 1.
-    // The temp cookie file is deleted when the run returns.
+async fn round87_direct_ytdlp_first_attempt_sends_no_cookies() {
+    // Round 87 (item 4) — the per-site consent design only
+    // sends a browser session when a video NEEDS a login: the
+    // first direct attempt is always cookieless, and the
+    // capture's cookies ride only a retry after a
+    // LoginRequired failure. The fake fails with "Requested
+    // format is not available" (NOT a login wall), so no retry
+    // happens and the one argv must carry no --cookies at all —
+    // even though the capture carried consented cookies. The
+    // format's headers still reach yt-dlp on the first attempt.
     let _fake_guard = FAKE_YTDLP_LOCK.lock().unwrap();
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
@@ -1500,28 +1504,21 @@ async fn direct_ytdlp_download_forwards_capture_cookies_and_headers() {
     );
     let argv = std::fs::read_to_string(&argv_path).unwrap();
     assert!(
-        argv.contains("--cookies"),
-        "the direct call must forward the capture's cookies: {argv}"
+        !argv.contains("--cookies"),
+        "the first attempt must NOT forward the capture's cookies: {argv}"
     );
     assert!(
-        argv.contains("fetchline-ytdlp-cookies-"),
-        "the cookies must ride a temp Netscape file: {argv}"
+        !argv.contains("fetchline-ytdlp-cookies-"),
+        "no temp cookie file may be written for the first attempt: {argv}"
     );
     assert!(
         argv.contains("User-Agent: Mozilla/5.0 TestAgent"),
         "the format's User-Agent must reach yt-dlp: {argv}"
     );
-    // The temp cookie file is deleted when the run returns
-    // (RAII): find its path in the recorded argv and check it
-    // is gone.
-    let cookie_path = argv
-        .split_whitespace()
-        .skip_while(|w| *w != "--cookies")
-        .nth(1)
-        .expect("a --cookies value in the argv");
+    let log = std::fs::read_to_string(&log_path).unwrap();
     assert!(
-        !std::path::Path::new(cookie_path).exists(),
-        "the temp cookie file must be deleted after the run: {cookie_path}"
+        !log.contains("retrying once with the capture's cookies"),
+        "a non-login failure must not retry with cookies, got: {log}"
     );
     let dl = mgr.get_download(&id).unwrap().unwrap();
     assert!(
@@ -2530,6 +2527,11 @@ async fn round86_failed_download_with_no_bytes_deletes_empty_part() {
     // probe's HEAD still succeeds here, so the run starts and
     // pre-allocates; every segment GET then fails, the run errors
     // with 0 real bytes, and the empty `.part` must be gone.
+    // Round 87 fix: this test used to create the row with NO
+    // segments, so `run_inner` failed with "This download has no
+    // segments" BEFORE `set_len` pre-allocation — the assertion
+    // passed without exercising the fix. One segment is now
+    // created explicitly.
     let server = MockServer::start(MockConfig {
         size_bytes: Some(512 * 1024),
         ..Default::default()
@@ -2552,6 +2554,7 @@ async fn round86_failed_download_with_no_bytes_deletes_empty_part() {
             Some(true),
         )
         .unwrap();
+    mgr.store().create_segments(&id, &[(0, None)]).unwrap();
     mgr.start_download(&id).await.unwrap();
     assert!(
         wait_for_status(&mgr, &id, "error", 60).await,
@@ -2570,5 +2573,1585 @@ async fn round86_failed_download_with_no_bytes_deletes_empty_part() {
     assert!(
         !std::path::Path::new(&save_path).exists(),
         "no final file may exist for a failed download"
+    );
+}
+
+// -- Round 87 ---------------------------------------------------------------
+
+/// Round 87 — restores an env var on drop (file-level; the
+/// Round 86 forced-format test has its own function-local one).
+struct EnvGuard {
+    name: &'static str,
+    prev: Option<String>,
+}
+
+impl EnvGuard {
+    fn set(name: &'static str, value: &str) -> Self {
+        let prev = std::env::var(name).ok();
+        std::env::set_var(name, value);
+        Self { name, prev }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match &self.prev {
+            Some(v) => std::env::set_var(self.name, v),
+            None => std::env::remove_var(self.name),
+        }
+    }
+}
+
+#[cfg(unix)]
+struct FakeYtDlpLoginRetry {
+    dir: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl FakeYtDlpLoginRetry {
+    /// A fake yt-dlp that fails the FIRST invocation with a
+    /// login-required error ("Sign in to confirm your age") and
+    /// succeeds on the second (writing the merged file, like
+    /// `FakeYtDlpSuccess`). The invocation count lives in a
+    /// counter file, so the retry is a genuinely separate
+    /// process run. `--version` answers without counting.
+    fn install(argv_path: &std::path::Path, counter_path: &std::path::Path) -> Self {
+        let dir = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let script = dir.join("yt-dlp");
+        let body = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"2026.10.26\"; exit 0; fi\necho \"$@\" >> \"{}\"\nn=$(cat \"{}\" 2>/dev/null || echo 0)\nn=$((n + 1))\necho \"$n\" > \"{}\"\nif [ \"$n\" = \"1\" ]; then echo \"ERROR: Sign in to confirm your age\" >&2; exit 1; fi\nprev=\"\"; after=0; count=0; outtmpl=\"\"; outdir=\"\"\nfor a in \"$@\"; do\n  if [ \"$after\" = 1 ]; then count=$((count + 1)); continue; fi\n  case \"$prev\" in -o) outtmpl=\"$a\" ;; -P) outdir=\"$a\" ;; esac\n  case \"$a\" in --) after=1 ;; esac\n  prev=\"$a\"\ndone\ncase \"$outtmpl\" in *%*) ;; *) if [ \"$count\" -gt 1 ]; then echo \"ERROR: Fixed output name but more than one file to download: $outtmpl\" >&2; exit 1; fi ;; esac\nname=$(printf '%s' \"$outtmpl\" | sed 's/%(ext)s/mp4/')\nif [ -n \"$outdir\" ]; then target=\"$outdir/$name\"; else target=\"$name\"; fi\nprintf 'fake-merged-video-bytes' > \"$target\"\necho \"[download] 100% of 22.00B at 1.00B/s ETA 00:00\"\nexit 0\n",
+            argv_path.display(),
+            counter_path.display(),
+            counter_path.display(),
+        );
+        std::fs::write(&script, body).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        Self { dir }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for FakeYtDlpLoginRetry {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.dir.join("yt-dlp"));
+    }
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn round87_direct_ytdlp_retries_with_cookies_after_login_required() {
+    // Round 87 (item 4) — the first direct attempt is
+    // cookieless; a LoginRequired failure retries ONCE with
+    // the capture's (consented) cookies, and the retry
+    // completes. The two argv lines prove the order: no
+    // --cookies on attempt 1, --cookies on a temp Netscape
+    // file on attempt 2 — and the temp file is deleted when
+    // the run returns (RAII).
+    let _fake_guard = FAKE_YTDLP_LOCK.lock().unwrap();
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let log_path = dir.join("startup.log");
+    store.set_log_path(log_path.clone());
+    let mut settings = store.get_settings().unwrap();
+    settings.default_download_folder = dir.to_string_lossy().to_string();
+    store.update_settings(&settings).unwrap();
+    let mgr = DownloadManager::new(store, 4);
+    let store = mgr.store();
+    let cookies_json = r#"[{"name":"session","value":"abc123"},{"name":"consent","value":"yes"}]"#;
+    let pending = store
+        .enqueue_pending_link_resolved(
+            "https://cdn.example.com/video.mp4",
+            Some("https://www.tiktok.com/@user/video/123"),
+            Some(cookies_json),
+            &fetchline_engine::store::ResolvedLink {
+                filename: Some("video.mp4".to_string()),
+                headers: Some(
+                    r#"{"User-Agent":"Mozilla/5.0 TestAgent","Referer":"https://www.tiktok.com/"}"#
+                        .to_string(),
+                ),
+                source_url: Some("https://www.tiktok.com/@user/video/123".to_string()),
+                format_id: Some("18".to_string()),
+                audio_url: None,
+                fragmented: true,
+                filesize: None,
+            },
+        )
+        .unwrap();
+    let (id, _) = mgr
+        .confirm_pending_link(&pending.id, None, None, None, None, None, false)
+        .await
+        .unwrap();
+    let argv_path = dir.join("fake-argv-retry.txt");
+    let counter_path = dir.join("fake-count.txt");
+    let _fake = FakeYtDlpLoginRetry::install(&argv_path, &counter_path);
+    mgr.start_direct_ytdlp(&id).await.unwrap();
+    assert!(
+        wait_for_status(&mgr, &id, "complete", 30).await,
+        "the cookie retry must complete, last status: {}",
+        mgr.get_download(&id).unwrap().unwrap().status
+    );
+    let dl = mgr.get_download(&id).unwrap().unwrap();
+    assert_eq!(dl.downloaded_bytes, 23, "the merged fake file is 23 bytes");
+    let argv = std::fs::read_to_string(&argv_path).unwrap();
+    let lines: Vec<&str> = argv.lines().collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "exactly two yt-dlp invocations (first attempt + one retry): {argv}"
+    );
+    assert!(
+        !lines[0].contains("--cookies"),
+        "attempt 1 must be cookieless: {}",
+        lines[0]
+    );
+    assert!(
+        lines[1].contains("--cookies") && lines[1].contains("fetchline-ytdlp-cookies-"),
+        "attempt 2 must carry the cookies on a temp Netscape file: {}",
+        lines[1]
+    );
+    let cookie_path = lines[1]
+        .split_whitespace()
+        .skip_while(|w| *w != "--cookies")
+        .nth(1)
+        .expect("a --cookies value in the retry argv");
+    assert!(
+        !std::path::Path::new(cookie_path).exists(),
+        "the temp cookie file must be deleted after the run: {cookie_path}"
+    );
+    let log = std::fs::read_to_string(&log_path).unwrap();
+    assert!(
+        log.contains("first attempt failed with login_required")
+            && log.contains("retrying once with the capture's cookies"),
+        "the login retry must be logged, got: {log}"
+    );
+}
+
+#[cfg(unix)]
+struct FakeYtDlpProgress {
+    dir: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl FakeYtDlpProgress {
+    /// A fake yt-dlp that prints advancing `[download]`
+    /// progress lines (10% -> 45.2% -> 90% -> 100% of
+    /// 10.00MiB, at rising speeds, 1 s apart) and then writes
+    /// the merged file and exits 0 — the mock for a real
+    /// TikTok direct download's stdout.
+    fn install(argv_path: &std::path::Path) -> Self {
+        let dir = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let script = dir.join("yt-dlp");
+        let body = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"2026.10.26\"; exit 0; fi\necho \"$@\" >> \"{}\"\necho \"[download]  10.0% of 10.00MiB at  1.00MiB/s ETA 00:09\"\nsleep 1\necho \"[download]  45.2% of 10.00MiB at  2.50MiB/s ETA 00:05\"\nsleep 1\necho \"[download]  90.0% of 10.00MiB at  3.00MiB/s ETA 00:01\"\nsleep 1\nprev=\"\"; after=0; count=0; outtmpl=\"\"; outdir=\"\"\nfor a in \"$@\"; do\n  if [ \"$after\" = 1 ]; then count=$((count + 1)); continue; fi\n  case \"$prev\" in -o) outtmpl=\"$a\" ;; -P) outdir=\"$a\" ;; esac\n  case \"$a\" in --) after=1 ;; esac\n  prev=\"$a\"\ndone\ncase \"$outtmpl\" in *%*) ;; *) if [ \"$count\" -gt 1 ]; then echo \"ERROR: Fixed output name but more than one file to download: $outtmpl\" >&2; exit 1; fi ;; esac\nname=$(printf '%s' \"$outtmpl\" | sed 's/%(ext)s/mp4/')\nif [ -n \"$outdir\" ]; then target=\"$outdir/$name\"; else target=\"$name\"; fi\nprintf 'fake-merged-video-bytes' > \"$target\"\necho \"[download] 100% of 10.00MiB at  3.00MiB/s ETA 00:00\"\nexit 0\n",
+            argv_path.display()
+        );
+        std::fs::write(&script, body).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        Self { dir }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for FakeYtDlpProgress {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.dir.join("yt-dlp"));
+    }
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn round87_direct_ytdlp_progress_events_advance() {
+    // Round 87 (new P1, user-reported 2026-11-21) — a TikTok
+    // direct download on his PC showed NO live progress and NO
+    // parts: the row looked stalled, then flipped to Finished.
+    // Cause: the direct path is a single yt-dlp process, not
+    // the segmented engine, so `emit_snapshot` built its events
+    // from an empty segment list (0 bytes) with speed 0 — the
+    // progress window polls `last_progress`, so it saw a frozen
+    // 0% while the file grew. The events must now carry the
+    // parsed yt-dlp bytes/speed: collect the downloading events
+    // while the fake prints 10% -> 45.2% -> 90% -> 100% and
+    // assert they advance (bytes strictly increasing, live
+    // speed, the parsed 10 MiB total).
+    let _fake_guard = FAKE_YTDLP_LOCK.lock().unwrap();
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let mut settings = store.get_settings().unwrap();
+    settings.default_download_folder = dir.to_string_lossy().to_string();
+    store.update_settings(&settings).unwrap();
+    let mgr = DownloadManager::new(store, 4);
+    let (id, _) = mgr
+        .add_resolved_video_download(
+            "https://www.tiktok.com/@user/video/123",
+            &resolved_row("https://example.com/video.mp4"),
+            Some("video.mp4".to_string()),
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+    // Round 87 (refinement A) — the row is created with the
+    // resolved size (512 KiB), so the progress window's percent
+    // is 0% (an empty bar) from the start, not null (the
+    // indeterminate third-full bar) until the first progress line.
+    assert_eq!(
+        mgr.get_download(&id).unwrap().unwrap().size_bytes,
+        Some(512 * 1024),
+        "the row is created with the resolved size"
+    );
+    let argv_path = dir.join("fake-argv-progress.txt");
+    let _fake = FakeYtDlpProgress::install(&argv_path);
+    let mut rx = mgr.subscribe();
+    mgr.start_direct_ytdlp(&id).await.unwrap();
+    let mut downloading: Vec<(u64, u64, Option<u64>)> = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut complete = false;
+    let mut complete_ev: Option<(u64, Option<u64>)> = None;
+    while std::time::Instant::now() < deadline {
+        match tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await {
+            Ok(Ok(ev)) => {
+                if ev.id == id && ev.status == "downloading" {
+                    downloading.push((ev.downloaded_bytes, ev.speed_bps, ev.size_bytes));
+                }
+                if ev.id == id && ev.status == "complete" {
+                    complete = true;
+                    complete_ev = Some((ev.downloaded_bytes, ev.size_bytes));
+                }
+            }
+            _ => {
+                if mgr.get_download(&id).unwrap().unwrap().status == "complete" {
+                    complete = true;
+                }
+            }
+        }
+        if complete {
+            break;
+        }
+    }
+    assert!(
+        complete,
+        "the direct run must complete, last status: {} error: {:?}",
+        mgr.get_download(&id).unwrap().unwrap().status,
+        mgr.get_download(&id).unwrap().unwrap().error_message
+    );
+    let moving: Vec<(u64, u64, Option<u64>)> = downloading
+        .iter()
+        .filter(|(d, _, _)| *d > 0)
+        .copied()
+        .collect();
+    assert!(
+        moving.len() >= 2,
+        "at least two live downloading events (bytes > 0), got: {downloading:?}"
+    );
+    let min_bytes = moving.iter().map(|(d, _, _)| *d).min().unwrap();
+    let max_bytes = moving.iter().map(|(d, _, _)| *d).max().unwrap();
+    assert!(
+        max_bytes > min_bytes,
+        "the downloading events must advance ({min_bytes} -> {max_bytes}), got: {downloading:?}"
+    );
+    assert!(
+        moving.iter().any(|(_, s, _)| *s > 0),
+        "at least one event must carry a live speed, got: {downloading:?}"
+    );
+    assert!(
+        max_bytes >= 9_000_000,
+        "the 90% line must reach the events (>= 9,000,000 bytes), got max {max_bytes} in {downloading:?}"
+    );
+    assert!(
+        moving
+            .iter()
+            .any(|(_, _, sz)| *sz == Some(10 * 1024 * 1024)),
+        "the events must carry the parsed 10 MiB total, got: {downloading:?}"
+    );
+    // Round 87 (refinement A) — the bar percent derives from
+    // downloaded/size, so every downloading event must be
+    // consistent with it: downloaded never exceeds the size, and
+    // the implied percent (rounded) is one of the fake's printed
+    // percents (10 / 45 / 90 / 100 — 45.2% rounds to 45). A stale
+    // partial fill while downloaded is 0 B is impossible when the
+    // event itself carries the real bytes.
+    for (d, _, sz) in &downloading {
+        let sz = sz.expect("every downloading event carries a size now");
+        assert!(
+            *d <= sz,
+            "downloaded ({d}) must never exceed the size ({sz}): {downloading:?}"
+        );
+        if *d > 0 {
+            let pct = (*d as f64 / sz as f64 * 100.0).round() as u64;
+            assert!(
+                [10, 45, 90, 100].contains(&pct),
+                "the implied percent ({pct}%) must match a printed progress line: {downloading:?}"
+            );
+        }
+    }
+    // Round 87 (steer 3a) — the FINAL state: the complete event
+    // must carry downloaded == size (23 == 23 for the fake file),
+    // i.e. an implied 100%, and the row must agree (downloaded,
+    // size, completed_at) — the Finished window shows
+    // "2.9 MB / 2.9 MB" and "100%", not "0 B / 2.9 MB" and "0%".
+    // The row turns complete just before the final snapshot is
+    // emitted, so wait for the complete event via last_progress
+    // when the live channel did not deliver it first.
+    let final_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while complete_ev.is_none() && std::time::Instant::now() < final_deadline {
+        if let Some(ev) = mgr.last_progress(&id) {
+            if ev.status == "complete" {
+                complete_ev = Some((ev.downloaded_bytes, ev.size_bytes));
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let (final_downloaded, final_size) =
+        complete_ev.expect("a complete event must be emitted for the direct download");
+    assert_eq!(
+        final_downloaded, 23,
+        "the complete event must carry the file's bytes, got {final_downloaded}"
+    );
+    assert_eq!(
+        final_size,
+        Some(23),
+        "the complete event's size must equal the file's bytes, got {final_size:?}"
+    );
+    let row = mgr.get_download(&id).unwrap().unwrap();
+    assert_eq!(row.status, "complete");
+    assert_eq!(
+        row.downloaded_bytes, 23,
+        "the row must hold the file's bytes"
+    );
+    assert_eq!(
+        row.size_bytes,
+        Some(23),
+        "the row's size must equal the file's bytes"
+    );
+    assert!(
+        row.completed_at.is_some(),
+        "completed_at must be set (the completion dialog's fresh check reads it)"
+    );
+}
+
+#[tokio::test]
+async fn round87_facebook_long_arabic_title_downloads_without_os_error_123() {
+    // Round 87 — Facebook reel 4444270735823862: the failing title
+    // is 313 chars / 540 UTF-8 bytes with three `|` and emoji +
+    // Arabic, and the download failed at 0 B with "File error:
+    // ... (os error 123)" (ERROR_INVALID_NAME). The pipes were
+    // never the failure — every file-creating path already runs
+    // through `sanitize_filename`, which maps `|` to `_`. The
+    // failure was the LENGTH: an uncapped name becomes a >255-byte
+    // path component, refused by the filesystem at the first file
+    // creation. A download using the real title must complete, its
+    // save name must carry no `|` and must fit in 200 bytes. On
+    // Linux without the fix this fails with ENAMETOOLONG (os error
+    // 36) — the same class of failure, one component too long.
+    const REEL: &str = include_str!("fixtures/ytdlp/facebook_reel_pipes.json");
+    let title: String = serde_json::from_str::<serde_json::Value>(REEL).unwrap()["title"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(title.chars().count(), 313, "the fixture is the real title");
+    let server = MockServer::start(MockConfig {
+        size_bytes: Some(512 * 1024),
+        ..Default::default()
+    });
+    let dir = tmpdir();
+    let mgr = test_mgr(&dir);
+    let (id, _) = mgr
+        .add_resolved_stream_download(
+            &server.url,
+            Some(format!("{title}.mp4")),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(512 * 1024),
+        )
+        .await
+        .unwrap();
+    let row = mgr.get_download(&id).unwrap().unwrap();
+    let file_name = std::path::Path::new(&row.save_path)
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        !file_name.contains('|'),
+        "no pipe may reach the save path: {file_name}"
+    );
+    assert!(
+        file_name.len() <= 200,
+        "the save name must fit a filesystem component: {} bytes: {file_name}",
+        file_name.len()
+    );
+    assert!(
+        file_name.ends_with(".mp4"),
+        "the extension is kept: {file_name}"
+    );
+    mgr.start_download(&id).await.unwrap();
+    assert!(
+        wait_for_status(&mgr, &id, "complete", 30).await,
+        "the download must complete, last status: {} error: {:?}",
+        mgr.get_download(&id).unwrap().unwrap().status,
+        mgr.get_download(&id).unwrap().unwrap().error_message
+    );
+    let row = mgr.get_download(&id).unwrap().unwrap();
+    assert_eq!(row.downloaded_bytes, 512 * 1024);
+    assert_eq!(
+        std::fs::metadata(&row.save_path).unwrap().len(),
+        512 * 1024,
+        "the file is on disk under the capped name"
+    );
+}
+
+// -- Round 87: DASH re-resolve (item 5) ------------------------------------
+
+#[cfg(unix)]
+struct FakeYtDlpResolveStateful {
+    dir: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl FakeYtDlpResolveStateful {
+    /// A fake yt-dlp whose FIRST `--dump-json` returns `json_a`
+    /// and every later one returns `json_b` (the invocation count
+    /// lives in a counter file, like `FakeYtDlpLoginRetry`).
+    fn install(
+        json_a: &std::path::Path,
+        json_b: &std::path::Path,
+        argv_path: &std::path::Path,
+        count_path: &std::path::Path,
+    ) -> Self {
+        let dir = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let script = dir.join("yt-dlp");
+        let body = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"2026.10.26\"; exit 0; fi\necho \"$@\" >> \"{}\"\nfor a in \"$@\"; do if [ \"$a\" = \"--dump-json\" ]; then n=0; [ -f \"{}\" ] && n=$(cat \"{}\"); n=$((n + 1)); echo \"$n\" > \"{}\"; if [ \"$n\" = 1 ]; then cat \"{}\"; else cat \"{}\"; fi; exit 0; fi; done\necho \"ERROR: [generic] test: no format\" >&2\nexit 1\n",
+            argv_path.display(),
+            count_path.display(),
+            count_path.display(),
+            count_path.display(),
+            json_a.display(),
+            json_b.display()
+        );
+        std::fs::write(&script, body).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        Self { dir }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for FakeYtDlpResolveStateful {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.dir.join("yt-dlp"));
+    }
+}
+
+/// A `--dump-json` body with one video format (137) and one
+/// audio format (140) at the given URLs.
+fn dash_resolve_json(video_url: &str, audio_url: &str) -> String {
+    format!(
+        r#"{{"title":"test","extractor":"generic","formats":[{{"format_id":"137","url":"{video_url}","ext":"mp4","height":2160,"protocol":"https","vcodec":"avc1.640033","acodec":"none","filesize":524288}},{{"format_id":"140","url":"{audio_url}","ext":"m4a","protocol":"https","vcodec":"none","acodec":"mp4a.40.2","filesize":32768}}]}}"#
+    )
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn round87_dash_pair_reresolve_runs_after_prechildren_refresh() {
+    // Round 87 (item 5a) — the shared `reresolved` set used to
+    // guard the parent and the pair with ONE key, so the
+    // pre-children refresh consumed the guard and a later pair
+    // re-resolve was skipped. Here the refresh consumes the
+    // `pair-refresh` guard (children are created from the A
+    // URLs), then BOTH children 403 on their A URLs: the video
+    // child re-resolves through its own `row` guard, the audio
+    // child (no meta) through the `pair` guard — which must NOT
+    // have been consumed by the refresh. The parent ends error
+    // (the merge has no ffmpeg next to the test binary), but both
+    // children must have been re-resolved to the B URLs first.
+    let _fake_guard = FAKE_YTDLP_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let now = now_epoch_secs();
+    let stale_video = MockServer::start(MockConfig {
+        fail_status: Some(403),
+        ..Default::default()
+    });
+    let stale_audio = MockServer::start(MockConfig {
+        fail_status: Some(403),
+        ..Default::default()
+    });
+    let a_video = MockServer::start(MockConfig {
+        size_bytes: Some(512 * 1024),
+        ..Default::default()
+    });
+    a_video.set_fail_get_status(403);
+    let a_audio = MockServer::start(MockConfig {
+        size_bytes: Some(32 * 1024),
+        ..Default::default()
+    });
+    a_audio.set_fail_get_status(403);
+    let b_video = MockServer::start(MockConfig {
+        size_bytes: Some(512 * 1024),
+        ..Default::default()
+    });
+    let b_audio = MockServer::start(MockConfig {
+        size_bytes: Some(32 * 1024),
+        ..Default::default()
+    });
+    let stale_video_url = format!("{}?expire={}", stale_video.url, now - 3600);
+    let stale_audio_url = format!("{}?expire={}", stale_audio.url, now - 3600);
+    let a_video_url = format!("{}?expire={}", a_video.url, now + 20000);
+    let a_audio_url = format!("{}?expire={}", a_audio.url, now + 20000);
+    let b_video_url = format!("{}?expire={}", b_video.url, now + 20000);
+    let b_audio_url = format!("{}?expire={}", b_audio.url, now + 20000);
+    let dir = tmpdir();
+    let json_a_path = dir.join("a.json");
+    std::fs::write(&json_a_path, dash_resolve_json(&a_video_url, &a_audio_url)).unwrap();
+    let json_b_path = dir.join("b.json");
+    std::fs::write(&json_b_path, dash_resolve_json(&b_video_url, &b_audio_url)).unwrap();
+    let argv_path = dir.join("fake-argv.txt");
+    let count_path = dir.join("fake-count.txt");
+    let _fake =
+        FakeYtDlpResolveStateful::install(&json_a_path, &json_b_path, &argv_path, &count_path);
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let log_path = dir.join("startup.log");
+    store.set_log_path(log_path.clone());
+    let mut settings = store.get_settings().unwrap();
+    settings.default_download_folder = dir.to_string_lossy().to_string();
+    settings.max_retries = 1;
+    store.update_settings(&settings).unwrap();
+    let mgr = DownloadManager::new(Arc::clone(&store), 4);
+    let parent = store
+        .create_download(
+            &stale_video_url,
+            None,
+            "video.mp4",
+            &dir.join("video.mp4").to_string_lossy(),
+            "cat-video",
+            Some(512 * 1024),
+            None,
+            None,
+            Some(true),
+        )
+        .unwrap();
+    store
+        .set_download_ytdlp_meta(
+            &parent,
+            Some("https://www.youtube.com/watch?v=x"),
+            Some("137"),
+            false,
+        )
+        .unwrap();
+    let (video, audio) = mgr
+        .ensure_dash_children(&parent, &stale_audio_url)
+        .await
+        .expect("children must be created from the refreshed A URLs");
+    assert_eq!(
+        video.url, a_video_url,
+        "the video child must start on the refreshed A URL"
+    );
+    assert_eq!(
+        audio.url, a_audio_url,
+        "the audio child must start on the refreshed A URL"
+    );
+    mgr.resume_download(&parent).await.unwrap();
+    assert!(
+        wait_for_status(&mgr, &parent, "error", 60).await,
+        "the parent must end error (the merge has no ffmpeg here), last status: {}",
+        mgr.get_download(&parent).unwrap().unwrap().status
+    );
+    let log = std::fs::read_to_string(&log_path).unwrap();
+    assert!(
+        log.contains(&format!(
+            "re-resolved DASH parent {parent}: video 137 + audio 140 refreshed"
+        )),
+        "the pair re-resolve must run after the pre-children refresh, got: {log}"
+    );
+    let video_after = mgr.get_download(&video.id).unwrap().unwrap();
+    assert_eq!(
+        video_after.url, b_video_url,
+        "the video child must have been re-resolved to the B URL"
+    );
+    let audio_after = mgr.get_download(&audio.id).unwrap().unwrap();
+    assert_eq!(
+        audio_after.url, b_audio_url,
+        "the audio child must have been re-resolved to the B URL"
+    );
+    let argv = std::fs::read_to_string(&argv_path).unwrap();
+    assert_eq!(
+        argv.lines().filter(|l| l.contains("--dump-json")).count(),
+        3,
+        "three resolves must run (refresh + video + pair), got argv: {argv}"
+    );
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn round87_dash_prechildren_refresh_failure_fails_loudly() {
+    // Round 87 (item 5b) — a failed pair re-resolve must NOT
+    // silently fall back to the stale stored URLs: with no fake
+    // yt-dlp installed the resolve fails (BinaryMissing, retried
+    // once), `ensure_dash_children` must Err, no children may
+    // exist, and the stale servers must never have been probed —
+    // the children are never created from expired URLs.
+    let _fake_guard = FAKE_YTDLP_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let now = now_epoch_secs();
+    let stale_video = MockServer::start(MockConfig {
+        fail_status: Some(403),
+        ..Default::default()
+    });
+    let stale_audio = MockServer::start(MockConfig {
+        fail_status: Some(403),
+        ..Default::default()
+    });
+    let stale_video_url = format!("{}?expire={}", stale_video.url, now - 3600);
+    let stale_audio_url = format!("{}?expire={}", stale_audio.url, now - 3600);
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let log_path = dir.join("startup.log");
+    store.set_log_path(log_path.clone());
+    let mut settings = store.get_settings().unwrap();
+    settings.default_download_folder = dir.to_string_lossy().to_string();
+    store.update_settings(&settings).unwrap();
+    let mgr = DownloadManager::new(Arc::clone(&store), 4);
+    let parent = store
+        .create_download(
+            &stale_video_url,
+            None,
+            "video.mp4",
+            &dir.join("video.mp4").to_string_lossy(),
+            "cat-video",
+            Some(512 * 1024),
+            None,
+            None,
+            Some(true),
+        )
+        .unwrap();
+    store
+        .set_download_ytdlp_meta(
+            &parent,
+            Some("https://www.youtube.com/watch?v=x"),
+            Some("137"),
+            false,
+        )
+        .unwrap();
+    let err = mgr
+        .ensure_dash_children(&parent, &stale_audio_url)
+        .await
+        .expect_err("a failed pre-children refresh must fail loudly");
+    assert!(
+        err.to_string().contains("expired"),
+        "the error must name the expiry, got: {err}"
+    );
+    assert!(
+        mgr.store()
+            .list_child_downloads(&parent)
+            .unwrap()
+            .is_empty(),
+        "no children may exist after a failed refresh"
+    );
+    let log = std::fs::read_to_string(&log_path).unwrap();
+    assert!(
+        log.contains("not creating the children from the expired stored URLs"),
+        "the loud failure must be logged, got: {log}"
+    );
+    assert_eq!(
+        stale_video.get_requests(),
+        0,
+        "the stale video server must never be hit"
+    );
+    assert_eq!(
+        stale_video.head_requests(),
+        0,
+        "the stale video server must never be probed"
+    );
+    assert_eq!(
+        stale_audio.get_requests(),
+        0,
+        "the stale audio server must never be hit"
+    );
+    assert_eq!(
+        stale_audio.head_requests(),
+        0,
+        "the stale audio server must never be probed"
+    );
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn round87_dash_both_urls_expired_refresh_before_children() {
+    // Round 87 (item 5c) — BOTH stored URLs expired: the
+    // re-resolve must run BEFORE `ensure_dash_children` creates
+    // or probes the children, and refresh BOTH URLs. The stale
+    // servers must receive zero requests of any kind — a single
+    // HEAD to a stale URL would prove the refresh ran too late.
+    let _fake_guard = FAKE_YTDLP_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let stale_video = MockServer::start(MockConfig {
+        fail_status: Some(403),
+        ..Default::default()
+    });
+    let stale_audio = MockServer::start(MockConfig {
+        fail_status: Some(403),
+        ..Default::default()
+    });
+    let fresh = MockServer::start(MockConfig {
+        size_bytes: Some(512 * 1024),
+        ..Default::default()
+    });
+    let now = now_epoch_secs();
+    let stale_video_url = format!("{}?expire={}", stale_video.url, now - 3600);
+    let stale_audio_url = format!("{}?expire={}", stale_audio.url, now - 3600);
+    let fresh_video_url = format!("{}?expire={}", fresh.url, now + 20000);
+    let fresh_audio_url = format!("{}?expire={}", fresh.url, now + 20000);
+    let json = dash_resolve_json(&fresh_video_url, &fresh_audio_url);
+    let dir = tmpdir();
+    let json_path = dir.join("fresh.json");
+    std::fs::write(&json_path, json).unwrap();
+    let argv_path = dir.join("fake-argv.txt");
+    let _fake = FakeYtDlpResolve::install(&json_path, &argv_path);
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let log_path = dir.join("startup.log");
+    store.set_log_path(log_path.clone());
+    let mut settings = store.get_settings().unwrap();
+    settings.default_download_folder = dir.to_string_lossy().to_string();
+    store.update_settings(&settings).unwrap();
+    let mgr = DownloadManager::new(Arc::clone(&store), 4);
+    let parent = store
+        .create_download(
+            &stale_video_url,
+            None,
+            "video.mp4",
+            &dir.join("video.mp4").to_string_lossy(),
+            "cat-video",
+            Some(512 * 1024),
+            None,
+            None,
+            Some(true),
+        )
+        .unwrap();
+    store
+        .set_download_ytdlp_meta(
+            &parent,
+            Some("https://www.youtube.com/watch?v=x"),
+            Some("137"),
+            false,
+        )
+        .unwrap();
+    let (video, audio) = mgr
+        .ensure_dash_children(&parent, &stale_audio_url)
+        .await
+        .expect("children must be created from the fresh URLs");
+    assert_eq!(
+        video.url, fresh_video_url,
+        "the video child must carry the fresh URL"
+    );
+    assert_eq!(
+        audio.url, fresh_audio_url,
+        "the audio child must carry the fresh URL"
+    );
+    let parent_after = mgr.get_download(&parent).unwrap().unwrap();
+    assert_eq!(
+        parent_after.url, fresh_video_url,
+        "the parent's stored URL is refreshed too"
+    );
+    assert_eq!(
+        stale_video.get_requests(),
+        0,
+        "the stale video server must never be hit"
+    );
+    assert_eq!(
+        stale_video.head_requests(),
+        0,
+        "the stale video server must never be probed — the refresh runs before any probe"
+    );
+    assert_eq!(
+        stale_audio.get_requests(),
+        0,
+        "the stale audio server must never be hit"
+    );
+    assert_eq!(
+        stale_audio.head_requests(),
+        0,
+        "the stale audio server must never be probed"
+    );
+    let log = std::fs::read_to_string(&log_path).unwrap();
+    assert!(
+        log.contains("re-resolving before creating the children"),
+        "the pre-children re-resolve must be logged, got: {log}"
+    );
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn round87_expire_shift_forces_prechildren_reresolve() {
+    // Round 87 (item 5d) — `SONIC_FORCE_URL_EXPIRE_NOW_PLUS_SECS`
+    // shifts "now" in the expire check (debug builds only), so one
+    // run can force the pre-children re-resolve branch. Case A
+    // (no var): URLs valid for another hour are used as stored —
+    // the resolver is never invoked. Case B (shift +7200 s): the
+    // same URLs look expired, so the children come from the fresh
+    // resolve instead.
+    let _fake_guard = FAKE_YTDLP_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let now = now_epoch_secs();
+    // Case A — no shift: the stored URLs are valid.
+    {
+        let good_video = MockServer::start(MockConfig {
+            size_bytes: Some(512 * 1024),
+            ..Default::default()
+        });
+        let good_audio = MockServer::start(MockConfig {
+            size_bytes: Some(32 * 1024),
+            ..Default::default()
+        });
+        let fresh = MockServer::start(MockConfig {
+            size_bytes: Some(512 * 1024),
+            ..Default::default()
+        });
+        let good_video_url = format!("{}?expire={}", good_video.url, now + 3600);
+        let good_audio_url = format!("{}?expire={}", good_audio.url, now + 3600);
+        let fresh_video_url = format!("{}?expire={}", fresh.url, now + 20000);
+        let fresh_audio_url = format!("{}?expire={}", fresh.url, now + 20000);
+        let dir = tmpdir();
+        let json_path = dir.join("fresh.json");
+        std::fs::write(
+            &json_path,
+            dash_resolve_json(&fresh_video_url, &fresh_audio_url),
+        )
+        .unwrap();
+        let argv_path = dir.join("fake-argv.txt");
+        let _fake = FakeYtDlpResolve::install(&json_path, &argv_path);
+        let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+        let mut settings = store.get_settings().unwrap();
+        settings.default_download_folder = dir.to_string_lossy().to_string();
+        store.update_settings(&settings).unwrap();
+        let mgr = DownloadManager::new(Arc::clone(&store), 4);
+        let parent = store
+            .create_download(
+                &good_video_url,
+                None,
+                "video.mp4",
+                &dir.join("video.mp4").to_string_lossy(),
+                "cat-video",
+                Some(512 * 1024),
+                None,
+                None,
+                Some(true),
+            )
+            .unwrap();
+        store
+            .set_download_ytdlp_meta(
+                &parent,
+                Some("https://www.youtube.com/watch?v=x"),
+                Some("137"),
+                false,
+            )
+            .unwrap();
+        let (video, audio) = mgr
+            .ensure_dash_children(&parent, &good_audio_url)
+            .await
+            .expect("children must be created from the stored URLs");
+        assert_eq!(video.url, good_video_url, "valid URLs are used as stored");
+        assert_eq!(audio.url, good_audio_url, "valid URLs are used as stored");
+        let argv = std::fs::read_to_string(&argv_path).unwrap_or_default();
+        assert!(
+            !argv.contains("--dump-json"),
+            "the resolver must never be invoked for valid URLs, got argv: {argv}"
+        );
+    }
+    // Case B — the shift makes the same URLs look expired.
+    {
+        let _shift = EnvGuard::set("SONIC_FORCE_URL_EXPIRE_NOW_PLUS_SECS", "7200");
+        let good_video = MockServer::start(MockConfig {
+            size_bytes: Some(512 * 1024),
+            ..Default::default()
+        });
+        let good_audio = MockServer::start(MockConfig {
+            size_bytes: Some(32 * 1024),
+            ..Default::default()
+        });
+        let fresh = MockServer::start(MockConfig {
+            size_bytes: Some(512 * 1024),
+            ..Default::default()
+        });
+        let good_video_url = format!("{}?expire={}", good_video.url, now + 3600);
+        let good_audio_url = format!("{}?expire={}", good_audio.url, now + 3600);
+        let fresh_video_url = format!("{}?expire={}", fresh.url, now + 20000);
+        let fresh_audio_url = format!("{}?expire={}", fresh.url, now + 20000);
+        let dir = tmpdir();
+        let json_path = dir.join("fresh.json");
+        std::fs::write(
+            &json_path,
+            dash_resolve_json(&fresh_video_url, &fresh_audio_url),
+        )
+        .unwrap();
+        let argv_path = dir.join("fake-argv.txt");
+        let _fake = FakeYtDlpResolve::install(&json_path, &argv_path);
+        let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+        let log_path = dir.join("startup.log");
+        store.set_log_path(log_path.clone());
+        let mut settings = store.get_settings().unwrap();
+        settings.default_download_folder = dir.to_string_lossy().to_string();
+        store.update_settings(&settings).unwrap();
+        let mgr = DownloadManager::new(Arc::clone(&store), 4);
+        let parent = store
+            .create_download(
+                &good_video_url,
+                None,
+                "video.mp4",
+                &dir.join("video.mp4").to_string_lossy(),
+                "cat-video",
+                Some(512 * 1024),
+                None,
+                None,
+                Some(true),
+            )
+            .unwrap();
+        store
+            .set_download_ytdlp_meta(
+                &parent,
+                Some("https://www.youtube.com/watch?v=x"),
+                Some("137"),
+                false,
+            )
+            .unwrap();
+        let (video, audio) = mgr
+            .ensure_dash_children(&parent, &good_audio_url)
+            .await
+            .expect("children must be created from the fresh URLs");
+        assert_eq!(
+            video.url, fresh_video_url,
+            "the shift must force the refresh for the video child"
+        );
+        assert_eq!(
+            audio.url, fresh_audio_url,
+            "the shift must force the refresh for the audio child"
+        );
+        let log = std::fs::read_to_string(&log_path).unwrap();
+        assert!(
+            log.contains("re-resolving before creating the children"),
+            "the forced refresh must be logged, got: {log}"
+        );
+    }
+}
+
+/// Create a DASH parent with linked video/audio children on the
+/// given servers (one open-ended segment each), like the R86
+/// supervisor test. Returns (parent, video, audio).
+fn dash_pair_on_servers(
+    store: &Store,
+    dir: &std::path::Path,
+    video_url: &str,
+    audio_url: &str,
+    video_size: i64,
+    audio_size: i64,
+) -> (String, String, String) {
+    let parent = store
+        .create_download(
+            video_url,
+            None,
+            "video.mp4",
+            &dir.join("video.mp4").to_string_lossy(),
+            "cat-video",
+            Some(video_size + audio_size),
+            None,
+            None,
+            Some(true),
+        )
+        .unwrap();
+    let video = store
+        .create_download(
+            video_url,
+            None,
+            "video.video.mp4",
+            &dir.join("video.video.mp4").to_string_lossy(),
+            "cat-video",
+            Some(video_size),
+            None,
+            None,
+            Some(true),
+        )
+        .unwrap();
+    let audio = store
+        .create_download(
+            audio_url,
+            None,
+            "video.audio.m4a",
+            &dir.join("video.audio.m4a").to_string_lossy(),
+            "cat-video",
+            Some(audio_size),
+            None,
+            None,
+            Some(true),
+        )
+        .unwrap();
+    store.create_segments(&video, &[(0, None)]).unwrap();
+    store.create_segments(&audio, &[(0, None)]).unwrap();
+    store
+        .link_child_to_parent(&video, &parent, "video")
+        .unwrap();
+    store
+        .link_child_to_parent(&audio, &parent, "audio")
+        .unwrap();
+    store
+        .set_download_ytdlp_meta(
+            &video,
+            Some("https://www.youtube.com/watch?v=x"),
+            Some("137"),
+            false,
+        )
+        .unwrap();
+    (parent, video, audio)
+}
+
+#[tokio::test]
+async fn round87_dash_progress_carries_live_connection_count() {
+    // Round 87 (item 7) — `emit_dash_progress` rebuilt its segment
+    // states fresh (running:false), so `emit` counted 0 running
+    // flags and the progress window showed "0 connections" while
+    // the download ran at full speed. The parent event must now
+    // carry the children's summed DB active_connections: 2 while
+    // both children run, 0 when done. The plain-download control
+    // proves the plain path is unchanged (live > 0, complete 0).
+    let slow_video = MockServer::start(MockConfig {
+        chunk: 1024,
+        delay: std::time::Duration::from_millis(50),
+        size_bytes: Some(128 * 1024),
+        ..Default::default()
+    });
+    let slow_audio = MockServer::start(MockConfig {
+        chunk: 1024,
+        delay: std::time::Duration::from_millis(50),
+        size_bytes: Some(64 * 1024),
+        ..Default::default()
+    });
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let mut settings = store.get_settings().unwrap();
+    settings.default_download_folder = dir.to_string_lossy().to_string();
+    store.update_settings(&settings).unwrap();
+    let mgr = DownloadManager::new(Arc::clone(&store), 4);
+    let (parent, _, _) = dash_pair_on_servers(
+        &store,
+        &dir,
+        &slow_video.url,
+        &slow_audio.url,
+        128 * 1024,
+        64 * 1024,
+    );
+    let mut rx = mgr.subscribe();
+    mgr.resume_download(&parent).await.unwrap();
+    let mut downloading_active: Vec<usize> = Vec::new();
+    let mut terminal_active: Option<usize> = None;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        match tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await {
+            Ok(Ok(ev)) => {
+                if ev.id != parent {
+                    continue;
+                }
+                if ev.status == "downloading" {
+                    downloading_active.push(ev.active_connections);
+                } else if ev.status == "error" || ev.status == "complete" {
+                    terminal_active = Some(ev.active_connections);
+                    break;
+                }
+            }
+            _ => {
+                if matches!(
+                    mgr.get_download(&parent).unwrap().unwrap().status.as_str(),
+                    "error" | "complete"
+                ) {
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        downloading_active.iter().any(|a| *a == 2),
+        "some downloading parent event must carry 2 live connections, got: {downloading_active:?}"
+    );
+    assert_eq!(
+        terminal_active,
+        Some(0),
+        "the terminal parent event must carry 0 connections, got: {terminal_active:?}"
+    );
+    // Plain control: one segment, live > 0 while downloading,
+    // 0 when complete.
+    let slow = MockServer::start(MockConfig {
+        chunk: 1024,
+        delay: std::time::Duration::from_millis(50),
+        size_bytes: Some(128 * 1024),
+        ..Default::default()
+    });
+    let dir2 = tmpdir();
+    let mgr2 = test_mgr(&dir2);
+    let save_path = dir2.join("plain.mp4").to_string_lossy().to_string();
+    let id = mgr2
+        .store()
+        .create_download(
+            &slow.url,
+            None,
+            "plain.mp4",
+            &save_path,
+            "cat-video",
+            Some(128 * 1024),
+            None,
+            None,
+            Some(true),
+        )
+        .unwrap();
+    mgr2.store().create_segments(&id, &[(0, None)]).unwrap();
+    let mut rx2 = mgr2.subscribe();
+    mgr2.start_download(&id).await.unwrap();
+    let mut plain_downloading: Vec<usize> = Vec::new();
+    let mut plain_terminal: Option<usize> = None;
+    let deadline2 = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline2 {
+        match tokio::time::timeout(std::time::Duration::from_millis(200), rx2.recv()).await {
+            Ok(Ok(ev)) => {
+                if ev.id != id {
+                    continue;
+                }
+                if ev.status == "downloading" {
+                    plain_downloading.push(ev.active_connections);
+                } else if ev.status == "complete" {
+                    plain_terminal = Some(ev.active_connections);
+                    break;
+                }
+            }
+            _ => {
+                if mgr2.get_download(&id).unwrap().unwrap().status == "complete" {
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        plain_downloading.iter().any(|a| *a > 0),
+        "plain downloading events must carry live connections, got: {plain_downloading:?}"
+    );
+    assert_eq!(
+        plain_terminal,
+        Some(0),
+        "the plain complete event must carry 0 connections, got: {plain_terminal:?}"
+    );
+}
+
+#[tokio::test]
+async fn round87_dash_children_share_parent_speed_cap() {
+    // Round 87 (item 8) — the DASH children used to get a fresh
+    // unlimited limiter each, so a 1000 KB/s cap on the parent ran
+    // uncapped (16.7 MB/s in the R86 retest). With the parent
+    // capped at 100 KB/s, two 512 KiB children on fast servers
+    // must share ONE bucket: after 3 s the parent is still
+    // downloading with well under 500 KiB (uncapped, 1 MiB would
+    // finish in under a second), and it finishes later (the merge
+    // fails without ffmpeg, so the parent ends error).
+    let fast_video = MockServer::start(MockConfig {
+        size_bytes: Some(512 * 1024),
+        ..Default::default()
+    });
+    let fast_audio = MockServer::start(MockConfig {
+        size_bytes: Some(512 * 1024),
+        ..Default::default()
+    });
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let mut settings = store.get_settings().unwrap();
+    settings.default_download_folder = dir.to_string_lossy().to_string();
+    store.update_settings(&settings).unwrap();
+    let mgr = DownloadManager::new(Arc::clone(&store), 4);
+    let (parent, _, _) = dash_pair_on_servers(
+        &store,
+        &dir,
+        &fast_video.url,
+        &fast_audio.url,
+        512 * 1024,
+        512 * 1024,
+    );
+    mgr.set_download_speed_limit(&parent, Some(100)).unwrap();
+    mgr.resume_download(&parent).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    let mid = mgr.get_download(&parent).unwrap().unwrap();
+    assert_eq!(
+        mid.status, "downloading",
+        "the capped pair must still be downloading after 3 s"
+    );
+    assert!(
+        mid.downloaded_bytes > 50_000 && mid.downloaded_bytes < 500_000,
+        "the shared 100 KB/s cap must hold (~300 KiB after 3 s), got {} bytes",
+        mid.downloaded_bytes
+    );
+    assert!(
+        wait_for_status(&mgr, &parent, "error", 60).await,
+        "the parent must end error (the merge has no ffmpeg here)"
+    );
+}
+
+#[tokio::test]
+async fn round87_failed_segmented_download_with_no_bytes_deletes_empty_part() {
+    // Round 87 (item 12) — the R86 proof covered only the direct
+    // path (a download failing at format resolution). The
+    // segmented path pre-allocates the same empty `.part` via
+    // `set_len`, and `finish_run` must delete it on failure. The
+    // segment is created explicitly here: without it the run
+    // would fail with "This download has no segments" before
+    // pre-allocation (the R86 test's vacuity, fixed alongside).
+    let server = MockServer::start(MockConfig {
+        size_bytes: Some(512 * 1024),
+        ..Default::default()
+    });
+    server.set_fail_get(true);
+    let dir = tmpdir();
+    let mgr = test_mgr(&dir);
+    let save_path = dir.join("video.mp4").to_string_lossy().to_string();
+    let id = mgr
+        .store()
+        .create_download(
+            &server.url,
+            None,
+            "video.mp4",
+            &save_path,
+            "cat-video",
+            Some(512 * 1024),
+            None,
+            None,
+            Some(true),
+        )
+        .unwrap();
+    mgr.store().create_segments(&id, &[(0, None)]).unwrap();
+    mgr.start_download(&id).await.unwrap();
+    assert!(
+        wait_for_status(&mgr, &id, "error", 60).await,
+        "the segmented download must fail once every GET fails"
+    );
+    let dl = mgr.get_download(&id).unwrap().unwrap();
+    assert!(
+        !dl.error_message
+            .as_deref()
+            .unwrap_or("")
+            .contains("no segments"),
+        "the run must really have started (and pre-allocated) — error was: {:?}",
+        dl.error_message
+    );
+    assert_eq!(dl.downloaded_bytes, 0, "no real byte may be downloaded");
+    assert!(
+        !std::path::Path::new(&format!("{save_path}.part")).exists(),
+        "the empty pre-allocated .part must be deleted on Failed"
+    );
+    assert!(
+        !std::path::Path::new(&save_path).exists(),
+        "no final file may exist for a failed download"
+    );
+}
+
+#[tokio::test]
+async fn round87_facebook_long_arabic_title_dash_children_complete() {
+    // Round 87 — DASH variant of the Facebook reel 4444270735823862
+    // title test: the parent is created from the same 313-char
+    // title, then `ensure_dash_children` derives the video/audio
+    // part filenames from the parent's (capped) stem. Both children
+    // must complete — their part files are created from the capped
+    // stem, never from the raw title — and the parent must end
+    // error only because the merge has no ffmpeg here, never with
+    // os error 123 / ENAMETOOLONG.
+    const REEL: &str = include_str!("fixtures/ytdlp/facebook_reel_pipes.json");
+    let title: String = serde_json::from_str::<serde_json::Value>(REEL).unwrap()["title"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let video_server = MockServer::start(MockConfig {
+        size_bytes: Some(512 * 1024),
+        ..Default::default()
+    });
+    let audio_server = MockServer::start(MockConfig {
+        size_bytes: Some(32 * 1024),
+        ..Default::default()
+    });
+    let dir = tmpdir();
+    let mgr = test_mgr(&dir);
+    let (parent, _) = mgr
+        .add_resolved_stream_download(
+            &video_server.url,
+            Some(format!("{title}.mp4")),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(512 * 1024),
+        )
+        .await
+        .unwrap();
+    let parent_row = mgr.get_download(&parent).unwrap().unwrap();
+    let parent_name = std::path::Path::new(&parent_row.save_path)
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        !parent_name.contains('|'),
+        "no pipe may reach the save path"
+    );
+    assert!(
+        parent_name.len() <= 200,
+        "the save name must fit: {parent_name}"
+    );
+    let (video, audio) = mgr
+        .ensure_dash_children(&parent, &audio_server.url)
+        .await
+        .expect("the DASH children must be created from the capped stem");
+    for child in [&video, &audio] {
+        let name = std::path::Path::new(&child.save_path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            !name.contains('|'),
+            "no pipe may reach a child name: {name}"
+        );
+        assert!(name.len() <= 220, "a child name must fit: {name}");
+    }
+    mgr.resume_download(&parent).await.unwrap();
+    assert!(
+        wait_for_status(&mgr, &parent, "error", 60).await,
+        "the parent must end error (the merge has no ffmpeg here)"
+    );
+    let video_after = mgr.get_download(&video.id).unwrap().unwrap();
+    let audio_after = mgr.get_download(&audio.id).unwrap().unwrap();
+    assert_eq!(
+        video_after.status, "complete",
+        "the video child must complete — its part file was creatable"
+    );
+    assert_eq!(
+        video_after.downloaded_bytes,
+        512 * 1024,
+        "the video child must have all its bytes"
+    );
+    assert_eq!(
+        audio_after.status, "complete",
+        "the audio child must complete — its part file was creatable"
+    );
+    assert_eq!(
+        audio_after.downloaded_bytes,
+        32 * 1024,
+        "the audio child must have all its bytes"
+    );
+    let parent_after = mgr.get_download(&parent).unwrap().unwrap();
+    let err = parent_after.error_message.unwrap_or_default();
+    assert!(
+        !err.contains("os error 123") && !err.contains("os error 36"),
+        "the parent must not fail with a filename error, got: {err}"
+    );
+}
+
+// -- Round 87: live TikTok (item 4) ----------------------------------------
+
+fn find_on_path(name: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+struct RealYtDlp {
+    dir: std::path::PathBuf,
+    installed: Vec<String>,
+}
+
+#[cfg(unix)]
+impl RealYtDlp {
+    /// Copy the REAL yt-dlp (plus ffmpeg/ffprobe when found on
+    /// PATH) next to the test binary, replacing any fake.
+    /// Panics with a clear message when yt-dlp is not on PATH —
+    /// a live test that silently skipped would prove nothing.
+    fn install() -> Self {
+        let dir = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let mut installed = Vec::new();
+        for name in ["yt-dlp", "ffmpeg", "ffprobe"] {
+            if let Some(src) = find_on_path(name) {
+                let dest = dir.join(name);
+                std::fs::copy(&src, &dest).unwrap();
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))
+                        .unwrap();
+                }
+                installed.push(name.to_string());
+            } else if name == "yt-dlp" {
+                panic!(
+                    "FETCHLINE_REAL_TIKTOK_TEST=1 is set but no yt-dlp binary was found on PATH — install yt-dlp to run this live test"
+                );
+            }
+        }
+        Self { dir, installed }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RealYtDlp {
+    fn drop(&mut self) {
+        for name in &self.installed {
+            let _ = std::fs::remove_file(self.dir.join(name));
+        }
+    }
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn round87_tiktok_standard_video_completes_without_cookies_live() {
+    // Round 87 (item 4) — the live proof that the standard TikTok
+    // video (7223205454032178475, 43,464,728 B) still completes
+    // with NO cookies on the first attempt (it did by hand in
+    // R84): the run's start line must log an argv with no
+    // `--cookies`, no cookie retry may happen, and the success
+    // line must appear. Env-gated like the other real-internet
+    // tests (`FETCHLINE_REAL_TIKTOK_TEST=1`); it needs real yt-dlp
+    // on PATH and internet access, so it cannot run on a bare VM.
+    if std::env::var("FETCHLINE_REAL_TIKTOK_TEST").as_deref() != Ok("1") {
+        println!("SKIPPED: set FETCHLINE_REAL_TIKTOK_TEST=1 to run the live TikTok download (needs real yt-dlp on PATH + internet)");
+        return;
+    }
+    let _fake_guard = FAKE_YTDLP_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _real = RealYtDlp::install();
+    let page_url = "https://www.tiktok.com/@chisbetyu81/video/7223205454032178475";
+    let exe_dir = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let paths = fetchline_engine::ytdlp::locate_sidecars(&exe_dir);
+    let resolved = fetchline_engine::ytdlp::resolve(
+        page_url,
+        &fetchline_engine::ytdlp::ResolveOptions {
+            paths,
+            cookies: vec![],
+            extractor_args: None,
+            timeout_secs: fetchline_engine::ytdlp::RESOLVE_TIMEOUT_SECS,
+        },
+    )
+    .await
+    .expect("the TikTok page must resolve cookieless");
+    let progressive: Vec<_> = resolved
+        .formats
+        .iter()
+        .filter(|f| f.vcodec.as_deref() != Some("none") && f.acodec.as_deref() != Some("none"))
+        .collect();
+    let fmt = progressive
+        .iter()
+        .find(|f| f.format_id == "854")
+        .or_else(|| progressive.iter().max_by_key(|f| f.height.unwrap_or(0)))
+        .expect("the TikTok resolve must offer a progressive video format");
+    let row = fetchline_engine::ytdlp::QualityRow {
+        height: fmt.height.unwrap_or(0),
+        label: format!("{}p", fmt.height.unwrap_or(0)),
+        ext: fmt.ext.clone(),
+        has_audio: true,
+        needs_merge: false,
+        filesize: fmt.filesize,
+        url: fmt.url.clone(),
+        audio_url: None,
+        audio_format_id: None,
+        format_id: fmt.format_id.clone(),
+        headers: fmt.http_headers.clone(),
+        fragmented: fmt.has_fragments,
+    };
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let log_path = dir.join("startup.log");
+    store.set_log_path(log_path.clone());
+    let mut settings = store.get_settings().unwrap();
+    settings.default_download_folder = dir.to_string_lossy().to_string();
+    store.update_settings(&settings).unwrap();
+    let mgr = DownloadManager::new(Arc::clone(&store), 4);
+    let (id, _) = mgr
+        .add_resolved_video_download(
+            page_url,
+            &row,
+            Some("video.mp4".to_string()),
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+    mgr.start_direct_ytdlp(&id).await.unwrap();
+    assert!(
+        wait_for_status(&mgr, &id, "complete", 300).await,
+        "the TikTok video must complete cookieless, last status: {}",
+        mgr.get_download(&id).unwrap().unwrap().status
+    );
+    let dl = mgr.get_download(&id).unwrap().unwrap();
+    assert!(
+        dl.downloaded_bytes > 1_000_000,
+        "the file must be a real video, got {} bytes",
+        dl.downloaded_bytes
+    );
+    assert!(
+        dir.join("video.mp4").exists(),
+        "the file must exist on disk"
+    );
+    let log = std::fs::read_to_string(&log_path).unwrap();
+    assert!(
+        log.contains("direct yt-dlp download"),
+        "the start line must be logged, got: {log}"
+    );
+    assert!(
+        !log.contains("--cookies"),
+        "the first attempt must send no cookies, got: {log}"
+    );
+    assert!(
+        !log.contains("retrying once with the capture's cookies"),
+        "no cookie retry may happen for a video that completes cookieless, got: {log}"
+    );
+    assert!(
+        log.contains("success: exit 0"),
+        "the success line must be logged, got: {log}"
     );
 }

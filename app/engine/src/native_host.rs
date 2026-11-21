@@ -46,18 +46,28 @@ use crate::video::{validate_video_variants, VideoVariantInput};
 pub type VideoVariant = VideoVariantInput;
 
 /// One cookie for a handed-over URL (S13 finish): the browser's
-/// session cookie for that URL, as a name/value pair only — no
-/// domain, path, expiry or flags travel, because the `Cookie`
-/// header needs nothing else and the host must never learn more
-/// than it needs. Sent by the extension (background.js
-/// `cookiesFor`), carried on the pending row until the drain, and
-/// attached to that download's probe and segment requests for that
-/// host only. Never logged, never written to settings, wiped from
-/// the row when the drain decides the link.
+/// session cookie for that URL, as a name/value pair — plus, since
+/// Round 87, the cookie's own domain/path when the browser
+/// reported them (background.js `cookiesFor`), so the scoped
+/// writer can keep a CDN-host cookie on its own host instead of
+/// rewriting every cookie to `.{page host}` + `/`. `domain` /
+/// `path` are `None` for old stored rows and for pairs rebuilt
+/// from a `Cookie` header string, which carries no scope — the
+/// `#[serde(default)]` keeps those parsing. Never logged, never
+/// written to settings, wiped from the row when the drain decides
+/// the link.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CookiePair {
     pub name: String,
     pub value: String,
+    /// The cookie's own domain as the browser reported it
+    /// (".facebook.com" for a domain cookie,
+    /// "video-ord5-2.xx.fbcdn.net" for a host-only one).
+    #[serde(default)]
+    pub domain: Option<String>,
+    /// The cookie's own path ("/" or a deeper path).
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 /// Most cookies the extension can send for one URL, and the most

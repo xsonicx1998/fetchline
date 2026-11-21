@@ -1,4 +1,5 @@
 import { useEffect, useState, type MouseEvent } from 'react'
+import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Copy, Minus, Square, X } from 'lucide-react'
 
@@ -10,17 +11,48 @@ import { Copy, Minus, Square, X } from 'lucide-react'
  *  close buttons on the right.
  *
  *  Dragging: only the left area (icon + title) carries
- *  `data-tauri-drag-region` — the buttons sit OUTSIDE the drag
- *  region on purpose, so they are always clickable (a button
- *  inside a drag region can swallow the click on Windows).
- *  Double-clicking the drag area toggles maximize, like a native
- *  title bar. The maximize glyph follows the live maximized
- *  state (`isMaximized` + the resize listener). Round 86 — the
- *  region alone stalls after ~10 px on Windows when child
- *  elements (the logo img, the title span) intercept
+ *  `data-tauri-drag-region="deep"` — the buttons sit OUTSIDE
+ *  the drag region on purpose, so they are always clickable (a
+ *  button inside a drag region can swallow the click on
+ *  Windows). Double-clicking the drag area toggles maximize,
+ *  like a native title bar. The maximize glyph follows the live
+ *  maximized state (`isMaximized` + the resize listener).
+ *  Round 86 — the region alone stalls after ~10 px on Windows
+ *  when child elements (the logo img, the title span) intercept
  *  hit-testing, so a mousedown on the header also calls
  *  `startDragging()` explicitly (Jumani's fix); buttons and
  *  inputs are skipped.
+ *
+ *  Round 87 — the REAL cause of the R86 Add URL drag failure,
+ *  proven from Tauri 2.12.5's own injected drag script
+ *  (`tauri/src/window/scripts/drag.js`, added to every webview
+ *  by the window plugin): `data-tauri-drag-region="true"` (what
+ *  React renders for `true`) drags ONLY on a mousedown landing
+ *  DIRECTLY on the element carrying the attribute
+ *  (`el === composedPath[0]`). A grab on the logo img or the
+ *  title span — where every user grabs — returns false, so the
+ *  script never calls `preventDefault()` and never starts a
+ *  drag: the mousedown begins a TEXT SELECTION instead. That is
+ *  exactly the R86 retest symptom ("title-bar drag selected
+ *  text"). The R86 comment above misread it as a ~10 px stall;
+ *  for child clicks the native region never starts at all, and
+ *  only the explicit `startDragging()` below saved the main
+ *  window. The fix is `"deep"`: drag.js treats it as "any click
+ *  in the subtree drags" (clickable children still block it, and
+ *  our buttons sit outside the region anyway), so the native
+ *  path handles the drag itself — `preventDefault()` kills the
+ *  text selection and `start_dragging` fires without depending
+ *  on this component's React handler at all. Double-click
+ *  maximize also moves to the native path (drag.js invokes
+ *  `internal_toggle_maximize` on detail === 2), so the React
+ *  `onDoubleClick` is gone — keeping it would toggle maximize
+ *  TWICE (native + React) and net out to nothing.
+ *
+ *  The explicit `startDragging()` stays as a fallback, but its
+ *  failure is no longer silent: the R86 `.catch(() => undefined)`
+ *  hid whether the handler even fired on the Add URL dialog.
+ *  A rejection now goes to `log_frontend` (startup.log) AND
+ *  `console.error`, so the next failure names itself.
  *
  *  The icon is `/icon.png` — the chosen logo, copied into
  *  `app/public/` so Vite bundles it (the src-tauri icons are
@@ -64,7 +96,12 @@ export function TitleBar({
   /** Round 74 (16) — drag + resize apply ONLY to the main window
    *  and the active download progress window. Fixed-size dialogs
    *  (complete, error, standalone Add URL) pass `false`: the drag
-   *  region is omitted, so the window cannot be dragged. */
+   *  region is omitted, so the window cannot be dragged. Round 76
+   *  overrides this for the complete dialog and the standalone
+   *  Add URL window (both pass `true` — the user wants them
+   *  movable); only the error dialog still passes `false`.
+   *  Round 87 — the region is `"deep"` (see the header comment):
+   *  any click in the title-bar subtree drags. */
   draggable?: boolean
 }) {
   const [maximized, setMaximized] = useState(false)
@@ -90,6 +127,19 @@ export function TitleBar({
       unlisten?.()
     }
   }, [])
+
+  // Round 87 — a `startDragging()` failure is never silent
+  // again (see the header comment): the rejection goes to
+  // startup.log via the `log_frontend` command AND to the
+  // DevTools console, so the next failure names itself instead
+  // of leaving a window that will not move. The log invoke is
+  // best-effort — a failure to log must not throw out of the
+  // drag handler.
+  function reportDragError(error: unknown) {
+    const message = `TitleBar startDragging failed: ${error instanceof Error ? error.message : String(error)}`
+    console.error(message)
+    void invoke('log_frontend', { message }).catch(() => undefined)
+  }
 
   // Round 86 — a REAL minimize to the Windows taskbar (see
   // the header comment): the old `hide()` here sent the window
@@ -120,21 +170,29 @@ export function TitleBar({
       <div
         {...(draggable
           ? {
-              'data-tauri-drag-region': true as const,
-              onDoubleClick: toggleMaximize,
+              // Round 87 — "deep", not `true`: see the header
+              // comment. `true` only drags on direct clicks on
+              // this div; the logo and title are children, so
+              // grabbing them selected text instead of dragging.
+              // "deep" drags on any click in the subtree, and
+              // double-click maximize is the native path too.
+              'data-tauri-drag-region': 'deep' as const,
               // Round 86 — reliable drag (Jumani): the drag
               // region alone stalls after ~10 px on Windows
               // when child elements (the logo img, the title
               // span) intercept hit-testing, so a mousedown on
               // the header also starts the drag explicitly.
               // Buttons/inputs are skipped (they sit outside
-              // the region anyway).
+              // the region anyway). Round 87 — the native
+              // "deep" region is now the primary path; this
+              // stays as the fallback, and its failure is
+              // reported, never swallowed (see reportDragError).
               onMouseDown: (e: MouseEvent<HTMLDivElement>) => {
                 if (
                   e.button === 0 &&
                   !(e.target as HTMLElement).closest('button, input')
                 ) {
-                  void getCurrentWindow().startDragging().catch(() => undefined)
+                  void getCurrentWindow().startDragging().catch(reportDragError)
                 }
               },
             }

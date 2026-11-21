@@ -235,6 +235,9 @@ pub fn cookie_header_to_pairs(header: &str) -> Vec<CookiePair> {
             Some(CookiePair {
                 name: name.to_string(),
                 value: value.to_string(),
+                // A `Cookie` header string carries no scope.
+                domain: None,
+                path: None,
             })
         })
         .collect()
@@ -732,25 +735,180 @@ fn json_text(value: &serde_json::Value) -> String {
     }
 }
 
+/// Counts from one `-J` document: how many formats yt-dlp
+/// listed, how many survived the parse, and why the rest did
+/// not — the evidence behind the zero-format diagnosis
+/// (`zero_format_diagnosis`). `protocols` is a histogram of
+/// the raw formats' protocols, in first-seen order.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ParseDiagnostics {
+    pub raw_formats: usize,
+    pub kept_formats: usize,
+    pub skipped_no_url: usize,
+    pub skipped_storyboard: usize,
+    pub protocols: Vec<(String, usize)>,
+    pub has_top_level_url: bool,
+    pub unwrapped_single_entry_playlist: bool,
+}
+
+/// Why one format object was not a downloadable format.
+enum FormatSkip {
+    NoUrl,
+    Storyboard,
+}
+
+/// "1280x720" (or "720x1280") into (width, height).
+fn parse_resolution(text: &str) -> Option<(u32, u32)> {
+    let (w, h) = text.split_once('x')?;
+    let w: u32 = w.trim().parse().ok()?;
+    let h: u32 = h.trim().parse().ok()?;
+    if w == 0 || h == 0 {
+        None
+    } else {
+        Some((w, h))
+    }
+}
+
+/// One format object from a `-J` document, or the reason it is
+/// not a downloadable format: no URL (the SABR shape — a
+/// format yt-dlp knows about but cannot give a URL for is not
+/// downloadable), or a storyboard (a sheet of thumbnails in an
+/// .mhtml wrapper, or a format with neither codec). `filesize`
+/// falls back to `filesize_approx` — an estimate is honest
+/// enough for a size label, and no size at all is worse.
+/// Height falls back to the `resolution` string ("1280x720")
+/// when yt-dlp reports no height; codecs stay absent when
+/// yt-dlp omits them — a missing codec is "unknown", never
+/// invented, and selection treats it as such (see
+/// `select_quality` tier 5 and the `quality_rows` fallback).
+fn format_from_json(f: &serde_json::Value) -> Result<ResolvedFormat, FormatSkip> {
+    let Some(url) = f
+        .get("url")
+        .and_then(|u| u.as_str())
+        .filter(|u| !u.is_empty())
+    else {
+        return Err(FormatSkip::NoUrl);
+    };
+    let protocol = f
+        .get("protocol")
+        .and_then(|p| p.as_str())
+        .unwrap_or("")
+        .to_string();
+    let vcodec = f.get("vcodec").and_then(|v| v.as_str()).map(str::to_string);
+    let acodec = f.get("acodec").and_then(|a| a.as_str()).map(str::to_string);
+    // A storyboard is a sheet of thumbnails in an .mhtml
+    // wrapper (or a format with neither codec): offering
+    // it as a video quality would be a lie.
+    if protocol == "mhtml"
+        || (vcodec.as_deref() == Some("none") && acodec.as_deref() == Some("none"))
+    {
+        return Err(FormatSkip::Storyboard);
+    }
+    let filesize = f
+        .get("filesize")
+        .and_then(|v| v.as_u64())
+        .or_else(|| f.get("filesize_approx").and_then(|v| v.as_u64()));
+    // A format is fragmented when yt-dlp lists its
+    // segments, or when its protocol IS a playlist
+    // protocol — either way the URL is not one file.
+    let has_fragments = f
+        .get("fragments")
+        .and_then(|fr| fr.as_array())
+        .map(|a| !a.is_empty())
+        .unwrap_or(false)
+        || matches!(protocol.as_str(), "m3u8" | "m3u8_native" | "dash");
+    let mut http_headers = HashMap::new();
+    if let Some(obj) = f.get("http_headers").and_then(|h| h.as_object()) {
+        for (k, v) in obj {
+            if let Some(s) = v.as_str() {
+                http_headers.insert(k.clone(), s.to_string());
+            }
+        }
+    }
+    let (mut width, mut height) = (
+        f.get("width").and_then(|v| v.as_u64()).map(|w| w as u32),
+        f.get("height").and_then(|v| v.as_u64()).map(|h| h as u32),
+    );
+    if width.is_none() || height.is_none() {
+        let res = f
+            .get("resolution")
+            .and_then(|r| r.as_str())
+            .and_then(parse_resolution);
+        if let Some((rw, rh)) = res {
+            if width.is_none() {
+                width = Some(rw);
+            }
+            if height.is_none() {
+                height = Some(rh);
+            }
+        }
+    }
+    Ok(ResolvedFormat {
+        format_id: f.get("format_id").map(json_text).unwrap_or_default(),
+        ext: f
+            .get("ext")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        height,
+        width,
+        vcodec,
+        acodec,
+        filesize,
+        url: url.to_string(),
+        protocol,
+        http_headers,
+        has_fragments,
+    })
+}
+
 /// Parse one `yt-dlp --dump-json` document. The shape is
 /// yt-dlp's, not ours: a flat object with a `formats` array,
 /// where each format carries its own codec pair, size, URL,
-/// protocol and headers. Formats with no URL are skipped (the
-/// SABR shape — a format yt-dlp knows about but cannot give
-/// a URL for is not downloadable), and so are storyboards,
-/// which are thumbnail sheets, not media. `filesize` falls
-/// back to `filesize_approx` — an estimate is honest enough
-/// for a size label, and no size at all is worse. The caller
-/// attaches SABR warnings afterwards (`parse_sabr_warnings`),
-/// because degradation is a property of the stderr, not of
-/// the JSON.
+/// protocol and headers. Two shapes that used to come back
+/// empty are handled here, because yt-dlp really does emit
+/// them: a single-entry `_type: "playlist"` wrapper (the
+/// one video inside is the video), and a document with no
+/// `formats` array but a top-level `url` (the whole document
+/// IS one format — the top-level fields are that format's).
+/// The caller attaches SABR warnings afterwards
+/// (`parse_sabr_warnings`), because degradation is a property
+/// of the stderr, not of the JSON.
 pub fn parse_dump_json(json: &str) -> Result<ResolvedVideo, YtDlpError> {
-    let value: serde_json::Value = serde_json::from_str(json).map_err(|e| {
+    parse_dump_json_with_diagnostics(json).map(|(video, _)| video)
+}
+
+/// `parse_dump_json` plus the counts behind it (see
+/// `ParseDiagnostics`): how many formats yt-dlp listed, how
+/// many survived, and why the rest did not. Pure, so the
+/// zero-format diagnosis (`zero_format_diagnosis`) and the
+/// tests can inspect exactly what the document held.
+pub fn parse_dump_json_with_diagnostics(
+    json: &str,
+) -> Result<(ResolvedVideo, ParseDiagnostics), YtDlpError> {
+    let mut value: serde_json::Value = serde_json::from_str(json).map_err(|e| {
         YtDlpError::new(
             YtDlpErrorKind::ParseFailed,
             format!("Could not read yt-dlp's video data: {e}"),
         )
     })?;
+    let mut diag = ParseDiagnostics::default();
+    // A single-entry playlist IS one video: unwrap it, so the
+    // formats inside are the video's formats. A multi-entry
+    // playlist is left alone — `--no-playlist` means it should
+    // never arrive, and picking the first entry would silently
+    // download the wrong video.
+    if value.get("_type").and_then(|t| t.as_str()) == Some("playlist") {
+        let single = value
+            .get("entries")
+            .and_then(|e| e.as_array())
+            .filter(|entries| entries.len() == 1)
+            .map(|entries| entries[0].clone());
+        if let Some(entry) = single {
+            value = entry;
+            diag.unwrapped_single_entry_playlist = true;
+        }
+    }
     let title = value
         .get("title")
         .and_then(|t| t.as_str())
@@ -768,79 +926,190 @@ pub fn parse_dump_json(json: &str) -> Result<ResolvedVideo, YtDlpError> {
         .get("is_live")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    diag.has_top_level_url = value
+        .get("url")
+        .and_then(|u| u.as_str())
+        .map(|u| !u.is_empty())
+        .unwrap_or(false);
     let mut formats = Vec::new();
     if let Some(list) = value.get("formats").and_then(|f| f.as_array()) {
+        diag.raw_formats = list.len();
         for f in list {
-            let Some(url) = f
-                .get("url")
-                .and_then(|u| u.as_str())
-                .filter(|u| !u.is_empty())
-            else {
-                continue;
-            };
-            let protocol = f
+            if let Some(p) = f
                 .get("protocol")
                 .and_then(|p| p.as_str())
-                .unwrap_or("")
-                .to_string();
-            let vcodec = f.get("vcodec").and_then(|v| v.as_str()).map(str::to_string);
-            let acodec = f.get("acodec").and_then(|a| a.as_str()).map(str::to_string);
-            // A storyboard is a sheet of thumbnails in an .mhtml
-            // wrapper (or a format with neither codec): offering
-            // it as a video quality would be a lie.
-            if protocol == "mhtml"
-                || (vcodec.as_deref() == Some("none") && acodec.as_deref() == Some("none"))
+                .filter(|p| !p.is_empty())
             {
-                continue;
-            }
-            let filesize = f
-                .get("filesize")
-                .and_then(|v| v.as_u64())
-                .or_else(|| f.get("filesize_approx").and_then(|v| v.as_u64()));
-            // A format is fragmented when yt-dlp lists its
-            // segments, or when its protocol IS a playlist
-            // protocol — either way the URL is not one file.
-            let has_fragments = f
-                .get("fragments")
-                .and_then(|fr| fr.as_array())
-                .map(|a| !a.is_empty())
-                .unwrap_or(false)
-                || matches!(protocol.as_str(), "m3u8" | "m3u8_native" | "dash");
-            let mut http_headers = HashMap::new();
-            if let Some(obj) = f.get("http_headers").and_then(|h| h.as_object()) {
-                for (k, v) in obj {
-                    if let Some(s) = v.as_str() {
-                        http_headers.insert(k.clone(), s.to_string());
-                    }
+                match diag.protocols.iter_mut().find(|(name, _)| name == p) {
+                    Some((_, n)) => *n += 1,
+                    None => diag.protocols.push((p.to_string(), 1)),
                 }
             }
-            formats.push(ResolvedFormat {
-                format_id: f.get("format_id").map(json_text).unwrap_or_default(),
-                ext: f
-                    .get("ext")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                height: f.get("height").and_then(|v| v.as_u64()).map(|h| h as u32),
-                width: f.get("width").and_then(|v| v.as_u64()).map(|w| w as u32),
-                vcodec,
-                acodec,
-                filesize,
-                url: url.to_string(),
-                protocol,
-                http_headers,
-                has_fragments,
-            });
+            match format_from_json(f) {
+                Ok(fmt) => formats.push(fmt),
+                Err(FormatSkip::NoUrl) => diag.skipped_no_url += 1,
+                Err(FormatSkip::Storyboard) => diag.skipped_storyboard += 1,
+            }
         }
     }
-    Ok(ResolvedVideo {
-        title,
-        is_live,
-        extractor,
-        formats,
-        warnings: Vec::new(),
-        degraded: false,
-    })
+    // No formats array, but a top-level URL: yt-dlp hands some
+    // pages back as one format, not a list — the top-level
+    // fields (format id, ext, height, codecs, headers) are
+    // that format's, so read them the same way. This also
+    // covers a formats array whose every entry was skipped:
+    // the top-level URL is yt-dlp's default format, and it is
+    // a real file.
+    if formats.is_empty() && diag.has_top_level_url {
+        match format_from_json(&value) {
+            Ok(fmt) => formats.push(fmt),
+            Err(FormatSkip::NoUrl) => diag.skipped_no_url += 1,
+            Err(FormatSkip::Storyboard) => diag.skipped_storyboard += 1,
+        }
+    }
+    diag.kept_formats = formats.len();
+    Ok((
+        ResolvedVideo {
+            title,
+            is_live,
+            extractor,
+            formats,
+            warnings: Vec::new(),
+            degraded: false,
+        },
+        diag,
+    ))
+}
+
+/// The ONE line for the log when a resolve returns no usable
+/// quality rows: the raw format count, how many were skipped
+/// and why, the protocol histogram, whether a top-level URL
+/// existed, and how long the resolve took. Count-only — no
+/// URLs, no titles, no cookie values. Returns `None` when
+/// there ARE rows (nothing to explain), and when yt-dlp
+/// listed nothing at all for a NON-video URL (a feed page —
+/// the dialog's "no video here" message already says that,
+/// and a log line would add nothing).
+///
+/// Round 87 scope update — the result is IP-dependent:
+/// Facebook reels WORK from the user's home PC but fail on
+/// the VPS (EC2 IP), and the `-J` itself varies by IP — the
+/// fixture reel fetched from this VM lists `sd`/`hd` with no
+/// height and no codecs, while the R82 fixture (and the home
+/// PC's resolve) carries full height/codec fields. So a zero
+/// has TWO causes, and the line must tell them apart:
+/// (1) yt-dlp listed formats but none survived — the parser
+/// dropped them (the line names the counts); (2) yt-dlp
+/// listed NOTHING for a video-page URL — the site served no
+/// video to this IP (login wall / checkpoint / region block),
+/// not a feed page. Case (2) gets its own line, naming the
+/// host, so the next VPS retest can tell a site block from a
+/// parser bug without re-running anything. The caller puts
+/// the line first in `warnings`, so it rides the existing
+/// warning channel to the dialog and the extension reply.
+pub fn zero_format_diagnosis(
+    video: &ResolvedVideo,
+    diag: &ParseDiagnostics,
+    url: &str,
+    elapsed_ms: u64,
+) -> Option<String> {
+    if !quality_rows(video).is_empty() {
+        return None;
+    }
+    if diag.raw_formats == 0 && !diag.has_top_level_url {
+        // Nothing listed at all: silent for a feed page, but
+        // a video-page URL that yields nothing is evidence —
+        // the site served no video to THIS IP.
+        if !is_video_page_url(url) {
+            return None;
+        }
+        let host = reqwest::Url::parse(url.trim())
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .map(|h| h.strip_prefix("www.").unwrap_or(&h).to_string())
+            .unwrap_or_default();
+        return Some(format!(
+            "resolve returned no usable formats: yt-dlp listed 0 formats for a video page on {host} — the site may have served no video to this IP (login wall / checkpoint / region block), not a feed page; {elapsed_ms}ms",
+        ));
+    }
+    let protocols = if diag.protocols.is_empty() {
+        "none".to_string()
+    } else {
+        diag.protocols
+            .iter()
+            .map(|(p, n)| format!("{p}×{n}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    Some(format!(
+        "resolve returned no usable formats: yt-dlp listed {} format(s), kept {}, quality rows 0; skipped: no URL {}, storyboard {}; protocols: {}; top-level url: {}; {}ms",
+        diag.raw_formats,
+        diag.kept_formats,
+        diag.skipped_no_url,
+        diag.skipped_storyboard,
+        protocols,
+        if diag.has_top_level_url { "yes" } else { "no" },
+        elapsed_ms
+    ))
+}
+
+/// True when a URL is a platform video page (YouTube /
+/// TikTok / Instagram / Facebook) — used only by the
+/// zero-format diagnosis, to tell "the site served nothing
+/// to this IP" apart from "a feed page". Deliberately
+/// STRICTER than the dialog's `isVideoPageUrl` (which
+/// decides "resolve this URL" and lets the zero-rows result
+/// speak): a bare homepage or feed path is NOT a video page
+/// here — facebook.com/, youtube.com/, instagram.com/ and
+/// tiktok.com/ are feeds, /watch/ without a `v` is the
+/// Watch feed — so an empty resolve for one stays silent
+/// instead of crying "site block".
+pub fn is_video_page_url(raw_url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(raw_url.trim()) else {
+        return false;
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return false;
+    }
+    let raw_host = parsed.host_str().unwrap_or("").to_ascii_lowercase();
+    let host = raw_host.strip_prefix("www.").unwrap_or(&raw_host);
+    if host == "youtu.be" {
+        return true;
+    }
+    if host == "youtube.com" || host.ends_with(".youtube.com") {
+        let path = parsed.path();
+        return path == "/watch"
+            || path.starts_with("/watch/")
+            || path.starts_with("/shorts/")
+            || path.starts_with("/live/")
+            || path.starts_with("/embed/")
+            || path.starts_with("/v/");
+    }
+    if host == "tiktok.com" || host.ends_with(".tiktok.com") {
+        // /@user/video/<id> is a video; /, /following and
+        // /explore are feeds.
+        return parsed.path().contains("/video/");
+    }
+    if host == "instagram.com" || host.ends_with(".instagram.com") {
+        let path = parsed.path();
+        return path.starts_with("/reel/") || path.starts_with("/p/") || path.starts_with("/tv/");
+    }
+    if host == "fb.watch" || host.ends_with(".fb.watch") {
+        return true;
+    }
+    if host == "facebook.com" || host.ends_with(".facebook.com") {
+        let path = parsed.path();
+        if path.starts_with("/reel/") || path.contains("/videos/") {
+            return true;
+        }
+        // /watch/?v=<id> is a video; /watch/ on its own is
+        // the Watch feed (the Round 80 case).
+        if (path == "/watch" || path.starts_with("/watch/"))
+            && parsed.query_pairs().any(|(k, v)| k == "v" && !v.is_empty())
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// The SABR-degradation warnings in yt-dlp's stderr: lines
@@ -1008,6 +1277,27 @@ pub fn select_quality(formats: &[ResolvedFormat], height: u32) -> Option<Selecte
     }) {
         return Some(SelectedQuality::Fragmented(best.clone()));
     }
+    // (5) Unknown codecs: a plain https file at this height
+    // whose codecs yt-dlp did not report AT ALL — both fields
+    // absent, not "none" (Facebook reels list `sd`/`hd` with
+    // no vcodec/acodec — verified live against `-J`
+    // 2026-11-21 — and the files ARE progressive mp4 with
+    // audio). Only reached when no known-good progressive,
+    // pair or fragmented pick exists, so a real codec never
+    // loses to an unknown one. A video-only file (real vcodec,
+    // no audio to pair) still gets no pick here — that is the
+    // old behaviour, kept on purpose.
+    let unknown = formats.iter().filter(|f| {
+        f.protocol == "https"
+            && f.height == Some(height)
+            && !f.has_fragments
+            && !f.ext.is_empty()
+            && f.vcodec.is_none()
+            && f.acodec.is_none()
+    });
+    if let Some(best) = unknown.min_by_key(|f| (f.ext != "mp4", f.filesize.unwrap_or(u64::MAX))) {
+        return Some(SelectedQuality::Single(best.clone()));
+    }
     None
 }
 
@@ -1058,6 +1348,15 @@ pub struct QualityRow {
 /// height with no honest selection gets no row at all — so a
 /// video with only audio formats yields an empty list, not a
 /// row that promises video it does not have.
+///
+/// Round 87 — no height anywhere: some extractors list
+/// formats with no height at all (Facebook reels: `sd` /
+/// `hd`, no height, no codecs — the live `-J`, 2026-11-21 —
+/// and the files are 360p / 1080p progressive mp4). No height
+/// is invented: the row's height is 0 and its label is the
+/// format's own name, so the picker shows "sd" / "hd" instead
+/// of a made-up "720p". Rows keep yt-dlp's own order (worst
+/// first), so the last row stays the best pick.
 pub fn quality_rows(video: &ResolvedVideo) -> Vec<QualityRow> {
     let mut heights: Vec<u32> = video
         .formats
@@ -1098,6 +1397,41 @@ pub fn quality_rows(video: &ResolvedVideo) -> Vec<QualityRow> {
             headers: format.http_headers.clone(),
             fragmented,
         });
+    }
+    // No height-keyed row at all: fall back to one row per
+    // downloadable height-less file (see the doc comment
+    // above). The same shape `select_quality` tier 5 accepts
+    // at a known height, minus the height: a plain https
+    // single file whose codecs yt-dlp did not report at all
+    // — not a manifest, not audio-only, not a format that
+    // cannot carry video.
+    if rows.is_empty() {
+        for f in video.formats.iter().filter(|f| {
+            f.protocol == "https"
+                && !f.has_fragments
+                && !f.ext.is_empty()
+                && f.vcodec.is_none()
+                && f.acodec.is_none()
+        }) {
+            rows.push(QualityRow {
+                height: 0,
+                label: if f.format_id.is_empty() {
+                    "Video".to_string()
+                } else {
+                    f.format_id.clone()
+                },
+                ext: f.ext.clone(),
+                has_audio: codec_is_real(&f.acodec),
+                needs_merge: false,
+                filesize: f.filesize,
+                url: f.url.clone(),
+                audio_url: None,
+                audio_format_id: None,
+                format_id: f.format_id.clone(),
+                headers: f.http_headers.clone(),
+                fragmented: false,
+            });
+        }
     }
     rows
 }
@@ -1389,6 +1723,9 @@ async fn resolve_once(
     opts: &ResolveOptions,
     cookies_file: Option<&Path>,
 ) -> Result<ResolvedVideo, YtDlpError> {
+    // Round 87 — the resolve clock, for the zero-format
+    // diagnosis (`zero_format_diagnosis` reports it).
+    let started = std::time::Instant::now();
     let args = build_ytdlp_args(url, opts, cookies_file);
     let mut cmd = std::process::Command::new(&opts.paths.ytdlp);
     cmd.args(&args)
@@ -1485,9 +1822,22 @@ async fn resolve_once(
             "yt-dlp returned no video data.".to_string(),
         ));
     }
-    let mut video = parse_dump_json(&stdout)?;
+    let (mut video, diag) = parse_dump_json_with_diagnostics(&stdout)?;
     video.warnings = parse_sabr_warnings(&stderr);
     video.degraded = is_sabr_degraded(&stderr);
+    // Round 87 — a resolve that returns no usable rows gets
+    // ONE diagnosis line, first in `warnings`, so it rides
+    // the existing warning channel to the dialog and the
+    // extension reply instead of vanishing as a bare "no
+    // formats". Nothing is logged when yt-dlp listed nothing
+    // at all for a non-video URL (a feed page — see
+    // `zero_format_diagnosis`); a video-page URL that yields
+    // nothing gets the site-block line instead.
+    if let Some(line) =
+        zero_format_diagnosis(&video, &diag, url, started.elapsed().as_millis() as u64)
+    {
+        video.warnings.insert(0, line);
+    }
     Ok(video)
 }
 
@@ -1549,25 +1899,106 @@ impl Drop for CookieTempFile {
     }
 }
 
+/// One browser cookie with the scope the browser reported
+/// for it: the domain it was set for and the path it is
+/// scoped to. `CookiePair` (native_host) carries name and
+/// value only, so a scoped cookie is what the extension sends
+/// and what the Netscape writer needs — the plain
+/// `write_cookies_tempfile` builds these with no scope and
+/// falls back to the page host, exactly as before. Until the
+/// host carries the scope through (`CookiePair` has no
+/// domain/path fields yet), the scoped writer is used by the
+/// tests and by any caller that already has scoped cookies;
+/// the resolve path still goes through the plain writer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedCookie {
+    pub name: String,
+    pub value: String,
+    /// The cookie's own domain, as the browser reported it
+    /// (".facebook.com" for a domain cookie,
+    /// "video-ord5-2.xx.fbcdn.net" for a host-only one) —
+    /// `None` means "the page host", the old behaviour.
+    pub domain: Option<String>,
+    /// The cookie's own path ("/" or a deeper path) —
+    /// `None` means "/".
+    pub path: Option<String>,
+}
+
+impl ScopedCookie {
+    /// A `CookiePair` with its own scope when the browser
+    /// reported one — a CDN-host cookie keeps its host (the
+    /// plain writer routes through here, so `resolve()` and
+    /// the direct retry keep the scope too). `None` means the
+    /// old behaviour: the page host and "/".
+    pub fn from_pair(pair: &CookiePair) -> Self {
+        Self {
+            name: pair.name.clone(),
+            value: pair.value.clone(),
+            domain: pair.domain.clone(),
+            path: pair.path.clone(),
+        }
+    }
+}
+
+/// A cookie domain for a Netscape file: no whitespace,
+/// control characters, slashes or separators, no "..", no
+/// trailing dot. A single leading dot is the domain-cookie
+/// form and is kept as-is.
+fn valid_cookie_domain(domain: &str) -> bool {
+    let d = domain.trim();
+    !d.is_empty()
+        && d.len() <= 253
+        && !d.ends_with('.')
+        && !d.contains("..")
+        && d.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
+
+/// A cookie path for a Netscape file: starts with "/", no
+/// whitespace or control characters (those would break the
+/// tab-separated line).
+fn valid_cookie_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.starts_with('/')
+        && path.chars().all(|c| !c.is_whitespace() && !c.is_control())
+}
+
 /// Write the browser's session cookies for one page host to a
 /// temp Netscape cookies file for yt-dlp's `--cookies`.
 ///
-/// `CookiePair` carries no domain — name and value only, by
-/// design, so the host must pass the page host it came from;
-/// guessing a domain (`.youtube.com` for every site) would
-/// send one site's cookies to another. The domain column is
-/// the host with a leading dot, the standard Netscape
-/// domain-cookie form, which matches the host and its
-/// subdomains. Pairs are validated with `cookies_to_header`
-/// first: an invalid pair is an error, never silently dropped,
-/// and validation also guarantees no name or value can break
-/// a line (no tabs, no newlines). The file gets restrictive
-/// Unix permissions (0o600) and a random name.
-pub fn write_cookies_tempfile(
+/// Each cookie is written with ITS OWN domain and path: a
+/// cookie bound to a CDN host keeps that host (yt-dlp only
+/// sends a cookie to a host its domain matches — the old code
+/// rewrote every cookie to `.{page host}` + `/`, so a CDN
+/// cookie never matched the CDN host it was set for), and a
+/// cookie with a non-root path keeps that path. A cookie
+/// without a reported domain/path falls back to `.{page
+/// host}` + `/`, the old behaviour. The domain column's
+/// TRUE/FALSE flag follows the domain: TRUE for a leading-dot
+/// domain cookie (matches subdomains), FALSE for a host-only
+/// domain. Pairs are validated with `cookies_to_header`
+/// first: an invalid pair is an error, never silently
+/// dropped, and validation also guarantees no name or value
+/// can break a line (no tabs, no newlines). A bad domain or
+/// path is an error too, never silently rewritten. The file
+/// gets restrictive Unix permissions (0o600) and a random
+/// name.
+pub fn write_cookies_tempfile_scoped(
     host: &str,
-    pairs: &[CookiePair],
+    cookies: &[ScopedCookie],
 ) -> Result<CookieTempFile, YtDlpError> {
-    if let Err(e) = cookies_to_header(pairs) {
+    let pairs: Vec<CookiePair> = cookies
+        .iter()
+        .map(|c| CookiePair {
+            name: c.name.clone(),
+            value: c.value.clone(),
+            // Validation only needs name/value; the scoped
+            // file below is written from `cookies` itself.
+            domain: None,
+            path: None,
+        })
+        .collect();
+    if let Err(e) = cookies_to_header(&pairs) {
         return Err(YtDlpError::new(
             YtDlpErrorKind::Other,
             format!("Invalid cookies: {e}"),
@@ -1580,16 +2011,47 @@ pub fn write_cookies_tempfile(
             "Cannot write a cookies file without a page host.".to_string(),
         ));
     }
-    let domain = if host.starts_with('.') {
+    let fallback_domain = if host.starts_with('.') {
         host.to_string()
     } else {
         format!(".{host}")
     };
     let mut text = String::from("# Netscape HTTP Cookie File\n");
-    for pair in pairs {
+    for cookie in cookies {
+        let (domain, include_subdomains) = match cookie
+            .domain
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+        {
+            Some(d) => {
+                if !valid_cookie_domain(d) {
+                    return Err(YtDlpError::new(
+                        YtDlpErrorKind::Other,
+                        format!("Invalid cookie domain: {d:?}"),
+                    ));
+                }
+                (d.to_string(), d.starts_with('.'))
+            }
+            None => (fallback_domain.clone(), true),
+        };
+        let path = match cookie.path.as_deref().filter(|p| !p.is_empty()) {
+            Some(p) => {
+                if !valid_cookie_path(p) {
+                    return Err(YtDlpError::new(
+                        YtDlpErrorKind::Other,
+                        format!("Invalid cookie path: {p:?}"),
+                    ));
+                }
+                p.to_string()
+            }
+            None => "/".to_string(),
+        };
         text.push_str(&format!(
-            "{domain}\tTRUE\t/\tFALSE\t0\t{}\t{}\n",
-            pair.name, pair.value
+            "{domain}\t{}\t{path}\tFALSE\t0\t{}\t{}\n",
+            if include_subdomains { "TRUE" } else { "FALSE" },
+            cookie.name,
+            cookie.value
         ));
     }
     let path = std::env::temp_dir().join(format!(
@@ -1608,6 +2070,20 @@ pub fn write_cookies_tempfile(
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     }
     Ok(CookieTempFile { path })
+}
+
+/// Write the browser's session cookies for one page host to a
+/// temp Netscape cookies file for yt-dlp's `--cookies`, from
+/// plain name/value pairs (no scope — see `ScopedCookie`).
+/// Every cookie is written to `.{page host}` + `/`, the old
+/// behaviour; callers that know each cookie's own domain/path
+/// use `write_cookies_tempfile_scoped` instead.
+pub fn write_cookies_tempfile(
+    host: &str,
+    pairs: &[CookiePair],
+) -> Result<CookieTempFile, YtDlpError> {
+    let scoped: Vec<ScopedCookie> = pairs.iter().map(ScopedCookie::from_pair).collect();
+    write_cookies_tempfile_scoped(host, &scoped)
 }
 
 /// Delete stale yt-dlp cookie files in a dir — anything whose
@@ -1784,6 +2260,21 @@ mod tests {
     const TIKTOK: &str = include_str!("../tests/fixtures/ytdlp/tiktok.json");
     const INSTAGRAM: &str = include_str!("../tests/fixtures/ytdlp/instagram.json");
     const FACEBOOK: &str = include_str!("../tests/fixtures/ytdlp/facebook.json");
+    /// Round 87 — the REAL `-J` for
+    /// https://www.facebook.com/reel/2141490136612275/
+    /// (yt-dlp 2026.10.26, fetched 2026-11-21 FROM THIS VM
+    /// through its egress proxy — NOT from the VPS/EC2 IP,
+    /// so it may differ from what the VPS sees: the home
+    /// PC's resolve works while the VPS one fails, and the
+    /// `-J` shape itself varies by IP. The signed query
+    /// strings are redacted to `?redacted` and the
+    /// uploader's payment handles are trimmed from the
+    /// title). The regression: its two formats (`sd`, `hd`)
+    /// carry NO height, NO vcodec, NO acodec — the old
+    /// parse kept them but `quality_rows` dropped them all,
+    /// so Add URL said "no downloadable video" for a reel
+    /// that downloads fine by hand.
+    const FACEBOOK_REEL: &str = include_str!("../tests/fixtures/ytdlp/facebook_reel.json");
 
     /// A hand-built format for selection tests, so the test
     /// states exactly the codec pair / protocol / fragments it
@@ -1893,6 +2384,372 @@ mod tests {
         assert_eq!(facebook.extractor, "Facebook");
         assert_eq!(format_ids(&facebook), vec!["720p"]);
         assert_eq!(facebook.formats[0].height, Some(720));
+    }
+
+    /// Round 87 — the Facebook reel regression: the real
+    /// `-J` lists `sd`/`hd` with no height and no codecs,
+    /// and the old code turned that into zero quality rows
+    /// (Add URL: "No downloadable video was found"). The
+    /// fixture reel must resolve to >= 1 format AND >= 1
+    /// row. The rows carry no invented height (height 0)
+    /// and the format's own name as the label; the best row
+    /// is `hd`, in yt-dlp's own order, with the real CDN URL
+    /// and headers. Ground truth for the files (ffprobe on
+    /// the hand downloads, 2026-11-21): sd is 640x360 h264
+    /// + aac, hd is 1920x1080 av1 + aac — both progressive
+    /// mp4 with audio, which yt-dlp simply does not report.
+    #[test]
+    fn parse_facebook_reel_resolves_to_rows() {
+        let (video, diag) =
+            parse_dump_json_with_diagnostics(FACEBOOK_REEL).expect("the reel fixture parses");
+        // The real `-J` reports the extractor lowercase
+        // ("facebook"; the old fixture said "Facebook").
+        assert_eq!(video.extractor, "facebook");
+        assert_eq!(format_ids(&video), vec!["sd", "hd"]);
+        assert_eq!(diag.raw_formats, 2);
+        assert_eq!(diag.kept_formats, 2);
+        assert_eq!(diag.skipped_no_url, 0);
+        assert_eq!(diag.skipped_storyboard, 0);
+        assert_eq!(diag.protocols, vec![("https".to_string(), 2)]);
+        assert!(diag.has_top_level_url);
+        assert!(!diag.unwrapped_single_entry_playlist);
+        // No height anywhere in the document.
+        assert!(video.formats.iter().all(|f| f.height.is_none()));
+        assert!(video.formats.iter().all(|f| f.vcodec.is_none()));
+        assert!(video.formats.iter().all(|f| f.acodec.is_none()));
+
+        let rows = quality_rows(&video);
+        assert_eq!(rows.len(), 2, "the reel must offer both qualities");
+        assert_eq!(rows[0].label, "sd");
+        assert_eq!(rows[1].label, "hd");
+        assert!(rows.iter().all(|r| r.height == 0));
+        assert!(rows.iter().all(|r| !r.needs_merge && !r.fragmented));
+        let best = rows.last().unwrap();
+        assert_eq!(best.format_id, "hd");
+        assert!(best.url.contains("video-ord5-1.xx.fbcdn.net"));
+        assert!(best
+            .headers
+            .get("User-Agent")
+            .map(|v| v.contains("facebookexternalhit"))
+            .unwrap_or(false));
+        // Rows exist, so there is nothing to diagnose.
+        assert!(zero_format_diagnosis(
+            &video,
+            &diag,
+            "https://www.facebook.com/reel/2141490136612275/",
+            12_000
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn parse_single_entry_playlist_unwraps_the_one_video() {
+        let doc = r#"{
+            "_type": "playlist", "extractor": "Facebook",
+            "entries": [{
+                "title": "Reel", "extractor": "Facebook",
+                "formats": [{
+                    "format_id": "hd", "ext": "mp4", "height": 720,
+                    "vcodec": "h264", "acodec": "aac",
+                    "url": "https://video.fbcdn.net/hd.mp4", "protocol": "https"
+                }]
+            }]
+        }"#;
+        let (video, diag) =
+            parse_dump_json_with_diagnostics(doc).expect("a single-entry playlist parses");
+        assert!(diag.unwrapped_single_entry_playlist);
+        assert_eq!(format_ids(&video), vec!["hd"]);
+        assert_eq!(quality_rows(&video).len(), 1);
+    }
+
+    #[test]
+    fn parse_multi_entry_playlist_is_not_unwrapped() {
+        // `--no-playlist` means this should never arrive; if
+        // it does, guessing the first entry would download the
+        // wrong video, so the document stays a playlist with
+        // no formats — the feed message, not a wrong file.
+        let doc = r#"{
+            "_type": "playlist", "extractor": "generic",
+            "entries": [
+                {"title": "One", "formats": []},
+                {"title": "Two", "formats": []}
+            ]
+        }"#;
+        let (video, diag) =
+            parse_dump_json_with_diagnostics(doc).expect("a multi-entry playlist parses");
+        assert!(!diag.unwrapped_single_entry_playlist);
+        assert!(video.formats.is_empty());
+    }
+
+    #[test]
+    fn parse_top_level_url_becomes_one_format() {
+        let doc = r#"{
+            "title": "Direct", "extractor": "generic",
+            "format_id": "0", "format": "0 - unknown",
+            "ext": "mp4", "height": 720, "vcodec": "h264", "acodec": "aac",
+            "url": "https://example.com/direct.mp4", "protocol": "https"
+        }"#;
+        let (video, diag) =
+            parse_dump_json_with_diagnostics(doc).expect("a top-level-url document parses");
+        assert!(diag.has_top_level_url);
+        assert_eq!(format_ids(&video), vec!["0"]);
+        assert_eq!(quality_rows(&video).len(), 1);
+    }
+
+    #[test]
+    fn parse_resolution_fills_a_missing_height() {
+        let doc = r#"{
+            "title": "Res", "extractor": "generic",
+            "formats": [{
+                "format_id": "a", "ext": "mp4", "resolution": "1280x720",
+                "vcodec": "h264", "acodec": "aac",
+                "url": "https://example.com/a.mp4", "protocol": "https"
+            }]
+        }"#;
+        let video = parse_dump_json(doc).expect("a resolution-only format parses");
+        assert_eq!(video.formats[0].height, Some(720));
+        assert_eq!(video.formats[0].width, Some(1280));
+        assert_eq!(quality_rows(&video).len(), 1);
+    }
+
+    #[test]
+    fn select_quality_accepts_unknown_codec_progressive_last() {
+        // A 720p https mp4 with no codecs at all: no
+        // known-good pick exists, so the unknown-codec tier
+        // takes it as a single file rather than nothing.
+        let unknown = test_format("u", "mp4", Some(720), None, None, Some(100), "https", false);
+        let picked = select_quality(std::slice::from_ref(&unknown), 720)
+            .expect("an unknown-codec progressive is picked");
+        assert!(matches!(picked, SelectedQuality::Single(f) if f.format_id == "u"));
+        // But a real progressive at the same height wins.
+        let known = test_format(
+            "k",
+            "mp4",
+            Some(720),
+            Some("avc1.4d401f"),
+            Some("mp4a.40.2"),
+            Some(200),
+            "https",
+            false,
+        );
+        let picked = select_quality(&[unknown, known], 720).expect("a pick exists");
+        assert!(matches!(picked, SelectedQuality::Single(f) if f.format_id == "k"));
+        // Audio-only never qualifies, even as the last tier.
+        let audio_only = test_format(
+            "a",
+            "m4a",
+            Some(720),
+            None,
+            Some("mp4a.40.2"),
+            Some(50),
+            "https",
+            false,
+        );
+        assert_eq!(select_quality(std::slice::from_ref(&audio_only), 720), None);
+        // Neither can a format that cannot carry video.
+        let no_video = test_format(
+            "n",
+            "mp4",
+            Some(720),
+            Some("none"),
+            Some("mp4a.40.2"),
+            Some(50),
+            "https",
+            false,
+        );
+        assert_eq!(select_quality(std::slice::from_ref(&no_video), 720), None);
+    }
+
+    #[test]
+    fn zero_format_diagnosis_names_the_counts_and_stays_silent_otherwise() {
+        // Audio-only: yt-dlp listed a format, kept it, but
+        // no row can promise video — the line must say so.
+        let audio_only = r#"{
+            "title": "Audio", "extractor": "generic",
+            "formats": [{
+                "format_id": "140", "ext": "m4a", "acodec": "mp4a.40.2",
+                "vcodec": "none",
+                "url": "https://example.com/a.m4a", "protocol": "https"
+            }]
+        }"#;
+        let (video, diag) =
+            parse_dump_json_with_diagnostics(audio_only).expect("an audio-only document parses");
+        assert!(quality_rows(&video).is_empty());
+        let line = zero_format_diagnosis(&video, &diag, "https://example.com/page", 12_345)
+            .expect("an audio-only resolve gets a diagnosis");
+        assert!(line.contains("listed 1 format(s), kept 1, quality rows 0"));
+        assert!(line.contains("protocols: https×1"));
+        assert!(line.contains("top-level url: no"));
+        assert!(line.contains("12345ms"));
+        assert!(!line.contains("example.com"), "no URLs in the line");
+        assert!(!line.contains('\n'), "the diagnosis is ONE line");
+        // A feed page (nothing listed at all) stays silent —
+        // the dialog's feed message already says that.
+        let (feed, feed_diag) = parse_dump_json_with_diagnostics(
+            r#"{"title": "Feed", "extractor": "Facebook", "formats": []}"#,
+        )
+        .expect("a feed document parses");
+        assert!(
+            zero_format_diagnosis(&feed, &feed_diag, "https://www.facebook.com/", 100).is_none()
+        );
+        // The same empty document for a VIDEO-page URL is
+        // evidence, not a feed: the site served no video to
+        // this IP. The line names the host and the suspected
+        // cause, so a VPS retest can tell a site block from
+        // a parser bug.
+        let line = zero_format_diagnosis(
+            &feed,
+            &feed_diag,
+            "https://www.facebook.com/reel/2141490136612275/",
+            12_345,
+        )
+        .expect("an empty resolve for a video page gets a diagnosis");
+        assert!(line.contains("listed 0 formats for a video page on facebook.com"));
+        assert!(line.contains("served no video to this IP"));
+        assert!(line.contains("12345ms"));
+        assert!(
+            !line.contains("2141490136612275"),
+            "host only, never the full URL"
+        );
+        assert!(!line.contains('\n'), "the diagnosis is ONE line");
+        // A document WITH rows stays silent too.
+        let (reel, reel_diag) =
+            parse_dump_json_with_diagnostics(FACEBOOK_REEL).expect("the reel fixture parses");
+        assert!(zero_format_diagnosis(
+            &reel,
+            &reel_diag,
+            "https://www.facebook.com/reel/2141490136612275/",
+            100
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn is_video_page_url_mirrors_the_dialog() {
+        assert!(is_video_page_url(
+            "https://www.facebook.com/reel/2141490136612275/"
+        ));
+        assert!(is_video_page_url(
+            "https://facebook.com/reel/2141490136612275/"
+        ));
+        assert!(is_video_page_url("https://www.facebook.com/watch/?v=123"));
+        assert!(is_video_page_url("https://fb.watch/abc/"));
+        assert!(is_video_page_url(
+            "https://www.instagram.com/reel/DdwixbhzY3_/"
+        ));
+        assert!(is_video_page_url(
+            "https://www.tiktok.com/@user/video/7223205454032178475"
+        ));
+        assert!(is_video_page_url(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        ));
+        assert!(is_video_page_url("https://youtu.be/dQw4w9WgXcQ"));
+        assert!(is_video_page_url("https://www.youtube.com/shorts/abc"));
+        // Feeds are NOT video pages here (stricter than the
+        // dialog's helper, on purpose — see the doc comment):
+        // an empty resolve for one stays silent.
+        assert!(!is_video_page_url("https://www.facebook.com/"));
+        assert!(!is_video_page_url("https://www.facebook.com/watch/"));
+        assert!(!is_video_page_url("https://www.youtube.com/"));
+        assert!(!is_video_page_url("https://www.youtube.com/channel/UC123"));
+        assert!(!is_video_page_url("https://www.instagram.com/"));
+        assert!(!is_video_page_url("https://www.tiktok.com/"));
+        assert!(!is_video_page_url("https://example.com/file.zip"));
+        assert!(!is_video_page_url("not a url"));
+    }
+
+    #[test]
+    fn write_cookies_tempfile_scoped_keeps_each_cookies_own_domain_and_path() {
+        let cookies = vec![
+            ScopedCookie {
+                name: "c_user".to_string(),
+                value: "123".to_string(),
+                domain: Some(".facebook.com".to_string()),
+                path: Some("/".to_string()),
+            },
+            ScopedCookie {
+                name: "cdn_session".to_string(),
+                value: "abc".to_string(),
+                domain: Some("video-ord5-2.xx.fbcdn.net".to_string()),
+                path: Some("/o1/v/t2/".to_string()),
+            },
+            ScopedCookie {
+                name: "plain".to_string(),
+                value: "x".to_string(),
+                domain: None,
+                path: None,
+            },
+        ];
+        let path = {
+            let file = write_cookies_tempfile_scoped("www.facebook.com", &cookies)
+                .expect("scoped cookies write a temp file");
+            let text = std::fs::read_to_string(&file.path).expect("the file reads back");
+            // The domain cookie keeps its own domain and the
+            // subdomain flag; the CDN cookie keeps its CDN
+            // host (host-only: FALSE) and its non-root path.
+            assert!(text.contains(".facebook.com\tTRUE\t/\tFALSE\t0\tc_user\t123"));
+            assert!(text.contains(
+                "video-ord5-2.xx.fbcdn.net\tFALSE\t/o1/v/t2/\tFALSE\t0\tcdn_session\tabc"
+            ));
+            // No scope reported: the old fallback, page host.
+            assert!(text.contains(".www.facebook.com\tTRUE\t/\tFALSE\t0\tplain\tx"));
+            // Nothing was rewritten to the page host.
+            assert_eq!(text.matches(".www.facebook.com").count(), 1);
+            file.path.clone()
+        };
+        assert!(!path.exists(), "dropping the guard deletes the file");
+        // A bad domain / path is an error, never silently
+        // rewritten to the page host.
+        let bad_domain = vec![ScopedCookie {
+            name: "a".to_string(),
+            value: "b".to_string(),
+            domain: Some("not a host".to_string()),
+            path: None,
+        }];
+        assert!(write_cookies_tempfile_scoped("example.com", &bad_domain).is_err());
+        let bad_path = vec![ScopedCookie {
+            name: "a".to_string(),
+            value: "b".to_string(),
+            domain: None,
+            path: Some("no-leading-slash".to_string()),
+        }];
+        assert!(write_cookies_tempfile_scoped("example.com", &bad_path).is_err());
+    }
+
+    #[test]
+    fn write_cookies_tempfile_keeps_pair_domain_and_path() {
+        // Round 87 (3) — the end-to-end wiring: a CookiePair
+        // carrying its own domain/path (as the extension now
+        // sends) must keep them through the plain writer, which
+        // routes via ScopedCookie::from_pair — so resolve() and
+        // the direct retry write the CDN host, not the page host.
+        let pairs = vec![CookiePair {
+            name: "cdn_session".to_string(),
+            value: "abc".to_string(),
+            domain: Some("video-ord5-2.xx.fbcdn.net".to_string()),
+            path: Some("/o1/v/t2/".to_string()),
+        }];
+        let file = write_cookies_tempfile("www.facebook.com", &pairs)
+            .expect("scoped pairs write a temp file");
+        let text = std::fs::read_to_string(&file.path).expect("the file reads back");
+        assert!(text
+            .contains("video-ord5-2.xx.fbcdn.net\tFALSE\t/o1/v/t2/\tFALSE\t0\tcdn_session\tabc"));
+        assert!(!text.contains(".www.facebook.com"));
+        // Old stored rows carry no scope: they still parse
+        // (the #[serde(default)] on the new fields), with
+        // domain/path None — the page-host fallback — instead
+        // of failing to parse and dropping the cookies.
+        let old = crate::native_host::cookies_from_json(r#"[{"name":"x","value":"y"}]"#);
+        assert_eq!(old.len(), 1);
+        assert_eq!(old[0].domain, None);
+        assert_eq!(old[0].path, None);
+        // New JSON round-trips with its scope.
+        let new = crate::native_host::cookies_from_json(
+            r#"[{"name":"x","value":"y","domain":".example.com","path":"/"}]"#,
+        );
+        assert_eq!(new.len(), 1);
+        assert_eq!(new[0].domain.as_deref(), Some(".example.com"));
+        assert_eq!(new[0].path.as_deref(), Some("/"));
     }
 
     #[test]
@@ -2744,10 +3601,14 @@ mod tests {
             CookiePair {
                 name: "session".to_string(),
                 value: "abc123".to_string(),
+                domain: None,
+                path: None,
             },
             CookiePair {
                 name: "consent".to_string(),
                 value: "yes".to_string(),
+                domain: None,
+                path: None,
             },
         ];
         let path = {
@@ -2772,6 +3633,8 @@ mod tests {
         let bad = vec![CookiePair {
             name: "bad name".to_string(),
             value: "x".to_string(),
+            domain: None,
+            path: None,
         }];
         assert!(write_cookies_tempfile("example.com", &bad).is_err());
         // No host, no file.

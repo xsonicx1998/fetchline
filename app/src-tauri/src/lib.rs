@@ -884,6 +884,22 @@ async fn window_ready(window: tauri::WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
+/// Round 87 (1) — one line from the frontend into startup.log.
+/// A frontend failure that only `console.error`s is invisible
+/// on the VPS (the retest reads startup.log, not DevTools), and
+/// the R86 Add URL drag failure stayed undiagnosed exactly
+/// because its `.catch(() => undefined)` swallowed it. Callers
+/// keep `console.error` too — this is the durable copy. The
+/// message is capped so a runaway caller cannot flood the log.
+#[tauri::command]
+async fn log_frontend(app: AppHandle, message: String) -> Result<(), String> {
+    let log = startup_log_path_from_app(&app);
+    let log = log.as_deref();
+    let capped: String = message.chars().take(500).collect();
+    log_startup(log, &format!("frontend: {capped}"));
+    Ok(())
+}
+
 fn build_progress_window(
     app: &AppHandle,
     manager: &Arc<DownloadManager>,
@@ -1212,13 +1228,41 @@ async fn open_complete_dialog(
     let log = startup_log_path_from_app(&app);
     let log = log.as_deref();
     let label = complete_window_label(&download_id);
+    // Round 87 (9) — the PERSISTED setting is authoritative
+    // here, before any window is created: the main window's
+    // in-memory settings are fetched once at mount, so a "Don't
+    // show this dialog again" checked in a dialog window (a
+    // different OS window writing the same Settings store) never
+    // reached it, and the next completion still popped a dialog
+    // in the same session. A settings read that fails falls
+    // through to the old behaviour (show) — a read failure must
+    // not silently eat completions.
+    match state.manager.get_settings() {
+        Ok(settings) => {
+            if !settings.show_download_complete_dialog {
+                log_startup(
+                    log,
+                    &format!(
+                        "complete dialog {label}: skipped — 'Don't show this dialog again' is on"
+                    ),
+                );
+                return Ok(());
+            }
+        }
+        Err(e) => {
+            log_startup(
+                log,
+                &format!("complete dialog {label}: settings read failed ({e}) — showing anyway"),
+            );
+        }
+    }
     // Round 76 (3) — the close is authoritative: the progress
     // window must not survive the complete dialog. The progress
     // window closes itself on its own poll, but that races this
     // open (and never fires at all for a download that was
     // already complete when the window opened), so both windows
     // stayed open together. Close it here, before building (or
-    // focusing) the dialog.
+    // focusing, or queueing into) the dialog.
     let progress_label = progress_window_label(&download_id);
     if let Some(progress) = app.get_webview_window(&progress_label) {
         let _ = progress.close();
@@ -1226,6 +1270,37 @@ async fn open_complete_dialog(
             log,
             &format!("complete dialog {label}: closed progress window {progress_label}"),
         );
+    }
+    // Round 87 (10) — ONE complete dialog at a time, like the
+    // R85 error-dialog queue. Several downloads finishing
+    // together used to stack one OS window each, so one Close
+    // click only dismissed the top copy. If any complete dialog
+    // window already exists, queue this completion INTO it
+    // instead of opening another: the dialog shows "N more
+    // completed" and Close steps through them, with "Dismiss
+    // all" to clear the queue. The frontend listens for
+    // `complete-dialog-queued` (see DownloadCompleteDialog).
+    // The check runs under the window-build mutex, so two
+    // completions in the same poll cannot race past each other
+    // into two windows.
+    if let Some(existing) = app
+        .webview_windows()
+        .values()
+        .find(|w| w.label().starts_with("complete-"))
+    {
+        let _ = existing.emit(
+            "complete-dialog-queued",
+            serde_json::json!({ "download_id": download_id }),
+        );
+        show_window_ready(existing);
+        log_startup(
+            log,
+            &format!(
+                "complete dialog {} already open — queued {download_id} into it",
+                existing.label()
+            ),
+        );
+        return Ok(());
     }
     if let Some(window) = app.get_webview_window(&label) {
         // Already open — bring it forward instead of a second
@@ -4154,6 +4229,7 @@ pub fn run() {
             enqueue_clipboard_capture,
             get_pending_link,
             window_ready,
+            log_frontend,
             set_download_completion_options,
             get_download_completion_options,
             exit_app,

@@ -453,7 +453,12 @@ export function SiteGrabberDialog({ open, queues, onClose, onAdded }: SiteGrabbe
                 {project.start_url}
               </p>
               <p className="mt-1 text-xs text-text-muted">
-                Files go to {(queues.find((q) => q.id === project.queue_id)?.name ?? 'Main download queue')}
+                {/* Round 87 (13c) — the fallback must not name
+                    the hidden main queue, nor claim the files go
+                    to the "New queue": older projects still point
+                    at queue-main, the engine's internal default
+                    bucket, so "Default queue" is the honest label. */}
+                Files go to {(queues.find((q) => q.id === project.queue_id)?.name ?? 'Default queue')}
                 {project.on_complete_action !== 'none'
                   ? ` · ${completeActionLabel(project.on_complete_action)}`
                   : ''}

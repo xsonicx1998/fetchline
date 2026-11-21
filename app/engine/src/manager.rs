@@ -617,10 +617,15 @@ pub struct DownloadManager {
     /// reaches a terminal status, kept on pause (the headers are
     /// still needed on resume).
     download_headers: StdMutex<HashMap<String, crate::probe::RequestHeaders>>,
-    /// Round 78 — download ids that already had one automatic
-    /// re-resolve this session after a 403/410. A re-resolve
-    /// happens at most once per session per download, so a
-    /// permanently-dead signed URL fails instead of looping.
+    /// Round 78 — re-resolve guards, keyed by scope
+    /// (`reresolve_guard_key`): `row:<id>` for a single row's
+    /// re-resolve (`reresolve_once`), `pair-refresh:<parent>`
+    /// for the pre-children pair refresh, `pair:<parent>` for
+    /// the run-level pair re-resolve. Each operation runs at
+    /// most once per session per download, so a permanently-dead
+    /// signed URL fails instead of looping — but the scopes are
+    /// independent (Round 87): a pre-children refresh must not
+    /// block the later pair re-resolve, or vice versa.
     reresolved: StdMutex<HashSet<String>>,
     /// Clipboard monitoring (Round 52): the hash of the last text
     /// seen and the URLs already offered or dismissed, so the same
@@ -1004,6 +1009,19 @@ impl DownloadManager {
         if let Ok(running) = self.running.try_lock() {
             if let Some(r) = running.get(id) {
                 r.per_download_limiter.set_rate_bps(bps);
+            }
+            // Round 87 — a DASH parent's cap is the pair's shared
+            // bucket: re-rate the children's running entries too.
+            // They hold the same `Arc` (see `start_dash_download`),
+            // so one write covers both — updating each is harmless
+            // and also covers children started before the shared
+            // limiter existed (separate buckets, same rate).
+            if let Ok(children) = self.store.list_child_downloads(id) {
+                for child in children {
+                    if let Some(r) = running.get(&child.id) {
+                        r.per_download_limiter.set_rate_bps(bps);
+                    }
+                }
             }
         }
         Ok(())
@@ -2431,6 +2449,7 @@ impl DownloadManager {
                     queue_id,
                     cookies,
                     headers,
+                    row.filesize,
                 )
                 .await
             {
@@ -2672,6 +2691,7 @@ impl DownloadManager {
                 queue_id,
                 cookies,
                 fallback_headers,
+                row.filesize.map(|f| f as i64),
             )
             .await?;
         Ok((
@@ -2753,6 +2773,7 @@ impl DownloadManager {
                     queue_id,
                     cookies.clone(),
                     headers,
+                    row.filesize.map(|f| f as i64),
                 )
                 .await?;
             (
@@ -5028,6 +5049,20 @@ impl DownloadManager {
     /// — the download stays queued, and the queue runner stops
     /// there instead of failing the file.
     pub async fn start_download(self: &Arc<Self>, id: &str) -> Result<()> {
+        self.start_download_with_limiter(id, None).await
+    }
+
+    /// Start a download with an explicit per-download limiter.
+    /// `None` builds the run's own bucket from the row (the
+    /// normal path); `Some` shares the caller's bucket — used
+    /// by `start_dash_download`, so a DASH pair's two children
+    /// draw from ONE bucket built from the parent's cap (Round
+    /// 87) instead of each running uncapped.
+    async fn start_download_with_limiter(
+        self: &Arc<Self>,
+        id: &str,
+        shared_limiter: Option<Arc<RateLimiter>>,
+    ) -> Result<()> {
         let row = self
             .store
             .get_download(id)?
@@ -5070,12 +5105,15 @@ impl DownloadManager {
         let _ = self.store.set_quota_paused(id, false);
         // Per-download cap (S12): this run's own token bucket, read
         // from the row at start time — the effective rate is the min
-        // of this bucket and the global one.
-        let per_download_limiter = Arc::new(RateLimiter::new(
-            row.speed_limit_kbps
-                .map(|k| (k.max(0) as u64).saturating_mul(1024))
-                .unwrap_or(0),
-        ));
+        // of this bucket and the global one. A shared bucket (a
+        // DASH pair) is used as-is.
+        let per_download_limiter = shared_limiter.unwrap_or_else(|| {
+            Arc::new(RateLimiter::new(
+                row.speed_limit_kbps
+                    .map(|k| (k.max(0) as u64).saturating_mul(1024))
+                    .unwrap_or(0),
+            ))
+        });
         let pause = Arc::new(AtomicBool::new(false));
         let retry = Arc::new(RetrySlot::new());
         // Round 86 — expiry-aware start: a resolved row whose
@@ -6063,10 +6101,12 @@ impl DownloadManager {
         let Some(format_id) = row.format_id.clone().filter(|f| !f.trim().is_empty()) else {
             return Ok(false);
         };
-        // At most one re-resolve per download per session.
+        // At most one re-resolve per download per session
+        // (the `row` scope — independent of the pair scopes,
+        // Round 87).
         {
             let mut done = self.reresolved.lock().unwrap();
-            if !done.insert(id.to_string()) {
+            if !done.insert(reresolve_guard_key("row", id)) {
                 return Ok(false);
             }
         }
@@ -6199,7 +6239,10 @@ impl DownloadManager {
         let Some(expire) = url_expire_epoch(&row.url) else {
             return Ok(false);
         };
-        let valid_for = expire - now_unix();
+        // Round 87 — the expiry clock honours the debug-only
+        // SONIC_FORCE_URL_EXPIRE_NOW_PLUS_SECS shift (see
+        // `expire_check_now`).
+        let valid_for = expire - expire_check_now();
         if valid_for > EXPIRY_RERESOLVE_MARGIN_SECS {
             let _ = self.store.log(&format!(
                 "start {id}: url valid for {valid_for} s — no re-resolve"
@@ -6232,8 +6275,11 @@ impl DownloadManager {
     /// their format id, so a later 403 re-resolves the child
     /// directly. Returns `Ok(true)` when at least one child was
     /// updated. Cookieless, like `reresolve_once`, and at most
-    /// once per parent per session (the same `reresolved` set,
-    /// keyed by the parent id).
+    /// once per parent per session (the `pair` scope — a
+    /// pre-children refresh does not consume it, Round 87). A
+    /// resolve that FAILS releases the guard, so a later start
+    /// can retry it instead of failing forever on a transient
+    /// error.
     async fn reresolve_dash_parent(&self, parent_id: &str) -> Result<bool> {
         let parent = self
             .store
@@ -6256,7 +6302,7 @@ impl DownloadManager {
         };
         {
             let mut done = self.reresolved.lock().unwrap();
-            if !done.insert(parent_id.to_string()) {
+            if !done.insert(reresolve_guard_key("pair", parent_id)) {
                 return Ok(false);
             }
         }
@@ -6271,6 +6317,13 @@ impl DownloadManager {
             match self.resolve_dash_pair(&source_url, &format_id).await {
                 Ok(pair) => pair,
                 Err(reason) => {
+                    // Round 87 — a failed resolve releases the
+                    // guard: the pair was NOT re-resolved, so a
+                    // later start must be allowed to try again.
+                    self.reresolved
+                        .lock()
+                        .unwrap()
+                        .remove(&reresolve_guard_key("pair", parent_id));
                     self.store
                         .log(&format!("re-resolve of DASH parent {parent_id}: {reason}"));
                     return Ok(false);
@@ -6409,22 +6462,39 @@ impl DownloadManager {
     /// the best audio-only format (never a silent quality
     /// switch), validate the video size, and return the FRESH
     /// (video URL, audio URL) for the children to be created
-    /// from. `None` when no refresh is needed — or possible: a
-    /// failed refresh never blocks child creation; the
-    /// run-level re-resolve is the fallback. At most one
-    /// re-resolve per parent per session (the same `reresolved`
-    /// guard as `reresolve_once`). The parent's stored URL and
-    /// headers are updated too, so a later Resume sees the
-    /// fresh values; both children inherit the parent's (fresh)
-    /// headers, exactly as today.
+    /// from. `Ok(None)` when no refresh is needed — or when the
+    /// parent carries no page URL / format id (nothing to
+    /// re-resolve from).
+    /// Round 87 — a failed refresh FAILS LOUDLY now (Err): the
+    /// old code fell back to creating the children from the
+    /// expired stored URLs, which could only 403 — and the
+    /// run-level re-resolve was no fallback, because the refresh
+    /// had already consumed the pair guard. The resolve is
+    /// retried once (a transient failure must not fail the
+    /// start outright); a second failure, a different video
+    /// size, or an empty fresh URL returns Err with the reason,
+    /// releases the guard so a later start can retry, and no
+    /// child is ever created from a stale URL. At most one
+    /// successful refresh per parent per session (the
+    /// `pair-refresh` scope — independent of the run-level
+    /// `pair` scope). The parent's stored URL and headers are
+    /// updated too, so a later Resume sees the fresh values;
+    /// both children inherit the parent's (fresh) headers,
+    /// exactly as today.
     async fn refresh_pair_urls_before_children(
         &self,
         parent: &DownloadRow,
         audio_url: &str,
-    ) -> Option<(String, String)> {
-        let source_url = parent.source_url.clone().filter(|u| !u.trim().is_empty())?;
-        let format_id = parent.format_id.clone().filter(|f| !f.trim().is_empty())?;
-        let now = now_unix();
+    ) -> Result<Option<(String, String)>> {
+        let source_url = match parent.source_url.clone().filter(|u| !u.trim().is_empty()) {
+            Some(u) => u,
+            None => return Ok(None),
+        };
+        let format_id = match parent.format_id.clone().filter(|f| !f.trim().is_empty()) {
+            Some(f) => f,
+            None => return Ok(None),
+        };
+        let now = expire_check_now();
         let video_expire = url_expire_epoch(&parent.url);
         let audio_expire = url_expire_epoch(audio_url);
         let stale = |e: Option<i64>| {
@@ -6442,46 +6512,66 @@ impl DownloadManager {
                     .map(|e| (e - now).to_string())
                     .unwrap_or_else(|| "-".to_string()),
             ));
-            return None;
+            return Ok(None);
         }
         {
             let mut done = self.reresolved.lock().unwrap();
-            if !done.insert(parent.id.clone()) {
-                return None;
+            if !done.insert(reresolve_guard_key("pair-refresh", &parent.id)) {
+                return Ok(None);
             }
         }
         let _ = self.store.log(&format!(
             "dash {}: stored URL expired or expiring — re-resolving before creating the children",
             parent.id
         ));
-        let (video_format, audio_format) = match self
-            .resolve_dash_pair(&source_url, &format_id)
-            .await
-        {
-            Ok(pair) => pair,
-            Err(reason) => {
-                let _ = self.store.log(&format!(
-                        "dash {}: pre-children re-resolve failed ({reason}) — creating the children from the stored URLs",
-                        parent.id
-                    ));
-                return None;
-            }
+        // Round 87 — fail loudly on a failed refresh (see the
+        // doc above): release the guard and return Err, so no
+        // child is created from the stale stored URLs and a
+        // later start can retry the refresh.
+        let fail = |mgr: &Self, reason: String| -> EngineError {
+            mgr.reresolved
+                .lock()
+                .unwrap()
+                .remove(&reresolve_guard_key("pair-refresh", &parent.id));
+            let _ = mgr.store.log(&format!(
+                "dash {}: pre-children re-resolve failed ({reason}) — not creating the children from the expired stored URLs",
+                parent.id
+            ));
+            EngineError::InvalidState(format!(
+                "This video's download links expired and could not be refreshed ({reason}) — try starting it again"
+            ))
         };
+        let (video_format, audio_format) =
+            match self.resolve_dash_pair(&source_url, &format_id).await {
+                Ok(pair) => pair,
+                Err(reason) => {
+                    // One retry: a transient resolve failure must
+                    // not fail the start outright.
+                    match self.resolve_dash_pair(&source_url, &format_id).await {
+                        Ok(pair) => pair,
+                        Err(reason2) => {
+                            return Err(fail(self, format!("{reason}; retry: {reason2}")));
+                        }
+                    }
+                }
+            };
         // Same file guard as `reresolve_dash_parent`: a
         // different video size means the resolver found
         // something else, and the stored bytes must never be
         // stitched onto it.
         if let (Some(size), Some(new_size)) = (parent.size_bytes, video_format.filesize) {
             if size != new_size as i64 {
-                let _ = self.store.log(&format!(
-                    "dash {}: pre-children re-resolve found a different video size ({size} -> {new_size}) — keeping the stored URLs",
-                    parent.id
+                return Err(fail(
+                    self,
+                    format!("the refreshed video is a different file ({size} -> {new_size} bytes)"),
                 ));
-                return None;
             }
         }
         if video_format.url.trim().is_empty() || audio_format.url.trim().is_empty() {
-            return None;
+            return Err(fail(
+                self,
+                "the refreshed links came back empty".to_string(),
+            ));
         }
         let video_headers = Self::headers_map_from_http_headers(&video_format.http_headers);
         if !video_headers.is_empty() {
@@ -6493,7 +6583,7 @@ impl DownloadManager {
         let _ = self
             .store
             .set_download_url(&parent.id, &video_format.url, Some(&video_format.url));
-        Some((video_format.url, audio_format.url))
+        Ok(Some((video_format.url, audio_format.url)))
     }
 
     pub async fn ensure_dash_children(
@@ -6584,7 +6674,7 @@ impl DownloadManager {
             // stored URLs unchanged.
             let (video_url, audio_url) = match self
                 .refresh_pair_urls_before_children(&parent, audio_url)
-                .await
+                .await?
             {
                 Some((v, a)) => (v, a),
                 None => (parent.url.clone(), audio_url.to_string()),
@@ -6647,7 +6737,34 @@ impl DownloadManager {
     }
 
     pub async fn start_dash_download(self: &Arc<Self>, id: &str, audio_url: &str) -> Result<()> {
-        let (video_child, audio_child) = self.ensure_dash_children(id, audio_url).await?;
+        let (video_child, audio_child) = match self.ensure_dash_children(id, audio_url).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                // Round 87 — a failed pre-children refresh fails
+                // the start loudly (see
+                // `refresh_pair_urls_before_children`): record it
+                // on the parent, so the user sees why instead of
+                // a parent stuck in 'queued' with no children.
+                let _ = self.store.set_status(id, "error", Some(&e.to_string()));
+                return Err(e);
+            }
+        };
+        // Round 87 — the pair shares ONE per-download limiter,
+        // built from the parent's cap: the children used to get
+        // a fresh unlimited limiter each, so a 1000 KB/s cap on
+        // the parent ran uncapped (16.7 MB/s in the R86 retest).
+        // The global limiter still applies on top, through the
+        // segment workers, exactly as for a plain download.
+        let parent_row = self
+            .store
+            .get_download(id)?
+            .ok_or_else(|| EngineError::NotFound(id.to_string()))?;
+        let shared_limiter = Arc::new(RateLimiter::new(
+            parent_row
+                .speed_limit_kbps
+                .map(|k| (k.max(0) as u64).saturating_mul(1024))
+                .unwrap_or(0),
+        ));
         // The parent runs as a pair from here: status
         // 'downloading', merge pending; the supervisor drives it.
         self.store.set_status(id, "downloading", None)?;
@@ -6657,8 +6774,12 @@ impl DownloadManager {
         // child that is already complete (resume after both
         // finished but the merge never ran) refuses the start —
         // ignored here, the supervisor merges it at once.
-        let _ = self.start_download(&video_child.id).await;
-        let _ = self.start_download(&audio_child.id).await;
+        let _ = self
+            .start_download_with_limiter(&video_child.id, Some(Arc::clone(&shared_limiter)))
+            .await;
+        let _ = self
+            .start_download_with_limiter(&audio_child.id, Some(Arc::clone(&shared_limiter)))
+            .await;
         let this = Arc::clone(self);
         let parent_id = id.to_string();
         let video_id = video_child.id.clone();
@@ -6915,8 +7036,28 @@ impl DownloadManager {
                 }
             }
         }
-        self.emit(parent_id, &parent, &states, speed, status, None)
-            .await;
+        // Round 87 — the states above are rebuilt fresh, so their
+        // `running` flags are always false and `emit` would count
+        // 0 connections for a download running at full speed (the
+        // R86 retest: main window "8 connections", progress window
+        // "0"). Pass the children's summed DB active_connections
+        // instead — the children checkpoint the live count into
+        // their rows, and the supervisor aggregates the same sum
+        // into the parent row.
+        let active_connections: usize = children
+            .iter()
+            .map(|c| c.active_connections.max(0) as usize)
+            .sum();
+        self.emit(
+            parent_id,
+            &parent,
+            &states,
+            speed,
+            status,
+            None,
+            Some(active_connections),
+        )
+        .await;
     }
 
     /// Merge a DASH video+audio pair with the bundled ffmpeg:
@@ -7041,6 +7182,13 @@ impl DownloadManager {
             .get_download(id)?
             .ok_or_else(|| EngineError::NotFound(id.to_string()))?;
         self.store.set_status(id, "downloading", None)?;
+        // Round 87 — emit a live event at once, so the progress
+        // window has a downloading event (with the row's known
+        // size) from the start instead of nothing until the
+        // first yt-dlp progress line: a download with no exact
+        // percent yet shows a downloading state, not a frozen
+        // 0%. The per-line events below carry the real bytes.
+        self.emit_snapshot(id, "downloading").await;
         // Round 86 — the run's start clock: the success line
         // reports elapsed ms, so a direct download's duration is
         // visible without correlating two log lines.
@@ -7075,14 +7223,16 @@ impl DownloadManager {
         // SONIC_FORCE_YTDLP_FORMAT=bogus replaces the -f value
         // so one run fails on purpose and the failure line can
         // be checked for its tail without waiting for a real
-        // failure. Never set in production; an empty value is
-        // ignored, and the forced value is logged in the start
-        // line below (it IS the selector yt-dlp receives).
+        // failure. Round 87 — read through `debug_env`, so the
+        // override fires ONLY in debug/test builds: a release
+        // build never reads it, and a stray value on a user's
+        // machine cannot change what the shipped app downloads.
+        // An empty value is ignored, and the forced value is
+        // logged in the start line below (it IS the selector
+        // yt-dlp receives).
         let mut selector = crate::ytdlp::direct_download_format_selector(&format_id);
-        if let Ok(forced) = std::env::var("SONIC_FORCE_YTDLP_FORMAT") {
-            if !forced.trim().is_empty() {
-                selector = forced;
-            }
+        if let Some(forced) = debug_env("SONIC_FORCE_YTDLP_FORMAT") {
+            selector = forced;
         }
         let save_path_buf = PathBuf::from(&save_path);
         let out_dir = save_path_buf
@@ -7107,30 +7257,26 @@ impl DownloadManager {
                 crate::ytdlp::clean_windows_path(&full).replace('%', "%%")
             )
         };
-        // Round 83 — the direct call gets the same session the
-        // resolve had: the browser's cookies (when the download
-        // was created from a capture that carried them) via a
-        // temp Netscape file (RAII — deleted when this returns),
-        // and the format's User-Agent / Referer as --add-header.
-        // Without them a cookie-gated format fails with exit
-        // code 1 and no message. The manual Add URL flow has no
-        // cookies (its resolve is cookieless), so the file is
-        // only written when the maps hold cookies.
+        // Round 83 — the format's User-Agent / Referer ride as
+        // --add-header on every attempt.
+        // Round 87 — the browser's cookies (when the download
+        // was created from a capture that carried them) are NO
+        // LONGER sent on the first attempt: the per-site consent
+        // design only sends a session when a video NEEDS a
+        // login, and the standard TikTok video completes
+        // cookieless. The cookies are written to a temp Netscape
+        // file (RAII — deleted when the attempt returns) only
+        // for the retry below, after a LoginRequired failure.
+        // The cookies in this map are consent-gated upstream:
+        // the extension only attaches them to a capture after
+        // the per-site `ytdlp_cookie_consent:<host>` grant, so
+        // "cookies present" IS the consent signal — the engine
+        // additionally never sends them before a login-required
+        // error. The manual Add URL flow has no cookies (its
+        // resolve is cookieless), so no retry is possible there.
         let cookies_header = self.cookies.lock().unwrap().get(id).cloned();
         let req_headers = self.headers_for(id);
         let mut cookies_file: Option<crate::ytdlp::CookieTempFile> = None;
-        if let Some(header) = cookies_header.as_deref().filter(|h| !h.trim().is_empty()) {
-            let pairs = crate::ytdlp::cookie_header_to_pairs(header);
-            let host = url_host(&source_url).unwrap_or_default();
-            match crate::ytdlp::write_cookies_tempfile(&host, &pairs) {
-                Ok(file) => cookies_file = Some(file),
-                Err(e) => {
-                    let _ = self.store.log(&format!(
-                        "direct yt-dlp download {id}: could not write a cookies file ({e}) — continuing without cookies"
-                    ));
-                }
-            }
-        }
         // Round 85 (Claude delta) — the whole argv is built by
         // ONE pure function (`build_direct_ytdlp_args`,
         // ytdlp.rs): the R84 bug was `--ffmpeg-location` /
@@ -7143,25 +7289,6 @@ impl DownloadManager {
         // order); `cmd` gets exactly this list, and the failure
         // log below prints exactly this list (redacted) —
         // nothing else is ever added to the command.
-        let argv = crate::ytdlp::build_direct_ytdlp_args(&crate::ytdlp::DirectYtDlpArgs {
-            format_selector: selector,
-            out_dir,
-            out_template,
-            cookies_file: cookies_file.as_ref().map(|f| f.path.clone()),
-            user_agent: req_headers.as_ref().and_then(|h| h.user_agent.clone()),
-            referer: req_headers.as_ref().and_then(|h| h.referer.clone()),
-            ffmpeg_dir: if paths.ffmpeg.is_some() && paths.ffprobe.is_some() {
-                paths
-                    .ffmpeg
-                    .as_ref()
-                    .and_then(|f| f.parent())
-                    .map(|p| p.to_path_buf())
-            } else {
-                None
-            },
-            qjs: paths.qjs.clone(),
-            source_url: source_url.clone(),
-        });
         // Round 86 — the start line (Claude Q2): the old code
         // logged only the cookies-file failure and the failure
         // line, so the successful R85 TikTok download left NO
@@ -7178,147 +7305,220 @@ impl DownloadManager {
             "fragmented"
         };
         let version = crate::ytdlp::ytdlp_version(&paths).await;
-        let _ = self.store.log(&format!(
-            "direct yt-dlp download {id} start: reason={direct_reason}; yt-dlp {}; format_id {format_id}; page host {}; argv: {}",
-            version.as_deref().unwrap_or("unknown"),
-            url_host(&source_url).unwrap_or_default(),
-            crate::ytdlp::redact_ytdlp_text(&argv.join(" ")),
-        ));
-        let mut cmd = tokio::process::Command::new(&paths.ytdlp);
-        cmd.args(&argv);
-        #[cfg(windows)]
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        cmd.kill_on_drop(true);
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| EngineError::InvalidState(format!("Could not start yt-dlp: {e}")))?;
-        // Round 83 — both streams are read line by line
-        // (splitting on '\n' AND '\r': progress updates are
-        // '\r'-separated when piped). Progress comes from
-        // stdout — yt-dlp prints `[download] 42.1% of
-        // 123.45MiB at 1.23MiB/s ETA 00:41` there, not on
-        // stderr (verified live with yt-dlp 2026.10.26); the
-        // old code drained stdout and discarded it and parsed
-        // only stderr, so progress never updated on this path.
-        // Every line also goes to the ring buffer (see
-        // YtDlpOutputTail), so a failure reports the real
-        // reason instead of only its exit code.
-        let (progress_tx, mut progress_rx) =
-            tokio::sync::mpsc::channel::<(f64, Option<u64>, Option<u64>, Option<u64>)>(32);
-        let (line_tx, mut line_rx) = tokio::sync::mpsc::channel::<(bool, String)>(256);
-        if let Some(stdout) = child.stdout.take() {
-            let tx = line_tx.clone();
-            let ptx = progress_tx.clone();
-            tokio::spawn(async move {
-                drain_ytdlp_lines(stdout, false, tx, Some(ptx)).await;
+        // Round 87 — the attempt loop: attempt 1 is always
+        // cookieless (see the cookies comment above); only a
+        // LoginRequired failure retries, once, with the
+        // capture's cookies. The argv is rebuilt per attempt —
+        // the retry's argv carries `--cookies`, the first
+        // attempt's never does.
+        let mut attempt_no = 0u32;
+        'attempts: loop {
+            attempt_no += 1;
+            let argv = crate::ytdlp::build_direct_ytdlp_args(&crate::ytdlp::DirectYtDlpArgs {
+                format_selector: selector.clone(),
+                out_dir: out_dir.clone(),
+                out_template: out_template.clone(),
+                cookies_file: cookies_file.as_ref().map(|f| f.path.clone()),
+                user_agent: req_headers.as_ref().and_then(|h| h.user_agent.clone()),
+                referer: req_headers.as_ref().and_then(|h| h.referer.clone()),
+                ffmpeg_dir: if paths.ffmpeg.is_some() && paths.ffprobe.is_some() {
+                    paths
+                        .ffmpeg
+                        .as_ref()
+                        .and_then(|f| f.parent())
+                        .map(|p| p.to_path_buf())
+                } else {
+                    None
+                },
+                qjs: paths.qjs.clone(),
+                source_url: source_url.clone(),
             });
-        }
-        if let Some(stderr) = child.stderr.take() {
-            let tx = line_tx.clone();
-            tokio::spawn(async move {
-                drain_ytdlp_lines(stderr, true, tx, None).await;
-            });
-        }
-        drop(line_tx);
-        drop(progress_tx);
-        let mut tail = crate::ytdlp::YtDlpOutputTail::new();
-        let mut total_size: Option<u64> = row.size_bytes.map(|s| s as u64);
-        loop {
-            tokio::select! {
-                _ = tokio::time::sleep(Duration::from_millis(250)) => {
-                    if pause.load(Ordering::SeqCst) {
-                        let _ = child.kill().await;
-                        let _ = child.wait().await;
-                        self.store.set_status(id, "paused", None)?;
-                        self.emit_snapshot(id, "paused").await;
-                        return Ok(());
-                    }
-                    if let Ok(Some(status)) = child.try_wait() {
-                        if !status.success() {
-                            // Round 83 — drain whatever lines
-                            // are still queued, then report the
-                            // real reason: the redacted tail goes
-                            // to startup.log (with the redacted
-                            // argv, the yt-dlp version and the
-                            // format id) and the mapped reason
-                            // goes to the user. The branch
-                            // (fragmented format vs probe-refused
-                            // fallback) is in startup.log's
-                            // "resolved add: probe of ... refused"
-                            // lines.
-                            // Round 85 — the drain is BLOCKING
-                            // (400 ms deadline, 15 ms sleeps):
-                            // a bare `try_recv` loop only took
-                            // what was already queued when the
-                            // child exited, so stderr lines still
-                            // in flight from the drain tasks were
-                            // lost and the tail read empty.
-                            drain_ytdlp_line_rx_blocking(&mut line_rx, &mut tail).await;
-                            // `version` is the one from the start
-                            // line above — one `--version` call per
-                            // run, not one per outcome.
-                            // Round 85 — the tail is ONE line
-                            // (`render_one_line`, lines joined
-                            // with " | "): the old multi-line
-                            // "tail:\n{...}" made grep /
-                            // Select-String show `tail:` empty
-                            // while the reason sat on the lines
-                            // below it. The mapped error is still
-                            // built from `error_text` on the SAME
-                            // tail object, just before this log.
-                            let redacted_tail =
-                                crate::ytdlp::redact_ytdlp_text(&tail.render_one_line());
-                            let mapped =
-                                crate::ytdlp::map_error(&crate::ytdlp::redact_ytdlp_text(
-                                    &tail.error_text(),
-                                ));
-                            let _ = self.store.log(&format!(
-                                "direct yt-dlp download {id} failed: {status}; yt-dlp {}; format_id {format_id}; page {}; argv: {}; tail: {}",
-                                version.as_deref().unwrap_or("unknown"),
-                                crate::ytdlp::redact_ytdlp_text(&source_url),
-                                crate::ytdlp::redact_ytdlp_text(&argv.join(" ")),
-                                redacted_tail,
-                            ));
-                            return Err(EngineError::InvalidState(format!(
-                                "yt-dlp exited with {status} while downloading this video: {}",
-                                mapped.user_message()
-                            )));
+            if attempt_no == 1 {
+                let _ = self.store.log(&format!(
+                    "direct yt-dlp download {id} start: reason={direct_reason}; yt-dlp {}; format_id {format_id}; page host {}; argv: {}",
+                    version.as_deref().unwrap_or("unknown"),
+                    url_host(&source_url).unwrap_or_default(),
+                    crate::ytdlp::redact_ytdlp_text(&argv.join(" ")),
+                ));
+            } else {
+                let _ = self.store.log(&format!(
+                    "direct yt-dlp download {id} retry (attempt {attempt_no}): with the capture's cookies; argv: {}",
+                    crate::ytdlp::redact_ytdlp_text(&argv.join(" ")),
+                ));
+            }
+            let mut cmd = tokio::process::Command::new(&paths.ytdlp);
+            cmd.args(&argv);
+            #[cfg(windows)]
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            cmd.kill_on_drop(true);
+            cmd.stdout(std::process::Stdio::piped());
+            cmd.stderr(std::process::Stdio::piped());
+            let mut child = cmd
+                .spawn()
+                .map_err(|e| EngineError::InvalidState(format!("Could not start yt-dlp: {e}")))?;
+            // Round 83 — both streams are read line by line
+            // (splitting on '\n' AND '\r': progress updates are
+            // '\r'-separated when piped). Progress comes from
+            // stdout — yt-dlp prints `[download] 42.1% of
+            // 123.45MiB at 1.23MiB/s ETA 00:41` there, not on
+            // stderr (verified live with yt-dlp 2026.10.26); the
+            // old code drained stdout and discarded it and parsed
+            // only stderr, so progress never updated on this path.
+            // Every line also goes to the ring buffer (see
+            // YtDlpOutputTail), so a failure reports the real
+            // reason instead of only its exit code.
+            let (progress_tx, mut progress_rx) =
+                tokio::sync::mpsc::channel::<(f64, Option<u64>, Option<u64>, Option<u64>)>(32);
+            let (line_tx, mut line_rx) = tokio::sync::mpsc::channel::<(bool, String)>(256);
+            if let Some(stdout) = child.stdout.take() {
+                let tx = line_tx.clone();
+                let ptx = progress_tx.clone();
+                tokio::spawn(async move {
+                    drain_ytdlp_lines(stdout, false, tx, Some(ptx)).await;
+                });
+            }
+            if let Some(stderr) = child.stderr.take() {
+                let tx = line_tx.clone();
+                tokio::spawn(async move {
+                    drain_ytdlp_lines(stderr, true, tx, None).await;
+                });
+            }
+            drop(line_tx);
+            drop(progress_tx);
+            let mut tail = crate::ytdlp::YtDlpOutputTail::new();
+            let mut total_size: Option<u64> = row.size_bytes.map(|s| s as u64);
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                        if pause.load(Ordering::SeqCst) {
+                            let _ = child.kill().await;
+                            let _ = child.wait().await;
+                            self.store.set_status(id, "paused", None)?;
+                            self.emit_snapshot(id, "paused").await;
+                            return Ok(());
                         }
-                        break;
+                        if let Ok(Some(status)) = child.try_wait() {
+                            if !status.success() {
+                                // Round 83 — drain whatever lines
+                                // are still queued, then report the
+                                // real reason: the redacted tail goes
+                                // to startup.log (with the redacted
+                                // argv, the yt-dlp version and the
+                                // format id) and the mapped reason
+                                // goes to the user. The branch
+                                // (fragmented format vs probe-refused
+                                // fallback) is in startup.log's
+                                // "resolved add: probe of ... refused"
+                                // lines.
+                                // Round 85 — the drain is BLOCKING
+                                // (400 ms deadline, 15 ms sleeps):
+                                // a bare `try_recv` loop only took
+                                // what was already queued when the
+                                // child exited, so stderr lines still
+                                // in flight from the drain tasks were
+                                // lost and the tail read empty.
+                                drain_ytdlp_line_rx_blocking(&mut line_rx, &mut tail).await;
+                                // `version` is the one from the start
+                                // line above — one `--version` call per
+                                // run, not one per outcome.
+                                // Round 85 — the tail is ONE line
+                                // (`render_one_line`, lines joined
+                                // with " | "): the old multi-line
+                                // "tail:\n{...}" made grep /
+                                // Select-String show `tail:` empty
+                                // while the reason sat on the lines
+                                // below it. The mapped error is still
+                                // built from `error_text` on the SAME
+                                // tail object, just before this log.
+                                let redacted_tail =
+                                    crate::ytdlp::redact_ytdlp_text(&tail.render_one_line());
+                                let mapped =
+                                    crate::ytdlp::map_error(&crate::ytdlp::redact_ytdlp_text(
+                                        &tail.error_text(),
+                                    ));
+                                let _ = self.store.log(&format!(
+                                    "direct yt-dlp download {id} failed: attempt {attempt_no}, {status}; yt-dlp {}; format_id {format_id}; page {}; argv: {}; tail: {}",
+                                    version.as_deref().unwrap_or("unknown"),
+                                    crate::ytdlp::redact_ytdlp_text(&source_url),
+                                    crate::ytdlp::redact_ytdlp_text(&argv.join(" ")),
+                                    redacted_tail,
+                                ));
+                                // Round 87 — cookieless first attempt:
+                                // a LoginRequired failure retries ONCE
+                                // with the capture's cookies (consented
+                                // at capture — see the cookies comment
+                                // above). Any other failure, a second
+                                // failure, or no cookies at all fails
+                                // exactly as before.
+                                if attempt_no == 1
+                                    && mapped.kind == crate::ytdlp::YtDlpErrorKind::LoginRequired
+                                {
+                                    if let Some(header) = cookies_header
+                                        .as_deref()
+                                        .filter(|h| !h.trim().is_empty())
+                                    {
+                                        let pairs =
+                                            crate::ytdlp::cookie_header_to_pairs(header);
+                                        let host = url_host(&source_url).unwrap_or_default();
+                                        match crate::ytdlp::write_cookies_tempfile(&host, &pairs)
+                                        {
+                                            Ok(file) => {
+                                                let _ = self.store.log(&format!(
+                                                    "direct yt-dlp download {id}: first attempt failed with login_required — retrying once with the capture's cookies"
+                                                ));
+                                                cookies_file = Some(file);
+                                                continue 'attempts;
+                                            }
+                                            Err(e) => {
+                                                let _ = self.store.log(&format!(
+                                                    "direct yt-dlp download {id}: could not write a cookies file ({e}) — no cookie retry"
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                                return Err(EngineError::InvalidState(format!(
+                                    "yt-dlp exited with {status} while downloading this video: {}",
+                                    mapped.user_message()
+                                )));
+                            }
+                            break;
+                        }
                     }
-                }
-                Some((pct, total, speed, eta)) = progress_rx.recv() => {
-                    if total.is_some() {
-                        total_size = total;
-                        let _ = self
-                            .store
-                            .update_known_remote(id, total.map(|t| t as i64), None, None);
+                    Some((pct, total, speed, eta)) = progress_rx.recv() => {
+                        if total.is_some() {
+                            total_size = total;
+                            let _ = self
+                                .store
+                                .update_known_remote(id, total.map(|t| t as i64), None, None);
+                        }
+                        last_progress_ms.store(now_millis(), Ordering::SeqCst);
+                        let downloaded = match total_size {
+                            Some(t) => (pct / 100.0 * t as f64) as i64,
+                            None => 0,
+                        };
+                        let _ = self.store.checkpoint(
+                            id,
+                            downloaded.max(0),
+                            speed.map(|s| s as i64).unwrap_or(0),
+                            eta.map(|e| e as i64),
+                            0,
+                            0,
+                        );
+                        self.emit_snapshot(id, "downloading").await;
                     }
-                    last_progress_ms.store(now_millis(), Ordering::SeqCst);
-                    let downloaded = match total_size {
-                        Some(t) => (pct / 100.0 * t as f64) as i64,
-                        None => 0,
-                    };
-                    let _ = self.store.checkpoint(
-                        id,
-                        downloaded.max(0),
-                        speed.map(|s| s as i64).unwrap_or(0),
-                        eta.map(|e| e as i64),
-                        0,
-                        0,
-                    );
-                    self.emit_snapshot(id, "downloading").await;
-                }
-                Some((is_err, line)) = line_rx.recv() => {
-                    if is_err {
-                        tail.push_stderr(&line);
-                    } else {
-                        tail.push_stdout(&line);
+                    Some((is_err, line)) = line_rx.recv() => {
+                        if is_err {
+                            tail.push_stderr(&line);
+                        } else {
+                            tail.push_stdout(&line);
+                        }
                     }
                 }
             }
+            // yt-dlp exited 0: leave the attempt loop — the
+            // output file is checked below.
+            break 'attempts;
         }
         // yt-dlp wrote the file directly to the save path — or,
         // when the merged container differs from the row's
@@ -7336,10 +7536,33 @@ impl DownloadManager {
         }
         match std::fs::metadata(&save_path) {
             Ok(m) if m.len() > 0 => {
-                let _ = self
+                // Round 87 — set the final bytes in constraint-safe
+                // order: the schema requires `downloaded <= size`
+                // on EVERY write and `downloaded = size` when
+                // complete. The progress total can overstate the
+                // file (a rounded/approximate total, a merge), so
+                // writing the smaller file size first fails the
+                // `downloaded <= size` check while `downloaded`
+                // still holds the progress total — and the failure
+                // is swallowed, so `mark_complete` then fails the
+                // equality check and a finished file is reported as
+                // an error (the progress-test fake proved it: a
+                // 10 MiB total vs a 23-byte file). When the size
+                // write fails, lower `downloaded` to the file size
+                // first and retry it; the final checkpoint then
+                // makes both equal for `mark_complete`.
+                let final_size = m.len() as i64;
+                if self
                     .store
-                    .update_known_remote(id, Some(m.len() as i64), None, None);
-                let _ = self.store.checkpoint(id, m.len() as i64, 0, None, 0, 0);
+                    .update_known_remote(id, Some(final_size), None, None)
+                    .is_err()
+                {
+                    let _ = self.store.checkpoint(id, final_size, 0, None, 0, 0);
+                    let _ = self
+                        .store
+                        .update_known_remote(id, Some(final_size), None, None);
+                }
+                let _ = self.store.checkpoint(id, final_size, 0, None, 0, 0);
                 self.store.mark_complete(id)?;
                 // Round 86 — the success line (Claude Q2): exit
                 // 0, final size, elapsed ms, final path — the
@@ -7380,6 +7603,13 @@ impl DownloadManager {
         queue_id: Option<String>,
         cookies: Option<String>,
         headers: Option<crate::probe::RequestHeaders>,
+        // Round 87 — the resolved format's size, so the row is
+        // created with a known total: without it the progress
+        // window's percent is null (an indeterminate third-full
+        // bar) until the first yt-dlp progress line, even though
+        // the resolver already knew the size. `None` keeps the
+        // old behaviour (unknown until the first progress line).
+        size_bytes: Option<i64>,
     ) -> Result<String> {
         let settings = self.store.get_settings().unwrap_or_default();
         if let Some(host) = url_host(url) {
@@ -7445,7 +7675,7 @@ impl DownloadManager {
             &name,
             &save_path.to_string_lossy(),
             &category,
-            None,
+            size_bytes,
             None,
             None,
             None,
@@ -7621,6 +7851,40 @@ impl DownloadManager {
     /// owns the fanfare). Used by the segmented `run` and the
     /// (B) `run_ytdlp_direct` — one place, so a (B) download
     /// sounds and cleans up exactly like a segmented one.
+    /// Round 87 — rescue a run that failed AFTER its file
+    /// completed: the final file is on disk, its size is the
+    /// expected size, and the run delivered at least those bytes.
+    /// Returns `true` when it rescued (the row is complete and a
+    /// complete event was emitted); `false` when there is nothing
+    /// to rescue and the caller must fail the run as usual. A
+    /// `mark_complete` failure inside the rescue falls back to a
+    /// plain status flip, so the row never stays `downloading`
+    /// with a complete file on disk.
+    async fn try_rescue_completed_download(&self, id: &str, e: &EngineError) -> bool {
+        let Ok(Some(row)) = self.store.get_download(id) else {
+            return false;
+        };
+        let Ok(m) = std::fs::metadata(&row.save_path) else {
+            return false;
+        };
+        let len = m.len();
+        if len == 0
+            || !m.is_file()
+            || row.size_bytes != Some(len as i64)
+            || row.downloaded_bytes < len as i64
+        {
+            return false;
+        }
+        let _ = self.store.log(&format!(
+            "finish_run {id}: run failed after the file completed ({len} bytes) — completing instead of failing: {e}"
+        ));
+        if self.store.mark_complete(id).is_err() {
+            let _ = self.store.set_status(id, "complete", None);
+        }
+        self.emit_snapshot(id, "complete").await;
+        true
+    }
+
     async fn finish_run(&self, id: &str, outcome: Result<()>, retry: &Arc<RetrySlot>) {
         // The run is over for every outcome: paused, complete, error.
         // No segment is waiting any more, whatever the outcome was.
@@ -7636,23 +7900,35 @@ impl DownloadManager {
         // current one; the `ptr_eq` check below is the backstop).
         self.thread_watchdogs.lock().unwrap().remove(id);
         if let Err(e) = outcome {
-            let _ = self.store.set_status(id, "error", Some(&e.to_string()));
-            // Round 86 — a failed download whose `.part` holds
-            // no real bytes is an empty pre-allocation
-            // (`run_inner` calls `set_len` on it at start), not
-            // a resumable partial: the R85 retest found a
-            // 43,464,728-byte `.part` that is empty. Delete it
-            // so a full-size empty file never masquerades as a
-            // download. Any real byte keeps the file for resume.
-            if let Ok(Some(row)) = self.store.get_download(id) {
-                if should_delete_empty_part(row.downloaded_bytes) {
-                    let part = part_path(&row.save_path);
-                    if part.exists() {
-                        let _ = std::fs::remove_file(&part);
+            // Round 87 — a post-download step failure must not flip
+            // a finished download to Failed: when the final file is
+            // already on disk, complete and verified, the download
+            // IS finished — log the late error and complete it
+            // instead of erroring (the concrete case was the direct
+            // completion's CHECK-constraint ordering: the file was
+            // complete, the size write failed, `mark_complete`
+            // failed, and the row went to error while the video
+            // played fine). A missing/short file, or a run that
+            // delivered nothing, still fails exactly as before.
+            if !self.try_rescue_completed_download(id, &e).await {
+                let _ = self.store.set_status(id, "error", Some(&e.to_string()));
+                // Round 86 — a failed download whose `.part` holds
+                // no real bytes is an empty pre-allocation
+                // (`run_inner` calls `set_len` on it at start), not
+                // a resumable partial: the R85 retest found a
+                // 43,464,728-byte `.part` that is empty. Delete it
+                // so a full-size empty file never masquerades as a
+                // download. Any real byte keeps the file for resume.
+                if let Ok(Some(row)) = self.store.get_download(id) {
+                    if should_delete_empty_part(row.downloaded_bytes) {
+                        let part = part_path(&row.save_path);
+                        if part.exists() {
+                            let _ = std::fs::remove_file(&part);
+                        }
                     }
                 }
+                self.emit_snapshot(id, "error").await;
             }
-            self.emit_snapshot(id, "error").await;
         }
         // Sounds (S09): read the stored status, not the outcome —
         // `run_inner` also returns Ok for a pause, and a pause is
@@ -8519,7 +8795,7 @@ impl DownloadManager {
                         last_checkpoint = Instant::now();
                     }
                     if last_emit.elapsed() >= PROGRESS_INTERVAL {
-                        self.emit(id, &row, &states, speed_bps, "downloading", Some(retry)).await;
+                        self.emit(id, &row, &states, speed_bps, "downloading", Some(retry), None).await;
                         last_emit = Instant::now();
                     }
                     // Round 71 (B2/B3) — offer a freed slot every
@@ -8745,7 +9021,7 @@ impl DownloadManager {
             }
             Err(_) => {}
         }
-        self.emit(id, &row, &states, 0, "complete", Some(retry))
+        self.emit(id, &row, &states, 0, "complete", Some(retry), None)
             .await;
         Ok(())
     }
@@ -9217,6 +9493,12 @@ impl DownloadManager {
         speed_bps: u64,
         status: &str,
         retry: Option<&RetrySlot>,
+        // Round 87 — an explicit connection count, for callers
+        // whose states are rebuilt fresh (their `running` flags
+        // are always false): `emit_dash_progress` passes the
+        // children's summed DB active_connections. `None` counts
+        // the running flags as before (the plain path).
+        active_connections: Option<usize>,
     ) {
         // Round 78 — a DASH child row never emits progress or
         // completion events of its own: the parent aggregates
@@ -9226,7 +9508,20 @@ impl DownloadManager {
         if row.parent_id.is_some() {
             return;
         }
-        let total: u64 = states.iter().map(|s| s.lock().unwrap().done).sum();
+        // Round 87 — a direct yt-dlp download has no segments,
+        // so the states sum is 0 and the progress window (which
+        // polls `last_progress`) showed a frozen 0% while the
+        // file grew — the user saw a stalled row that flipped to
+        // Finished. With no segment states the row itself is the
+        // source of truth: the direct runner checkpoints the
+        // parsed yt-dlp bytes/speed into it on every progress
+        // line, so the event carries those. Segmented downloads
+        // keep the states sum (fresher than the row).
+        let total: u64 = if states.is_empty() {
+            row.downloaded_bytes.max(0) as u64
+        } else {
+            states.iter().map(|s| s.lock().unwrap().done).sum()
+        };
         let eta = match (row.size_bytes, speed_bps) {
             (Some(size), s) if s > 0 => Some(((size as u64).saturating_sub(total)) / s),
             _ => None,
@@ -9263,8 +9558,12 @@ impl DownloadManager {
             segments,
             // Round 72 (D) — live tasks, not just unfinished
             // segments: a deferred segment is "active" but holds
-            // no connection, so the count comes from `running`.
-            active_connections: states.iter().filter(|s| s.lock().unwrap().running).count(),
+            // no connection, so the count comes from `running`
+            // — unless the caller passed an explicit count
+            // (Round 87: the DASH parent's rebuilt states never
+            // carry a live `running` flag).
+            active_connections: active_connections
+                .unwrap_or_else(|| states.iter().filter(|s| s.lock().unwrap().running).count()),
             // The live retry wait, if any — the dialog's countdown
             // reads this, so it is the engine's own deadline.
             retry: retry.and_then(|r| r.info()),
@@ -9301,6 +9600,11 @@ impl DownloadManager {
 
     /// A snapshot event for a terminal state (paused / error): no
     /// segment is waiting then, so `retry` is always `None`.
+    /// Round 87 — also the direct runner's live event: the
+    /// direct path has no segments, so the snapshot carries the
+    /// row's checkpointed bytes/speed (see the total fallback in
+    /// `emit`). The speed rides only while downloading — a
+    /// paused/error/complete snapshot reports 0, as before.
     async fn emit_snapshot(&self, id: &str, status: &str) {
         if let Ok(Some(row)) = self.store.get_download(id) {
             let segments = self.store.get_segments(id).unwrap_or_default();
@@ -9312,7 +9616,13 @@ impl DownloadManager {
                     Arc::new(StdMutex::new(SegState::new(r, done, end)))
                 })
                 .collect();
-            self.emit(id, &row, &states, 0, status, None).await;
+            let speed = if status == "downloading" {
+                row.speed_bps.max(0) as u64
+            } else {
+                0
+            };
+            self.emit(id, &row, &states, speed, status, None, None)
+                .await;
         }
     }
 }
@@ -10814,6 +11124,18 @@ fn initial_ranges(info: &ProbeInfo) -> Vec<(i64, Option<i64>)> {
     }
 }
 
+/// Maximum save-name size in UTF-8 bytes (Round 87, Facebook
+/// reel 4444270735823862): NTFS allows 255 UTF-16 code units
+/// per path component and Linux filesystems 255 bytes — the
+/// failing title is 313 chars / 540 UTF-8 bytes, so an uncapped
+/// name fails the first file creation with Windows os error 123
+/// (ERROR_INVALID_NAME) at 0 B, even though the pipes in it were
+/// already replaced (the intermittency is the length, not the
+/// `|`). 200 bytes leaves room for the DASH child suffixes
+/// (`.video.` / `.audio.` + ext), the `.part` suffix and the
+/// duplicate ` (2)` suffix, all ASCII, on both filesystems.
+const MAX_SAVE_FILENAME_BYTES: usize = 200;
+
 fn sanitize_filename(name: String) -> String {
     let cleaned: String = name
         .chars()
@@ -10825,9 +11147,38 @@ fn sanitize_filename(name: String) -> String {
         .collect();
     let trimmed = cleaned.trim().trim_matches('.').trim();
     if trimmed.is_empty() {
-        "download".to_string()
-    } else {
-        trimmed.to_string()
+        return "download".to_string();
+    }
+    if trimmed.len() <= MAX_SAVE_FILENAME_BYTES {
+        return trimmed.to_string();
+    }
+    // Over the cap: truncate the STEM by UTF-8 bytes, never
+    // splitting a char, keeping a short alphanumeric extension
+    // intact (a title is long; its `.mp4` is not).
+    let (stem, ext) = match trimmed.rfind('.') {
+        Some(i)
+            if i > 0
+                && trimmed[i + 1..].len() <= 10
+                && trimmed[i + 1..].chars().all(|c| c.is_ascii_alphanumeric()) =>
+        {
+            (&trimmed[..i], Some(&trimmed[i + 1..]))
+        }
+        _ => (trimmed, None),
+    };
+    let ext_len = ext.map(|e| e.len() + 1).unwrap_or(0);
+    let budget = MAX_SAVE_FILENAME_BYTES.saturating_sub(ext_len);
+    let mut kept = String::new();
+    for c in stem.chars() {
+        if kept.len() + c.len_utf8() > budget {
+            break;
+        }
+        kept.push(c);
+    }
+    let kept = kept.trim_end_matches(|c| c == '.' || c == ' ');
+    let kept = if kept.is_empty() { "download" } else { kept };
+    match ext {
+        Some(e) => format!("{kept}.{e}"),
+        None => kept.to_string(),
     }
 }
 
@@ -10890,6 +11241,47 @@ pub(crate) fn url_expire_epoch(url: &str) -> Option<i64> {
 /// past, or within two minutes. googlevideo URLs live ~6 h, so
 /// a URL inside this margin would die mid-download anyway.
 const EXPIRY_RERESOLVE_MARGIN_SECS: i64 = 120;
+
+/// Round 87 — debug/test-only environment overrides. An env var
+/// read through this helper fires ONLY in debug builds
+/// (`cfg(debug_assertions)`): a release build never consults
+/// the environment for behaviour, so a stray `SONIC_FORCE_*`
+/// on a user's machine cannot change what the shipped app
+/// downloads. Tests run debug, so the forced-failure /
+/// forced-expiry tests keep working there; the VPS tail check
+/// runs them from a debug build (or `cargo test`).
+fn debug_env(name: &str) -> Option<String> {
+    if cfg!(debug_assertions) {
+        std::env::var(name).ok().filter(|v| !v.trim().is_empty())
+    } else {
+        None
+    }
+}
+
+/// Round 87 — "now" for the signed-URL expiry checks
+/// (`maybe_reresolve_expired`, `refresh_pair_urls_before_children`):
+/// the real clock, plus the debug-only
+/// `SONIC_FORCE_URL_EXPIRE_NOW_PLUS_SECS` shift (seconds — e.g.
+/// 86400 makes a URL valid for 6 h look expired) so one run can
+/// force the re-resolve branch without waiting for a real
+/// expiry. An unparseable value is ignored, never fatal.
+fn expire_check_now() -> i64 {
+    let shift = debug_env("SONIC_FORCE_URL_EXPIRE_NOW_PLUS_SECS")
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .unwrap_or(0);
+    now_unix().saturating_add(shift)
+}
+
+/// Round 87 — one re-resolve guard per (scope, id): the key is
+/// `"{scope}:{id}"`, so the three re-resolve operations never
+/// block each other — a parent-row re-resolve (`row`), the
+/// pre-children pair refresh (`pair-refresh`) and the run-level
+/// pair re-resolve (`pair`) each run at most once per session,
+/// independently. A failed resolve releases its key (see the
+/// callers), so a later start can retry it.
+fn reresolve_guard_key(scope: &str, id: &str) -> String {
+    format!("{scope}:{id}")
+}
 
 /// Round 86 — one log line per DASH child (role, itag, host,
 /// expire, size, downloaded bytes, status). Hosts and epochs
@@ -11393,5 +11785,210 @@ mod tests {
         assert!(should_delete_empty_part(-1));
         assert!(!should_delete_empty_part(1));
         assert!(!should_delete_empty_part(43_464_728));
+    }
+
+    /// Round 87 — the debug-only env overrides fire in debug
+    /// builds (where the tests run) and are dead in release
+    /// builds by construction (`debug_env` returns `None`
+    /// unless `cfg(debug_assertions)`). The two vars this pins
+    /// are `SONIC_FORCE_YTDLP_FORMAT` (the forced-failure tail
+    /// check) and `SONIC_FORCE_URL_EXPIRE_NOW_PLUS_SECS` (the
+    /// forced-expiry check): a stray value on a user's machine
+    /// must never change what the shipped app downloads.
+    /// The var names are unique to this test — env vars are
+    /// process-global, so a shared name could leak into a
+    /// parallel test.
+    #[test]
+    fn debug_env_only_fires_in_debug_builds() {
+        let probe = "SONIC_R87_DEBUG_ENV_PROBE";
+        std::env::set_var(probe, "yes");
+        let got = debug_env(probe);
+        std::env::remove_var(probe);
+        if cfg!(debug_assertions) {
+            assert_eq!(got.as_deref(), Some("yes"));
+        } else {
+            assert_eq!(got, None);
+        }
+        // An empty value never counts, in either build.
+        std::env::set_var(probe, "   ");
+        let empty = debug_env(probe);
+        std::env::remove_var(probe);
+        assert_eq!(empty, None);
+    }
+
+    /// Round 87 — `expire_check_now` is the real clock plus
+    /// the debug-only `SONIC_FORCE_URL_EXPIRE_NOW_PLUS_SECS`
+    /// shift: without the var it is `now_unix()`; with it (in
+    /// a debug build) it moves "now" forward, so a URL valid
+    /// for hours looks expired and the re-resolve branch can
+    /// be forced in one run. An unparseable shift is ignored.
+    #[test]
+    fn expire_check_now_applies_debug_shift() {
+        let before = now_unix();
+        let plain = expire_check_now();
+        assert!(
+            plain >= before && plain - before < 5,
+            "without the var the check clock is now: {plain} vs {before}"
+        );
+        std::env::set_var("SONIC_FORCE_URL_EXPIRE_NOW_PLUS_SECS", "86400");
+        let shifted = expire_check_now();
+        std::env::remove_var("SONIC_FORCE_URL_EXPIRE_NOW_PLUS_SECS");
+        if cfg!(debug_assertions) {
+            assert!(
+                shifted - plain >= 86395,
+                "the shift must move the clock by ~86400 s: {shifted} vs {plain}"
+            );
+        } else {
+            assert_eq!(shifted, plain, "a release build ignores the var");
+        }
+        std::env::set_var("SONIC_FORCE_URL_EXPIRE_NOW_PLUS_SECS", "not-a-number");
+        let garbage = expire_check_now();
+        std::env::remove_var("SONIC_FORCE_URL_EXPIRE_NOW_PLUS_SECS");
+        assert!(
+            garbage >= before && garbage - before < 5,
+            "an unparseable shift is ignored: {garbage} vs {before}"
+        );
+    }
+
+    /// Round 87 — the re-resolve guard keys are scoped: the
+    /// row re-resolve, the pre-children pair refresh and the
+    /// run-level pair re-resolve are three different keys for
+    /// the same download id, so no operation can block another.
+    #[test]
+    fn reresolve_guard_keys_are_scoped() {
+        assert_ne!(
+            reresolve_guard_key("row", "abc"),
+            reresolve_guard_key("pair-refresh", "abc")
+        );
+        assert_ne!(
+            reresolve_guard_key("pair-refresh", "abc"),
+            reresolve_guard_key("pair", "abc")
+        );
+        assert_ne!(
+            reresolve_guard_key("row", "abc"),
+            reresolve_guard_key("row", "def")
+        );
+        assert_eq!(reresolve_guard_key("row", "abc"), "row:abc");
+    }
+
+    /// Round 87 — Facebook reel 4444270735823862: the failing
+    /// title is 313 chars / 540 UTF-8 bytes with three `|` and
+    /// emoji + Arabic. The pipes were never the failure — every
+    /// file-creating path already runs through `sanitize_filename`,
+    /// which maps `|` to `_`. The failure was the LENGTH: an
+    /// uncapped name becomes a >255-byte path component, and
+    /// Windows refuses the first file creation with os error 123
+    /// (ERROR_INVALID_NAME) at 0 B. The sanitizer must cap the
+    /// name (200 UTF-8 bytes, extension kept) while keeping the
+    /// Arabic/emoji readable — and a short title must pass
+    /// through untouched.
+    #[test]
+    fn sanitize_filename_caps_long_arabic_title_and_removes_pipes() {
+        const REEL: &str = include_str!("../tests/fixtures/ytdlp/facebook_reel_pipes.json");
+        let title: String = serde_json::from_str::<serde_json::Value>(REEL).unwrap()["title"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(title.chars().count(), 313, "the fixture is the real title");
+        assert_eq!(title.matches('|').count(), 3);
+        let got = sanitize_filename(format!("{title}.mp4"));
+        assert!(!got.contains('|'), "no pipe may survive: {got}");
+        assert!(!got.is_empty());
+        assert!(
+            got.len() <= MAX_SAVE_FILENAME_BYTES,
+            "the name must fit a filesystem component: {} bytes: {got}",
+            got.len()
+        );
+        assert!(got.ends_with(".mp4"), "the extension is kept: {got}");
+        assert!(
+            got.contains("ميكرويف"),
+            "the Arabic stays readable, only the length is cut: {got}"
+        );
+        // A short title is untouched (no behaviour change for
+        // normal names) and a short pipe title just loses the pipe.
+        assert_eq!(
+            sanitize_filename("hello world.mp4".to_string()),
+            "hello world.mp4"
+        );
+        assert_eq!(sanitize_filename("a | b.mp4".to_string()), "a _ b.mp4");
+        assert_eq!(sanitize_filename("".to_string()), "download");
+    }
+
+    /// Round 87 — error-after-success (manual TikTok): a run that
+    /// fails AFTER its file completed must end Finished, not
+    /// Failed. `finish_run` rescues it when the file is on disk,
+    /// complete and verified (size == expected, delivered >=
+    /// file). A run whose file is missing still fails as before.
+    #[test]
+    fn finish_run_rescues_a_completed_file_and_fails_a_missing_one() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let dir = std::env::temp_dir()
+                .join(format!("fetchline-finish-rescue-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+            let mgr = DownloadManager::new(Arc::clone(&store), 4);
+            // Complete file: 23 bytes on disk, size + delivered agree.
+            let save_path = dir.join("video.mp4");
+            std::fs::write(&save_path, b"fake-merged-video-bytes").unwrap();
+            let id = store
+                .create_download(
+                    "https://example.com/video.mp4",
+                    None,
+                    "video.mp4",
+                    &save_path.to_string_lossy(),
+                    "cat-video",
+                    Some(23),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            store.checkpoint(&id, 23, 0, None, 0, 0).unwrap();
+            store.set_status(&id, "downloading", None).unwrap();
+            let retry = Arc::new(RetrySlot::new());
+            mgr.finish_run(
+                &id,
+                Err(EngineError::InvalidState("late failure".to_string())),
+                &retry,
+            )
+            .await;
+            let row = store.get_download(&id).unwrap().unwrap();
+            assert_eq!(
+                row.status, "complete",
+                "a completed file must end Finished, not Failed"
+            );
+            // Missing file: the same late error still fails the run.
+            let missing_path = dir.join("gone.mp4");
+            let id2 = store
+                .create_download(
+                    "https://example.com/gone.mp4",
+                    None,
+                    "gone.mp4",
+                    &missing_path.to_string_lossy(),
+                    "cat-video",
+                    Some(100),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            store.checkpoint(&id2, 0, 0, None, 0, 0).unwrap();
+            store.set_status(&id2, "downloading", None).unwrap();
+            let retry2 = Arc::new(RetrySlot::new());
+            mgr.finish_run(
+                &id2,
+                Err(EngineError::InvalidState("late failure".to_string())),
+                &retry2,
+            )
+            .await;
+            let row2 = store.get_download(&id2).unwrap().unwrap();
+            assert_eq!(row2.status, "error", "a missing file must still fail");
+            let _ = std::fs::remove_dir_all(&dir);
+        });
     }
 }

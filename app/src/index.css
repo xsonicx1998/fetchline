@@ -53,6 +53,26 @@
 
 html, body, #root { height: 100%; }
 
+/* Round 87 (13a) — NO text selection anywhere in the app: the
+ *  user drags in every window (title bars, the downloads table)
+ *  and a drag must never highlight text. `user-select: none`
+ *  on the page root covers every window (they all load this
+ *  bundle), and it is also belt-and-braces for the title-bar
+ *  drag: even if a drag fails to start, no text gets selected.
+ *  Text fields stay selectable — inputs, textareas,
+ *  contenteditable elements, and anything explicitly marked
+ *  `.selectable` (for future copyable text). The TitleBar drag
+ *  does not depend on selection: it is a native drag region /
+ *  `startDragging()`, not a text drag. */
+html, body {
+  user-select: none;
+  -webkit-user-select: none;
+}
+input, textarea, [contenteditable], .selectable {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 body {
   background: var(--color-bg);
   color: var(--color-text);

@@ -274,6 +274,93 @@ describe('video URL submit', () => {
   })
 })
 
+// -- Round 87 — Facebook reel with height-less formats ----------------------
+// The live `-J` for facebook.com/reel/2141490136612275/ lists `sd` /
+// `hd` with no height and no codecs; the engine now turns them
+// into rows (height 0, label = the format's own name). The
+// dialog must show the reel's best row instead of "no video",
+// and must tell a "formats found but unusable" zero apart from
+// a feed-page zero (the engine says so in `warning`).
+describe('Facebook reel resolve', () => {
+  const REEL_URL = 'https://www.facebook.com/reel/2141490136612275/'
+
+  test('a reel with height-less formats resolves and shows its best row', async () => {
+    vi.mocked(api.ytdlpResolve).mockResolvedValue({
+      title: 'Reel video',
+      is_live: false,
+      degraded: false,
+      warning: null,
+      formats: [
+        row({
+          height: 0,
+          label: 'sd',
+          ext: 'mp4',
+          has_audio: false,
+          needs_merge: false,
+          filesize: null,
+          url: 'https://video-ord5-2.xx.fbcdn.net/sd.mp4',
+          format_id: 'sd',
+        }),
+        row({
+          height: 0,
+          label: 'hd',
+          ext: 'mp4',
+          has_audio: false,
+          needs_merge: false,
+          filesize: null,
+          url: 'https://video-ord5-1.xx.fbcdn.net/hd.mp4',
+          format_id: 'hd',
+        }),
+      ],
+    })
+    renderDialog(REEL_URL)
+    // The debounced resolve (500 ms) fills the quality line
+    // from the best row — the reel's `hd`, not a feed message.
+    await waitFor(() => expect(screen.getByText('hd · MP4')).toBeTruthy(), {
+      timeout: 5000,
+    })
+    expect(vi.mocked(api.ytdlpResolve)).toHaveBeenCalledWith(REEL_URL)
+    expect(vi.mocked(api.probeUrl)).not.toHaveBeenCalled()
+  })
+
+  test('zero formats WITH a warning says the video was found but unusable', async () => {
+    vi.mocked(api.ytdlpResolve).mockResolvedValue({
+      ...resolveResult(),
+      formats: [],
+      warning:
+        'resolve returned no usable formats: yt-dlp listed 1 format(s), kept 1, quality rows 0; skipped: no URL 0, storyboard 0; protocols: https×1; top-level url: no; 12345ms',
+    })
+    renderDialog(REEL_URL)
+    await waitFor(
+      () =>
+        expect(
+          screen.getByText(
+            'This video was found, but none of its formats could be downloaded.',
+          ),
+        ).toBeTruthy(),
+      { timeout: 5000 },
+    )
+  })
+
+  test('zero formats WITHOUT a warning still says no video was found', async () => {
+    vi.mocked(api.ytdlpResolve).mockResolvedValue({
+      ...resolveResult(),
+      formats: [],
+      warning: null,
+    })
+    renderDialog(REEL_URL)
+    await waitFor(
+      () =>
+        expect(
+          screen.getByText(
+            'No downloadable video was found on this page — it may be a feed or a page, not a video.',
+          ),
+        ).toBeTruthy(),
+      { timeout: 5000 },
+    )
+  })
+})
+
 // -- submit: non-video URLs keep the plain path ----------------------------
 
 describe('non-video URL submit', () => {

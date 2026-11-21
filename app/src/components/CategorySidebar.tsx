@@ -345,7 +345,14 @@ export function CategorySidebar({
       </button>
 
       <p className="px-2 pb-1 pt-3 text-xs font-semibold uppercase tracking-wider text-text-muted">Queues</p>
-      {queues.map((q) => (
+      {/* Round 87 (13c) — the user deleted the "Main download
+          queue": it is hidden from the sidebar, so only the
+          user's own queues show here (plus "New queue" below).
+          The engine still seeds it (replica/schema.sql) and
+          uses 'queue-main' as the internal default bucket for
+          unqueued downloads — that seed lives outside this
+          file's scope — but no UI list offers it any more. */}
+      {queues.filter((q) => !q.is_main).map((q) => (
         <div key={q.id} className="group relative flex items-center gap-1" {...dropProps(`queue:${q.id}`, { kind: 'queue', id: q.id })}>
           {renamingId === q.id ? (
             <input
