@@ -283,7 +283,11 @@ export function DownloadCompleteDialog({ downloadId }: { downloadId: string }) {
             <Check className="h-6 w-6" strokeWidth={3} aria-hidden="true" />
           </div>
           <div className="min-w-0">
-            <p className="truncate text-base font-bold" title={download.filename}>
+            {/* Round 87.1 — the filename, address and save path
+                are copyable: `selectable` lifts the page-wide
+                `user-select: none` (13a) for exactly this text,
+                so an error / path can be copied out. */}
+            <p className="selectable truncate text-base font-bold" title={download.filename}>
               {download.filename}
             </p>
             <p className="mt-1 text-[13px] text-text-muted">
@@ -296,7 +300,7 @@ export function DownloadCompleteDialog({ downloadId }: { downloadId: string }) {
         </div>
         <div className="mt-4">
           <label className="mb-1 block text-xs font-semibold text-text-muted">Address</label>
-          <div className="break-all rounded-md border border-border bg-surface px-2.5 py-2 text-[13px] text-text-muted">
+          <div className="selectable break-all rounded-md border border-border bg-surface px-2.5 py-2 text-[13px] text-text-muted">
             {download.final_url ?? download.url}
           </div>
         </div>
@@ -304,11 +308,11 @@ export function DownloadCompleteDialog({ downloadId }: { downloadId: string }) {
           <label className="mb-1 block text-xs font-semibold text-text-muted">
             The file saved as
           </label>
-          <div className="break-all rounded-md border border-border bg-surface px-2.5 py-2 text-[13px] text-text-muted">
+          <div className="selectable break-all rounded-md border border-border bg-surface px-2.5 py-2 text-[13px] text-text-muted">
             {download.save_path}
           </div>
         </div>
-        {actionError ? <p className="mt-3 text-[13px] text-danger">{actionError}</p> : null}
+        {actionError ? <p className="selectable mt-3 text-[13px] text-danger">{actionError}</p> : null}
       </div>
       {/* Round 87 (10) — the queue: while more completions wait,
           the footer says how many and offers "Dismiss all";

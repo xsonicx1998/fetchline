@@ -120,4 +120,14 @@ describe('DownloadCompleteDialog queue (Round 87)', () => {
     await screen.findByText('1 more completed')
     expect(screen.queryByText('2 more completed')).toBeNull()
   })
+
+  test('filename, address and save path stay selectable (Round 87.1)', async () => {
+    // R87 disabled text selection page-wide; the copyable
+    // fields carry `.selectable` so a path can be copied out.
+    render(<DownloadCompleteDialog downloadId="d1" />)
+    await screen.findByText('file-a.zip')
+    expect(screen.getByText('file-a.zip').className).toContain('selectable')
+    expect(screen.getByText('https://example.com/d1').className).toContain('selectable')
+    expect(screen.getByText('C:\\Downloads\\file-a.zip').className).toContain('selectable')
+  })
 })

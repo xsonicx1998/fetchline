@@ -47,7 +47,7 @@ use crate::grabber::{
 };
 use crate::limiter::RateLimiter;
 use crate::links::{classify_kind, extract_links, filename_from_link_url, LinkKind, PageLink};
-use crate::native_host::{cookies_from_json, cookies_to_header};
+use crate::native_host::{cookies_from_json, cookies_to_header, CookiePair};
 use crate::options::{
     effective_completion_action, SiteLoginInput, SiteLoginRow, SoundEventRecord, SoundSetting,
     SoundSettingInput,
@@ -608,6 +608,18 @@ pub struct DownloadManager {
     /// cancelled — a pause keeps it, so pause/resume in one
     /// session keeps working.
     cookies: StdMutex<HashMap<String, String>>,
+    /// Round 87.1 — the SAME cookies as `cookies`, but as the
+    /// browser's original pairs (domain/path intact), keyed by
+    /// download id. The header string above carries no scope,
+    /// so a retry rebuilt from it rewrote every cookie to
+    /// `.{page host}` + `/` and a CDN-host cookie lost its host
+    /// (ChatGPT, R87 review). The direct yt-dlp retry writes
+    /// its temp file from THESE pairs when they exist (falling
+    /// back to the header only for downloads created before
+    /// pairs were stored). Same lifecycle as `cookies`: written
+    /// when the download is created/confirmed from a capture
+    /// that carried pairs, removed on the same terminal states.
+    cookie_pairs: StdMutex<HashMap<String, Vec<CookiePair>>>,
     /// Round 78 — per-download request headers (User-Agent /
     /// Referer from yt-dlp's `http_headers`) for platform
     /// downloads, keyed by download id. Same lifecycle as the
@@ -720,6 +732,7 @@ impl DownloadManager {
             action_events,
             sound_events: Arc::new(StdMutex::new(Vec::new())),
             cookies: StdMutex::new(HashMap::new()),
+            cookie_pairs: StdMutex::new(HashMap::new()),
             download_headers: StdMutex::new(HashMap::new()),
             reresolved: StdMutex::new(HashSet::new()),
             clipboard: StdMutex::new(ClipboardMonitor::new()),
@@ -1396,6 +1409,16 @@ impl DownloadManager {
     /// Round 78 — a download's per-request headers, if any.
     fn headers_for(&self, id: &str) -> Option<crate::probe::RequestHeaders> {
         self.download_headers.lock().unwrap().get(id).cloned()
+    }
+
+    /// Round 87.1 — drop a download's in-memory session: the
+    /// header AND the original pairs, together. Every terminal
+    /// state (complete / error / cancelled / watchdog abort)
+    /// calls this so a finished download keeps no session
+    /// behind in either map.
+    fn forget_cookies(&self, id: &str) {
+        self.cookies.lock().unwrap().remove(id);
+        self.cookie_pairs.lock().unwrap().remove(id);
     }
 
     pub fn list_site_logins(&self) -> Result<Vec<SiteLoginRow>> {
@@ -2183,17 +2206,42 @@ impl DownloadManager {
             // header from the row's stored pairs. A corrupt value
             // (which enqueueing can never write) reads as no
             // cookies rather than failing the drain. Marking the row
-            // accepted/rejected below wipes the column.
-            let cookies = row
+            // accepted/rejected below wipes the column. Round
+            // 87.1 — the original pairs ride along too (see
+            // `cookie_pairs`): the direct retry writes its temp
+            // file from them, so a CDN-host cookie keeps its host.
+            let cookie_pairs = row
                 .cookies
                 .as_deref()
-                .map(|json| cookies_to_header(&cookies_from_json(json)).ok())
-                .flatten();
+                .map(cookies_from_json)
+                .unwrap_or_default();
+            // No pairs (or an invalid set) is `None`, exactly as
+            // before — an empty header string would ride the
+            // probe as a `Cookie:` header of nothing.
+            let cookies = if cookie_pairs.is_empty() {
+                None
+            } else {
+                cookies_to_header(&cookie_pairs).ok()
+            };
+            // `cookies` moves into the add call below; remember
+            // whether the header was accepted for the pairs
+            // insert in the success arm.
+            let cookies_accepted = cookies.is_some();
             match self
                 .add_download_with_cookies(&row.url, None, None, None, None, cookies)
                 .await
             {
                 Ok((id, _)) => {
+                    // Only when the header was accepted: a pair
+                    // set the validator refused must not reach
+                    // the retry either (its file writer validates
+                    // the same way and would only log a failure).
+                    if cookies_accepted && !cookie_pairs.is_empty() {
+                        self.cookie_pairs
+                            .lock()
+                            .unwrap()
+                            .insert(id.clone(), cookie_pairs);
+                    }
                     let _ = self
                         .store
                         .mark_pending_link(&row.id, "accepted", Some(&id), None);
@@ -2351,22 +2399,22 @@ impl DownloadManager {
         // a real session. A header the validator rejects is
         // logged with its reason (count, never values) instead
         // of vanishing into `.ok()`.
-        let (cookies, cookie_count) = match row.cookies.as_deref() {
+        let (cookies, cookie_count, cookie_pairs) = match row.cookies.as_deref() {
             Some(json) => {
                 let pairs = cookies_from_json(json);
                 let count = pairs.len();
                 match cookies_to_header(&pairs) {
-                    Ok(header) => (Some(header), count),
+                    Ok(header) => (Some(header), count, pairs),
                     Err(e) => {
                         let _ = self.store.log(&format!(
                             "confirm {}: cookie header rejected ({e}) — continuing without cookies",
                             row.id
                         ));
-                        (None, count)
+                        (None, count, Vec::new())
                     }
                 }
             }
-            None => (None, 0),
+            None => (None, 0, Vec::new()),
         };
         let _ = self.store.log(&format!(
             "confirm {}: cookies {} for host {}",
@@ -2534,6 +2582,20 @@ impl DownloadManager {
                 let _ = self
                     .store
                     .mark_pending_link(&row.id, "accepted", Some(&download_id), None);
+                // Round 87.1 — keep the capture's ORIGINAL cookie
+                // pairs (domain/path intact) alongside the header
+                // the add path stored: the direct yt-dlp retry
+                // writes its temp file from these, so a CDN-host
+                // cookie keeps its host (see
+                // `direct_retry_cookies_file`). Same lifecycle as
+                // the header — memory only, removed on terminal
+                // states.
+                if !cookie_pairs.is_empty() {
+                    self.cookie_pairs
+                        .lock()
+                        .unwrap()
+                        .insert(download_id.clone(), cookie_pairs);
+                }
                 // Round 78 — record the resolver metadata on the
                 // row: the page URL + format id are what a 403/410
                 // re-resolve needs; the (B) flag marks a direct
@@ -6014,7 +6076,7 @@ impl DownloadManager {
         self.thread_watchdogs.lock().unwrap().remove(id);
         // Browser cookies (S13 finish): a deleted download keeps no
         // session behind.
-        self.cookies.lock().unwrap().remove(id);
+        self.forget_cookies(id);
         self.download_headers.lock().unwrap().remove(id);
         Ok(())
     }
@@ -6239,7 +6301,7 @@ impl DownloadManager {
         let Some(expire) = url_expire_epoch(&row.url) else {
             return Ok(false);
         };
-        // Round 87 — the expiry clock honours the debug-only
+        // Round 87 — the expiry clock honours the
         // SONIC_FORCE_URL_EXPIRE_NOW_PLUS_SECS shift (see
         // `expire_check_now`).
         let valid_for = expire - expire_check_now();
@@ -7148,6 +7210,55 @@ impl DownloadManager {
         Ok(())
     }
 
+    /// Round 87.1 — does a failed first direct attempt retry
+    /// once with the capture's cookies? A LoginRequired failure
+    /// always does (Round 87). A CdnRefused failure does ONLY
+    /// for a TikTok page: the TikTok diagnostics proved
+    /// no-Cookie 403s while Cookie+Referer succeeds, and a bare
+    /// TikTok 403 classifies as CdnRefused, not LoginRequired —
+    /// so without this arm a TikTok download refused for
+    /// missing cookies NEVER retried with them. Any other kind,
+    /// any second attempt, or a non-TikTok CdnRefused never
+    /// retries. Pure, so the unit tests pin it without a run.
+    fn direct_cookie_retry_applies(
+        kind: crate::ytdlp::YtDlpErrorKind,
+        page_url: &str,
+        attempt_no: u32,
+    ) -> bool {
+        attempt_no == 1
+            && (kind == crate::ytdlp::YtDlpErrorKind::LoginRequired
+                || (kind == crate::ytdlp::YtDlpErrorKind::CdnRefused && is_tiktok_page(page_url)))
+    }
+
+    /// Round 87.1 — the temp cookies file for a direct retry,
+    /// from the download's stored session. The ORIGINAL pairs
+    /// (domain/path intact) win: the retry then writes a CDN
+    /// cookie to its own host instead of rewriting every cookie
+    /// to `.{page host}` + `/`. Downloads created before pairs
+    /// were stored (or from a header-only caller) fall back to
+    /// rebuilding pairs from the header string — scope is lost
+    /// there, the old behaviour, never an error. `None` when
+    /// the download carries no cookies at all: no retry is
+    /// possible, and the caller fails exactly as before.
+    fn direct_retry_cookies_file(
+        &self,
+        id: &str,
+        host: &str,
+    ) -> std::result::Result<Option<crate::ytdlp::CookieTempFile>, crate::ytdlp::YtDlpError> {
+        if let Some(pairs) = self.cookie_pairs.lock().unwrap().get(id) {
+            if !pairs.is_empty() {
+                return crate::ytdlp::write_cookies_tempfile(host, pairs).map(Some);
+            }
+        }
+        if let Some(header) = self.cookies.lock().unwrap().get(id) {
+            if !header.trim().is_empty() {
+                let pairs = crate::ytdlp::cookie_header_to_pairs(header);
+                return crate::ytdlp::write_cookies_tempfile(host, &pairs).map(Some);
+            }
+        }
+        Ok(None)
+    }
+
     /// The (B) runner: yt-dlp downloads the fragmented format
     /// itself; `finish_run` (shared with the segmented run)
     /// handles the tail — error status, cookie/header cleanup,
@@ -7223,11 +7334,11 @@ impl DownloadManager {
         // SONIC_FORCE_YTDLP_FORMAT=bogus replaces the -f value
         // so one run fails on purpose and the failure line can
         // be checked for its tail without waiting for a real
-        // failure. Round 87 — read through `debug_env`, so the
-        // override fires ONLY in debug/test builds: a release
-        // build never reads it, and a stray value on a user's
-        // machine cannot change what the shipped app downloads.
-        // An empty value is ignored, and the forced value is
+        // failure. Round 87.1 — read through `debug_env`, so the
+        // override fires ONLY in a `debug-hooks` build: a
+        // default build never reads it, and a stray value on a
+        // user's machine cannot change what the shipped app
+        // downloads. An empty value is ignored, and the forced value is
         // logged in the start line below (it IS the selector
         // yt-dlp receives).
         let mut selector = crate::ytdlp::direct_download_format_selector(&format_id);
@@ -7266,15 +7377,18 @@ impl DownloadManager {
         // login, and the standard TikTok video completes
         // cookieless. The cookies are written to a temp Netscape
         // file (RAII — deleted when the attempt returns) only
-        // for the retry below, after a LoginRequired failure.
+        // for the retry below, after a LoginRequired failure —
+        // Round 87.1 adds a CdnRefused retry for TikTok pages.
         // The cookies in this map are consent-gated upstream:
         // the extension only attaches them to a capture after
         // the per-site `ytdlp_cookie_consent:<host>` grant, so
         // "cookies present" IS the consent signal — the engine
         // additionally never sends them before a login-required
-        // error. The manual Add URL flow has no cookies (its
+        // or CDN-refused error. The retry's file is built from
+        // the stored pairs (`cookie_pairs`, domain/path intact),
+        // not from this header — see `direct_retry_cookies_file`.
+        // The manual Add URL flow has no cookies (its
         // resolve is cookieless), so no retry is possible there.
-        let cookies_header = self.cookies.lock().unwrap().get(id).cloned();
         let req_headers = self.headers_for(id);
         let mut cookies_file: Option<crate::ytdlp::CookieTempFile> = None;
         // Round 85 (Claude delta) — the whole argv is built by
@@ -7443,37 +7557,48 @@ impl DownloadManager {
                                     crate::ytdlp::redact_ytdlp_text(&argv.join(" ")),
                                     redacted_tail,
                                 ));
-                                // Round 87 — cookieless first attempt:
+                                // Round 87.1 — cookieless first attempt:
                                 // a LoginRequired failure retries ONCE
                                 // with the capture's cookies (consented
                                 // at capture — see the cookies comment
-                                // above). Any other failure, a second
-                                // failure, or no cookies at all fails
-                                // exactly as before.
-                                if attempt_no == 1
-                                    && mapped.kind == crate::ytdlp::YtDlpErrorKind::LoginRequired
-                                {
-                                    if let Some(header) = cookies_header
-                                        .as_deref()
-                                        .filter(|h| !h.trim().is_empty())
-                                    {
-                                        let pairs =
-                                            crate::ytdlp::cookie_header_to_pairs(header);
-                                        let host = url_host(&source_url).unwrap_or_default();
-                                        match crate::ytdlp::write_cookies_tempfile(&host, &pairs)
-                                        {
-                                            Ok(file) => {
-                                                let _ = self.store.log(&format!(
-                                                    "direct yt-dlp download {id}: first attempt failed with login_required — retrying once with the capture's cookies"
-                                                ));
-                                                cookies_file = Some(file);
-                                                continue 'attempts;
-                                            }
-                                            Err(e) => {
-                                                let _ = self.store.log(&format!(
-                                                    "direct yt-dlp download {id}: could not write a cookies file ({e}) — no cookie retry"
-                                                ));
-                                            }
+                                // above), and so does a CdnRefused
+                                // failure on a TikTok page (a bare
+                                // TikTok 403 classifies as CdnRefused,
+                                // not LoginRequired, and the TikTok
+                                // diagnostics proved no-Cookie 403s
+                                // while Cookie+Referer succeeds — see
+                                // `direct_cookie_retry_applies`). The
+                                // retry's cookies file is built from
+                                // the ORIGINAL pairs when they exist,
+                                // so a CDN cookie keeps its own domain
+                                // (see `direct_retry_cookies_file`).
+                                // Any other failure, a second failure,
+                                // or no cookies at all fails exactly
+                                // as before.
+                                if Self::direct_cookie_retry_applies(
+                                    mapped.kind.clone(),
+                                    &source_url,
+                                    attempt_no,
+                                ) {
+                                    let host = url_host(&source_url).unwrap_or_default();
+                                    match self.direct_retry_cookies_file(id, &host) {
+                                        Ok(Some(file)) => {
+                                            let _ = self.store.log(&format!(
+                                                "direct yt-dlp download {id}: first attempt failed with {} — retrying once with the capture's cookies",
+                                                mapped.kind_str()
+                                            ));
+                                            cookies_file = Some(file);
+                                            continue 'attempts;
+                                        }
+                                        Ok(None) => {
+                                            // No cookies stored for this
+                                            // download: no retry is
+                                            // possible, fail as before.
+                                        }
+                                        Err(e) => {
+                                            let _ = self.store.log(&format!(
+                                                "direct yt-dlp download {id}: could not write a cookies file ({e}) — no cookie retry"
+                                            ));
                                         }
                                     }
                                 }
@@ -7943,17 +8068,17 @@ impl DownloadManager {
         // the completion/failure fanfare.
         match self.store.get_download(id).ok().flatten() {
             Some(row) if row.status == "complete" && row.parent_id.is_none() => {
-                self.cookies.lock().unwrap().remove(id);
+                self.forget_cookies(id);
                 self.download_headers.lock().unwrap().remove(id);
                 self.emit_sound("download_complete");
             }
             Some(row) if row.status == "error" && row.parent_id.is_none() => {
-                self.cookies.lock().unwrap().remove(id);
+                self.forget_cookies(id);
                 self.download_headers.lock().unwrap().remove(id);
                 self.emit_sound("download_failed");
             }
             Some(row) if row.parent_id.is_some() => {
-                self.cookies.lock().unwrap().remove(id);
+                self.forget_cookies(id);
                 self.download_headers.lock().unwrap().remove(id);
             }
             _ => {}
@@ -8070,7 +8195,7 @@ impl DownloadManager {
                     ));
                 }
                 self.emit_snapshot(&id, "error").await;
-                self.cookies.lock().unwrap().remove(&id);
+                self.forget_cookies(&id);
                 self.download_headers.lock().unwrap().remove(&id);
                 self.store.log(&format!(
                     "run watchdog aborted {id} after {timeout_secs}s without progress"
@@ -8204,7 +8329,7 @@ impl DownloadManager {
                     "thread watchdog could not set error status for {id}: {e}"
                 ));
             }
-            mgr.cookies.lock().unwrap().remove(&id);
+            mgr.forget_cookies(&id);
             mgr.download_headers.lock().unwrap().remove(&id);
             return;
         }
@@ -11131,10 +11256,12 @@ fn initial_ranges(info: &ProbeInfo) -> Vec<(i64, Option<i64>)> {
 /// name fails the first file creation with Windows os error 123
 /// (ERROR_INVALID_NAME) at 0 B, even though the pipes in it were
 /// already replaced (the intermittency is the length, not the
-/// `|`). 200 bytes leaves room for the DASH child suffixes
+/// `|`). 150 bytes leaves room for the DASH child suffixes
 /// (`.video.` / `.audio.` + ext), the `.part` suffix and the
-/// duplicate ` (2)` suffix, all ASCII, on both filesystems.
-const MAX_SAVE_FILENAME_BYTES: usize = 200;
+/// duplicate ` (2)` suffix, all ASCII, on both filesystems —
+/// and for a deep save folder under the classic Win32 MAX_PATH
+/// (260 chars) on non-longPathAware setups.
+const MAX_SAVE_FILENAME_BYTES: usize = 150;
 
 fn sanitize_filename(name: String) -> String {
     let cleaned: String = name
@@ -11148,6 +11275,28 @@ fn sanitize_filename(name: String) -> String {
     let trimmed = cleaned.trim().trim_matches('.').trim();
     if trimmed.is_empty() {
         return "download".to_string();
+    }
+    // Round 87.1 — a reserved Windows device name as the whole
+    // stem (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`,
+    // `LPT1`–`LPT9`) can never be created on Windows, with or
+    // without an extension — a video titled "CON" fails the
+    // first file creation with os error 123. Rename it
+    // (`CON.mp4` → `CON_.mp4`), keeping the extension. The
+    // check runs before the length cap: a reserved stem is at
+    // most 4 chars, so the cap can never be the reason it is
+    // missed, and a name like `my.con.mp4` (stem `my.con`) is
+    // untouched.
+    {
+        let (stem, ext) = match trimmed.rfind('.') {
+            Some(i) if i > 0 => (&trimmed[..i], Some(&trimmed[i + 1..])),
+            _ => (trimmed, None),
+        };
+        if crate::ytdlp::is_reserved_windows_device_name(stem) {
+            return match ext {
+                Some(e) => format!("{stem}_.{e}"),
+                None => format!("{stem}_"),
+            };
+        }
     }
     if trimmed.len() <= MAX_SAVE_FILENAME_BYTES {
         return trimmed.to_string();
@@ -11242,16 +11391,26 @@ pub(crate) fn url_expire_epoch(url: &str) -> Option<i64> {
 /// a URL inside this margin would die mid-download anyway.
 const EXPIRY_RERESOLVE_MARGIN_SECS: i64 = 120;
 
-/// Round 87 — debug/test-only environment overrides. An env var
-/// read through this helper fires ONLY in debug builds
-/// (`cfg(debug_assertions)`): a release build never consults
-/// the environment for behaviour, so a stray `SONIC_FORCE_*`
-/// on a user's machine cannot change what the shipped app
-/// downloads. Tests run debug, so the forced-failure /
-/// forced-expiry tests keep working there; the VPS tail check
-/// runs them from a debug build (or `cargo test`).
+/// Round 87.1 — debug/test-only environment overrides. An env
+/// var read through this helper fires ONLY when the
+/// `debug-hooks` cargo feature is enabled
+/// (`cfg!(feature = "debug-hooks")`): a default build never
+/// consults the environment for behaviour, so a stray value on
+/// a user's machine cannot change what the shipped app
+/// downloads. This gates `SONIC_FORCE_YTDLP_FORMAT` (it can
+/// force a download to fail, so it must never fire in
+/// production) AND `SONIC_FORCE_URL_EXPIRE_NOW_PLUS_SECS`
+/// (forcing a re-resolve is safe — the app re-resolves expired
+/// URLs anyway — but the two hooks now share one switch, so a
+/// retest can tell from startup.log's "debug hooks ON" line
+/// which binary it is testing). Round 87 read the expiry shift
+/// through plain `std::env::var` so it fired in any release
+/// build; that is superseded — the VPS retest's TEST build
+/// enables the feature, the shipped installer does not. A test
+/// binary enables the feature with `cargo test --features
+/// debug-hooks`; without it both vars are dead, by design.
 fn debug_env(name: &str) -> Option<String> {
-    if cfg!(debug_assertions) {
+    if cfg!(feature = "debug-hooks") {
         std::env::var(name).ok().filter(|v| !v.trim().is_empty())
     } else {
         None
@@ -11260,11 +11419,13 @@ fn debug_env(name: &str) -> Option<String> {
 
 /// Round 87 — "now" for the signed-URL expiry checks
 /// (`maybe_reresolve_expired`, `refresh_pair_urls_before_children`):
-/// the real clock, plus the debug-only
-/// `SONIC_FORCE_URL_EXPIRE_NOW_PLUS_SECS` shift (seconds — e.g.
-/// 86400 makes a URL valid for 6 h look expired) so one run can
-/// force the re-resolve branch without waiting for a real
-/// expiry. An unparseable value is ignored, never fatal.
+/// the real clock, plus the `SONIC_FORCE_URL_EXPIRE_NOW_PLUS_SECS`
+/// shift (seconds — e.g. 86400 makes a URL valid for 6 h look
+/// expired) so one run can force the re-resolve branch without
+/// waiting for a real expiry. Round 87.1 — the var is read
+/// through `debug_env`, so it fires ONLY in a `debug-hooks`
+/// build (the VPS retest's TEST build); the shipped installer
+/// ignores it. An unparseable value is ignored, never fatal.
 fn expire_check_now() -> i64 {
     let shift = debug_env("SONIC_FORCE_URL_EXPIRE_NOW_PLUS_SECS")
         .and_then(|v| v.trim().parse::<i64>().ok())
@@ -11787,24 +11948,26 @@ mod tests {
         assert!(!should_delete_empty_part(43_464_728));
     }
 
-    /// Round 87 — the debug-only env overrides fire in debug
-    /// builds (where the tests run) and are dead in release
-    /// builds by construction (`debug_env` returns `None`
-    /// unless `cfg(debug_assertions)`). The two vars this pins
-    /// are `SONIC_FORCE_YTDLP_FORMAT` (the forced-failure tail
-    /// check) and `SONIC_FORCE_URL_EXPIRE_NOW_PLUS_SECS` (the
-    /// forced-expiry check): a stray value on a user's machine
-    /// must never change what the shipped app downloads.
-    /// The var names are unique to this test — env vars are
-    /// process-global, so a shared name could leak into a
-    /// parallel test.
+    /// Round 87.1 — the debug-only env overrides fire ONLY
+    /// when the `debug-hooks` cargo feature is enabled (where
+    /// the feature-gated tests run) and are dead in a default
+    /// build by construction (`debug_env` returns `None`
+    /// unless `cfg!(feature = "debug-hooks")`). The var this
+    /// pins is `SONIC_FORCE_YTDLP_FORMAT` (the forced-failure
+    /// tail check): a stray value on a user's machine must never
+    /// change what the shipped app downloads. The expiry shift
+    /// `SONIC_FORCE_URL_EXPIRE_NOW_PLUS_SECS` shares the same
+    /// gate now (see `expire_check_now`) — Round 87 read it
+    /// directly, which is superseded. The var names are unique
+    /// to this test — env vars are process-global, so a shared
+    /// name could leak into a parallel test.
     #[test]
-    fn debug_env_only_fires_in_debug_builds() {
-        let probe = "SONIC_R87_DEBUG_ENV_PROBE";
+    fn debug_env_only_fires_with_debug_hooks_feature() {
+        let probe = "SONIC_R87_1_DEBUG_ENV_PROBE";
         std::env::set_var(probe, "yes");
         let got = debug_env(probe);
         std::env::remove_var(probe);
-        if cfg!(debug_assertions) {
+        if cfg!(feature = "debug-hooks") {
             assert_eq!(got.as_deref(), Some("yes"));
         } else {
             assert_eq!(got, None);
@@ -11816,14 +11979,20 @@ mod tests {
         assert_eq!(empty, None);
     }
 
-    /// Round 87 — `expire_check_now` is the real clock plus
-    /// the debug-only `SONIC_FORCE_URL_EXPIRE_NOW_PLUS_SECS`
-    /// shift: without the var it is `now_unix()`; with it (in
-    /// a debug build) it moves "now" forward, so a URL valid
-    /// for hours looks expired and the re-resolve branch can
-    /// be forced in one run. An unparseable shift is ignored.
+    /// Round 87.1 — `expire_check_now` is the real clock plus
+    /// the `SONIC_FORCE_URL_EXPIRE_NOW_PLUS_SECS` shift, and the
+    /// shift applies ONLY in a `debug-hooks` build (it is read
+    /// through `debug_env` now — Round 87 read it directly in
+    /// every build, which is superseded: the VPS retest's TEST
+    /// build enables the feature, the shipped installer does
+    /// not). Without the var it is `now_unix()`; with it (and
+    /// the feature) "now" moves forward, so a URL valid for
+    /// hours looks expired. An unparseable shift is ignored.
+    /// The 86400 value is the corrected one (Jumani, R87):
+    /// fresh YouTube URLs have ~21,577 s validity, so +7200
+    /// would leave ~4 h and never trigger the re-resolve.
     #[test]
-    fn expire_check_now_applies_debug_shift() {
+    fn expire_check_now_shift_is_feature_gated() {
         let before = now_unix();
         let plain = expire_check_now();
         assert!(
@@ -11833,13 +12002,16 @@ mod tests {
         std::env::set_var("SONIC_FORCE_URL_EXPIRE_NOW_PLUS_SECS", "86400");
         let shifted = expire_check_now();
         std::env::remove_var("SONIC_FORCE_URL_EXPIRE_NOW_PLUS_SECS");
-        if cfg!(debug_assertions) {
+        if cfg!(feature = "debug-hooks") {
             assert!(
                 shifted - plain >= 86395,
-                "the shift must move the clock by ~86400 s: {shifted} vs {plain}"
+                "the shift must move the clock by ~86400 s in a debug-hooks build: {shifted} vs {plain}"
             );
         } else {
-            assert_eq!(shifted, plain, "a release build ignores the var");
+            assert!(
+                shifted >= before && shifted - before < 5,
+                "the shift must be ignored without the feature: {shifted} vs {before}"
+            );
         }
         std::env::set_var("SONIC_FORCE_URL_EXPIRE_NOW_PLUS_SECS", "not-a-number");
         let garbage = expire_check_now();
@@ -11879,7 +12051,7 @@ mod tests {
     /// uncapped name becomes a >255-byte path component, and
     /// Windows refuses the first file creation with os error 123
     /// (ERROR_INVALID_NAME) at 0 B. The sanitizer must cap the
-    /// name (200 UTF-8 bytes, extension kept) while keeping the
+    /// name (150 UTF-8 bytes, extension kept) while keeping the
     /// Arabic/emoji readable — and a short title must pass
     /// through untouched.
     #[test]
@@ -11912,6 +12084,88 @@ mod tests {
         );
         assert_eq!(sanitize_filename("a | b.mp4".to_string()), "a _ b.mp4");
         assert_eq!(sanitize_filename("".to_string()), "download");
+    }
+
+    /// Round 87.1 — a reserved Windows device name as the whole
+    /// stem is renamed (`CON` → `CON_`), with or without an
+    /// extension, in any case — Windows cannot create such a
+    /// file at all (os error 123 before a single byte). Names
+    /// that merely CONTAIN a reserved word, or a longer device
+    /// name, pass through: `CONSOLE`, `COM10`, `LPT0` and
+    /// `my.con.mp4` are all legal.
+    #[test]
+    fn sanitize_filename_renames_reserved_windows_device_names() {
+        assert_eq!(sanitize_filename("CON".to_string()), "CON_");
+        assert_eq!(sanitize_filename("con.mp4".to_string()), "con_.mp4");
+        assert_eq!(sanitize_filename("COM1.txt".to_string()), "COM1_.txt");
+        assert_eq!(sanitize_filename("lpt9".to_string()), "lpt9_");
+        assert_eq!(sanitize_filename("Aux".to_string()), "Aux_");
+        assert_eq!(sanitize_filename("NUL.mp4".to_string()), "NUL_.mp4");
+        assert_eq!(sanitize_filename("prn".to_string()), "prn_");
+        assert_eq!(sanitize_filename("CONSOLE.mp4".to_string()), "CONSOLE.mp4");
+        assert_eq!(sanitize_filename("COM10.mp4".to_string()), "COM10.mp4");
+        assert_eq!(sanitize_filename("LPT0.mp4".to_string()), "LPT0.mp4");
+        assert_eq!(sanitize_filename("my.con.mp4".to_string()), "my.con.mp4");
+        assert_eq!(sanitize_filename("CONCERT.mp4".to_string()), "CONCERT.mp4");
+    }
+
+    /// Round 87.1 — the direct cookie retry fires once, on the
+    /// first attempt only: LoginRequired always (Round 87), and
+    /// CdnRefused ONLY for a TikTok page (a bare TikTok 403 is
+    /// CdnRefused, not LoginRequired — without this arm a
+    /// TikTok download refused for missing cookies never
+    /// retried). A CdnRefused failure anywhere else, any other
+    /// kind, and any second attempt never retry.
+    #[test]
+    fn direct_cookie_retry_applies_only_for_login_or_tiktok_cdn_refused() {
+        use crate::ytdlp::YtDlpErrorKind as K;
+        let tiktok = "https://www.tiktok.com/@user/video/123";
+        let youtube = "https://www.youtube.com/watch?v=abc";
+        assert!(DownloadManager::direct_cookie_retry_applies(
+            K::LoginRequired,
+            tiktok,
+            1
+        ));
+        assert!(DownloadManager::direct_cookie_retry_applies(
+            K::LoginRequired,
+            youtube,
+            1
+        ));
+        assert!(DownloadManager::direct_cookie_retry_applies(
+            K::CdnRefused,
+            tiktok,
+            1
+        ));
+        assert!(!DownloadManager::direct_cookie_retry_applies(
+            K::CdnRefused,
+            youtube,
+            1
+        ));
+        assert!(!DownloadManager::direct_cookie_retry_applies(
+            K::CdnRefused,
+            "https://example.com/video.mp4",
+            1
+        ));
+        assert!(!DownloadManager::direct_cookie_retry_applies(
+            K::CdnRefused,
+            tiktok,
+            2
+        ));
+        assert!(!DownloadManager::direct_cookie_retry_applies(
+            K::LoginRequired,
+            tiktok,
+            2
+        ));
+        assert!(!DownloadManager::direct_cookie_retry_applies(
+            K::VideoUnavailable,
+            tiktok,
+            1
+        ));
+        assert!(!DownloadManager::direct_cookie_retry_applies(
+            K::BotBlocked,
+            tiktok,
+            1
+        ));
     }
 
     /// Round 87 — error-after-success (manual TikTok): a run that

@@ -1,5 +1,4 @@
-import { useEffect, useState, type MouseEvent } from 'react'
-import { invoke } from '@tauri-apps/api/core'
+import { useEffect, useState } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Copy, Minus, Square, X } from 'lucide-react'
 
@@ -48,11 +47,16 @@ import { Copy, Minus, Square, X } from 'lucide-react'
  *  `onDoubleClick` is gone — keeping it would toggle maximize
  *  TWICE (native + React) and net out to nothing.
  *
- *  The explicit `startDragging()` stays as a fallback, but its
- *  failure is no longer silent: the R86 `.catch(() => undefined)`
- *  hid whether the handler even fired on the Add URL dialog.
- *  A rejection now goes to `log_frontend` (startup.log) AND
- *  `console.error`, so the next failure names itself.
+ *  Round 87.1 — exactly ONE drag path: the explicit
+ *  `startDragging()` fallback is REMOVED, keeping
+ *  `data-tauri-drag-region="deep"` alone. Two drag starts per
+ *  click (native region + explicit call) can leave the window
+ *  stuck/released, and the R86 onMouseDown alone already
+ *  failed to move the dialog — one path, owned by the native
+ *  script, is the only behaviour the retest can judge. The
+ *  `log_frontend` command stays registered in lib.rs as a
+ *  diagnostic hook (other callers may use it); this component
+ *  simply no longer calls it.
  *
  *  The icon is `/icon.png` — the chosen logo, copied into
  *  `app/public/` so Vite bundles it (the src-tauri icons are
@@ -128,19 +132,6 @@ export function TitleBar({
     }
   }, [])
 
-  // Round 87 — a `startDragging()` failure is never silent
-  // again (see the header comment): the rejection goes to
-  // startup.log via the `log_frontend` command AND to the
-  // DevTools console, so the next failure names itself instead
-  // of leaving a window that will not move. The log invoke is
-  // best-effort — a failure to log must not throw out of the
-  // drag handler.
-  function reportDragError(error: unknown) {
-    const message = `TitleBar startDragging failed: ${error instanceof Error ? error.message : String(error)}`
-    console.error(message)
-    void invoke('log_frontend', { message }).catch(() => undefined)
-  }
-
   // Round 86 — a REAL minimize to the Windows taskbar (see
   // the header comment): the old `hide()` here sent the window
   // to the tray on minimize, where no taskbar button existed
@@ -176,25 +167,12 @@ export function TitleBar({
               // grabbing them selected text instead of dragging.
               // "deep" drags on any click in the subtree, and
               // double-click maximize is the native path too.
+              // Round 87.1 — this attribute is the ONLY drag
+              // path: no `onMouseDown` → `startDragging()` —
+              // two drag starts per click can leave the window
+              // stuck, and the explicit call alone already
+              // failed to move the dialog in R86.
               'data-tauri-drag-region': 'deep' as const,
-              // Round 86 — reliable drag (Jumani): the drag
-              // region alone stalls after ~10 px on Windows
-              // when child elements (the logo img, the title
-              // span) intercept hit-testing, so a mousedown on
-              // the header also starts the drag explicitly.
-              // Buttons/inputs are skipped (they sit outside
-              // the region anyway). Round 87 — the native
-              // "deep" region is now the primary path; this
-              // stays as the fallback, and its failure is
-              // reported, never swallowed (see reportDragError).
-              onMouseDown: (e: MouseEvent<HTMLDivElement>) => {
-                if (
-                  e.button === 0 &&
-                  !(e.target as HTMLElement).closest('button, input')
-                ) {
-                  void getCurrentWindow().startDragging().catch(reportDragError)
-                }
-              },
             }
           : {})}
         className="flex min-w-0 flex-1 items-center gap-2 px-3"

@@ -228,7 +228,7 @@ export function DownloadErrorDialog({
         <TitleBar title="Download failed" showMinimize={false} showMaximize={false} draggable={false} onClose={dismissCurrent} />
         <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
           {pollError ? (
-            <p className="text-sm text-danger">{pollError}</p>
+            <p className="selectable text-sm text-danger">{pollError}</p>
           ) : (
             <p className="text-sm text-text-muted">
               {loaded
@@ -271,13 +271,17 @@ export function DownloadErrorDialog({
           <circle cx="26" cy="36" r="2.4" fill="#0B0F24" />
         </svg>
         <div className="min-w-0">
+          {/* Round 87.1 — the Details text is copyable:
+              `selectable` lifts the page-wide `user-select:
+              none` (13a) for exactly this text, so an error can
+              be copied out. */}
           <p className="text-[15px] leading-relaxed">
             An error occurred during download. Please try again.
           </p>
           <p className="mt-3 text-[15px] leading-relaxed">
             <b className="font-semibold">Details:</b>
             <br />
-            <span className="text-danger">{detailsText}</span>
+            <span className="selectable text-danger">{detailsText}</span>
           </p>
         </div>
       </div>

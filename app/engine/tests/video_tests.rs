@@ -1344,7 +1344,9 @@ async fn direct_ytdlp_failure_surfaces_stderr_tail_and_logs_argv() {
     // reason, logs the redacted argv + yt-dlp version + tail,
     // passes the format's headers and the fallback selector,
     // and parses the stdout progress into a checkpoint.
-    let _fake_guard = FAKE_YTDLP_LOCK.lock().unwrap();
+    let _fake_guard = FAKE_YTDLP_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let server = MockServer::start(MockConfig {
         fail_status: Some(403),
         ..Default::default()
@@ -1458,7 +1460,9 @@ async fn round87_direct_ytdlp_first_attempt_sends_no_cookies() {
     // happens and the one argv must carry no --cookies at all —
     // even though the capture carried consented cookies. The
     // format's headers still reach yt-dlp on the first attempt.
-    let _fake_guard = FAKE_YTDLP_LOCK.lock().unwrap();
+    let _fake_guard = FAKE_YTDLP_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let log_path = dir.join("startup.log");
@@ -1528,6 +1532,162 @@ async fn round87_direct_ytdlp_first_attempt_sends_no_cookies() {
             .contains("Requested format is not available"),
         "the stderr reason must surface: {:?}",
         dl.error_message
+    );
+}
+
+// -- Round 87.1 — CdnRefused TikTok retry + scoped cookies --
+// A fake yt-dlp that refuses the cookieless first attempt with
+// a bare 403, then SUCCEEDS on the retry — and, on the retry,
+// dumps the `--cookies` file it was given into the argv log, so
+// the test can read what the retry actually sent. Same install
+// path / lock as the other fakes: one test at a time.
+#[cfg(unix)]
+struct FakeYtDlp403ThenSuccess {
+    dir: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl FakeYtDlp403ThenSuccess {
+    fn install(argv_path: &std::path::Path) -> Self {
+        let dir = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let script = dir.join("yt-dlp");
+        let body = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"2026.10.26\"; exit 0; fi\necho \"$@\" >> \"{}\"\nprev=\"\"; after=0; count=0; outtmpl=\"\"; outdir=\"\"; cfile=\"\"\nfor a in \"$@\"; do\n  if [ \"$after\" = 1 ]; then count=$((count + 1)); continue; fi\n  case \"$prev\" in -o) outtmpl=\"$a\" ;; -P) outdir=\"$a\" ;; --cookies) cfile=\"$a\" ;; esac\n  case \"$a\" in --) after=1 ;; esac\n  prev=\"$a\"\ndone\nif [ -n \"$cfile\" ]; then echo \"---cookies-file---\" >> \"{}\"; cat \"$cfile\" >> \"{}\"; name=$(printf '%s' \"$outtmpl\" | sed 's/%(ext)s/mp4/'); if [ -n \"$outdir\" ]; then target=\"$outdir/$name\"; else target=\"$name\"; fi; printf 'fake-merged-video-bytes' > \"$target\"; echo \"[download] 100% of 22.00B at 1.00B/s ETA 00:00\"; exit 0; fi\necho \"[download]  42.1% of 10.00MiB at  1.00MiB/s ETA 00:10\"\nsleep 1\necho \"ERROR: HTTP Error 403: Forbidden\" >&2\nexit 1\n",
+            argv_path.display(),
+            argv_path.display(),
+            argv_path.display()
+        );
+        std::fs::write(&script, body).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        Self { dir }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for FakeYtDlp403ThenSuccess {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.dir.join("yt-dlp"));
+    }
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn round87_1_tiktok_cdn_refused_retries_with_scoped_cookies() {
+    // Round 87.1 (items 2 + 3) — END TO END through the real
+    // direct runner: a TikTok quality-pick capture whose
+    // cookies carry their own domains (a `.tiktok.com` page
+    // cookie AND a `.tiktokcdn.com` CDN cookie) is confirmed,
+    // started, refused with a bare 403 on the cookieless first
+    // attempt, and must then retry ONCE with the capture's
+    // cookies — the retry's written cookies file must keep the
+    // CDN cookie on `.tiktokcdn.com`, not rewrite it to the
+    // page host. The fake dumps the cookies file it receives,
+    // so the assertion reads what the retry actually sent
+    // (the temp file is deleted when the attempt returns, so
+    // reading it afterwards would prove nothing).
+    let _fake_guard = FAKE_YTDLP_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let log_path = dir.join("startup.log");
+    store.set_log_path(log_path.clone());
+    let mut settings = store.get_settings().unwrap();
+    settings.default_download_folder = dir.to_string_lossy().to_string();
+    store.update_settings(&settings).unwrap();
+    let mgr = DownloadManager::new(store, 4);
+    let store = mgr.store();
+    let cookies_json = r#"[{"name":"session","value":"abc123","domain":".tiktok.com","path":"/"},{"name":"ttwid","value":"xyz789","domain":".tiktokcdn.com","path":"/"}]"#;
+    let pending = store
+        .enqueue_pending_link_resolved(
+            "https://v16-webapp-prime.us.tiktok.com/video/tos/useast2a/abc.mp4",
+            Some("https://www.tiktok.com/@user/video/123"),
+            Some(cookies_json),
+            &fetchline_engine::store::ResolvedLink {
+                filename: Some("video.mp4".to_string()),
+                headers: Some(
+                    r#"{"User-Agent":"Mozilla/5.0 TestAgent","Referer":"https://www.tiktok.com/"}"#
+                        .to_string(),
+                ),
+                source_url: Some("https://www.tiktok.com/@user/video/123".to_string()),
+                format_id: Some("18".to_string()),
+                audio_url: None,
+                fragmented: false,
+                filesize: None,
+            },
+        )
+        .unwrap();
+    let (id, _) = mgr
+        .confirm_pending_link(&pending.id, None, None, None, None, None, false)
+        .await
+        .unwrap();
+    let dl = mgr.get_download(&id).unwrap().unwrap();
+    assert!(
+        dl.direct_ytdlp,
+        "a TikTok quality pick must go direct from the start"
+    );
+    let argv_path = dir.join("fake-argv-87-1.txt");
+    let _fake = FakeYtDlp403ThenSuccess::install(&argv_path);
+    mgr.start_direct_ytdlp(&id).await.unwrap();
+    assert!(
+        wait_for_status(&mgr, &id, "complete", 30).await,
+        "the retry with cookies must complete, last status: {}",
+        mgr.get_download(&id).unwrap().unwrap().status
+    );
+    let argv = std::fs::read_to_string(&argv_path).unwrap();
+    // An invocation line starts with `--ignore-config` (the
+    // first argv element); the cookies-file dump the fake
+    // appends adds its own lines below the second invocation,
+    // so count invocations by that prefix, not by raw lines.
+    let invocations: Vec<&str> = argv
+        .lines()
+        .filter(|l| l.starts_with("--ignore-config"))
+        .collect();
+    assert_eq!(
+        invocations.len(),
+        2,
+        "exactly two yt-dlp runs: the cookieless first attempt + one cookie retry: {argv}"
+    );
+    assert!(
+        !invocations[0].contains("--cookies"),
+        "the first attempt must NOT forward the capture's cookies: {}",
+        invocations[0]
+    );
+    assert!(
+        invocations[1].contains("--cookies"),
+        "the retry must forward the capture's cookies: {}",
+        invocations[1]
+    );
+    // The retry's cookies file, as the fake received it: the
+    // CDN cookie keeps its own domain, the page cookie keeps
+    // its own — neither is rewritten to the page host.
+    assert!(
+        argv.contains(".tiktokcdn.com\tTRUE\t/\tFALSE\t0\tttwid\txyz789"),
+        "the CDN cookie must keep its .tiktokcdn.com domain in the retry's cookies file: {argv}"
+    );
+    assert!(
+        argv.contains(".tiktok.com\tTRUE\t/\tFALSE\t0\tsession\tabc123"),
+        "the page cookie must keep its .tiktok.com domain: {argv}"
+    );
+    let log = std::fs::read_to_string(&log_path).unwrap();
+    assert!(
+        log.contains(
+            "first attempt failed with cdn_refused — retrying once with the capture's cookies"
+        ),
+        "the retry line must name the real kind (cdn_refused), got: {log}"
+    );
+    let saved = dir.join("video.mp4");
+    assert!(
+        saved.is_file(),
+        "the retry must write the file: {}",
+        saved.display()
     );
 }
 
@@ -1662,7 +1822,9 @@ async fn round85_dash_merge_direct_fallback_succeeds_with_ext_template() {
     // the TikTok page skips the probe) must now complete, with
     // exactly one positional after "--" and "%(ext)s" in the
     // template.
-    let _fake_guard = FAKE_YTDLP_LOCK.lock().unwrap();
+    let _fake_guard = FAKE_YTDLP_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let server = MockServer::start(MockConfig {
         fail_status: Some(403),
         ..Default::default()
@@ -1963,6 +2125,12 @@ async fn round86_forced_ytdlp_format_env_var_replaces_selector() {
     // (the failing fake exits 1) and the argv the fake saw
     // carries `-f bogus`, not the row's format id. The env var
     // is restored on drop, so no other test can see it.
+    // Round 87.1 — the hook is gated on the `debug-hooks`
+    // cargo feature now (was: debug builds only). With the
+    // feature the forced format replaces the selector; without
+    // it the hook is dead and the row's own selector reaches
+    // yt-dlp — that is the SHIPPED build's behaviour, pinned
+    // here so the default suite stays green too.
     struct EnvGuard {
         prev: Option<String>,
     }
@@ -2012,19 +2180,30 @@ async fn round86_forced_ytdlp_format_env_var_replaces_selector() {
         mgr.get_download(&id).unwrap().unwrap().status
     );
     let argv = std::fs::read_to_string(&argv_path).unwrap();
-    assert!(
-        argv.contains("-f bogus"),
-        "the forced format must replace the selector in the argv: {argv}"
-    );
-    assert!(
-        !argv.contains("18/b[ext=mp4]/b"),
-        "the row's own selector must not reach yt-dlp: {argv}"
-    );
-    let log = std::fs::read_to_string(&log_path).unwrap();
-    assert!(
-        log.contains("start: reason=tiktok") && log.contains("bogus"),
-        "the start line must log the forced argv, got: {log}"
-    );
+    if cfg!(feature = "debug-hooks") {
+        assert!(
+            argv.contains("-f bogus"),
+            "the forced format must replace the selector in the argv: {argv}"
+        );
+        assert!(
+            !argv.contains("18/b[ext=mp4]/b"),
+            "the row's own selector must not reach yt-dlp: {argv}"
+        );
+        let log = std::fs::read_to_string(&log_path).unwrap();
+        assert!(
+            log.contains("start: reason=tiktok") && log.contains("bogus"),
+            "the start line must log the forced argv, got: {log}"
+        );
+    } else {
+        assert!(
+            argv.contains("18/b[ext=mp4]/b"),
+            "without the feature the hook is dead: the row's selector must reach yt-dlp: {argv}"
+        );
+        assert!(
+            !argv.contains("-f bogus"),
+            "without the feature the forced format must not reach yt-dlp: {argv}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -2654,7 +2833,9 @@ async fn round87_direct_ytdlp_retries_with_cookies_after_login_required() {
     // --cookies on attempt 1, --cookies on a temp Netscape
     // file on attempt 2 — and the temp file is deleted when
     // the run returns (RAII).
-    let _fake_guard = FAKE_YTDLP_LOCK.lock().unwrap();
+    let _fake_guard = FAKE_YTDLP_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let log_path = dir.join("startup.log");
@@ -2787,7 +2968,9 @@ async fn round87_direct_ytdlp_progress_events_advance() {
     // while the fake prints 10% -> 45.2% -> 90% -> 100% and
     // assert they advance (bytes strictly increasing, live
     // speed, the parsed 10 MiB total).
-    let _fake_guard = FAKE_YTDLP_LOCK.lock().unwrap();
+    let _fake_guard = FAKE_YTDLP_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
     let mut settings = store.get_settings().unwrap();
@@ -3414,12 +3597,18 @@ async fn round87_dash_both_urls_expired_refresh_before_children() {
 #[cfg(unix)]
 async fn round87_expire_shift_forces_prechildren_reresolve() {
     // Round 87 (item 5d) — `SONIC_FORCE_URL_EXPIRE_NOW_PLUS_SECS`
-    // shifts "now" in the expire check (debug builds only), so one
-    // run can force the pre-children re-resolve branch. Case A
-    // (no var): URLs valid for another hour are used as stored —
-    // the resolver is never invoked. Case B (shift +7200 s): the
-    // same URLs look expired, so the children come from the fresh
-    // resolve instead.
+    // shifts "now" in the expire check, so one run can force
+    // the pre-children re-resolve branch. Case A (no var):
+    // URLs valid for another hour are used as stored — the
+    // resolver is never invoked. Case B (shift +7200 s): the
+    // same URLs look expired, so the children come from the
+    // fresh resolve instead.
+    // Round 87.1 — the shift is gated on the `debug-hooks`
+    // cargo feature now (was: debug builds only). Without the
+    // feature Case B behaves exactly like Case A: the shift is
+    // ignored, the stored URLs are used, the resolver never
+    // runs — that is the SHIPPED build's behaviour, pinned
+    // here so the default suite stays green too.
     let _fake_guard = FAKE_YTDLP_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -3548,20 +3737,40 @@ async fn round87_expire_shift_forces_prechildren_reresolve() {
         let (video, audio) = mgr
             .ensure_dash_children(&parent, &good_audio_url)
             .await
-            .expect("children must be created from the fresh URLs");
-        assert_eq!(
-            video.url, fresh_video_url,
-            "the shift must force the refresh for the video child"
-        );
-        assert_eq!(
-            audio.url, fresh_audio_url,
-            "the shift must force the refresh for the audio child"
-        );
+            .expect("children must be created");
         let log = std::fs::read_to_string(&log_path).unwrap();
-        assert!(
-            log.contains("re-resolving before creating the children"),
-            "the forced refresh must be logged, got: {log}"
-        );
+        if cfg!(feature = "debug-hooks") {
+            assert_eq!(
+                video.url, fresh_video_url,
+                "the shift must force the refresh for the video child"
+            );
+            assert_eq!(
+                audio.url, fresh_audio_url,
+                "the shift must force the refresh for the audio child"
+            );
+            assert!(
+                log.contains("re-resolving before creating the children"),
+                "the forced refresh must be logged, got: {log}"
+            );
+        } else {
+            assert_eq!(
+                video.url, good_video_url,
+                "without the feature the shift is ignored: the stored URL is used"
+            );
+            assert_eq!(
+                audio.url, good_audio_url,
+                "without the feature the shift is ignored: the stored URL is used"
+            );
+            assert!(
+                !log.contains("re-resolving before creating the children"),
+                "without the feature no re-resolve must run, got: {log}"
+            );
+            let argv = std::fs::read_to_string(&argv_path).unwrap_or_default();
+            assert!(
+                !argv.contains("--dump-json"),
+                "without the feature the resolver must never be invoked, got argv: {argv}"
+            );
+        }
     }
 }
 

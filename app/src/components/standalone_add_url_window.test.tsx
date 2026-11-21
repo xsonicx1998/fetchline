@@ -8,8 +8,12 @@
 // mousedown landing directly on the region element, so grabbing
 // the title text selected it instead. The region is now "deep".
 // This test renders the REAL standalone window (not just the
-// TitleBar) and proves its title bar carries the deep region
-// and starts the drag.
+// TitleBar) and proves its title bar carries the deep region.
+//
+// Round 87.1 — exactly ONE drag path: the explicit
+// `startDragging()` call is gone, keeping `"deep"` alone — a
+// mousedown must NOT call `startDragging()` any more; the
+// native drag script owns the drag.
 //
 // Run with: npm run test:ui
 
@@ -43,13 +47,13 @@ vi.mock('../lib/api', () => ({
 }))
 
 describe('StandaloneAddUrlWindow drag (Round 87)', () => {
-  test('mousedown on the dialog title bar starts the drag', () => {
+  test('the dialog title bar carries the deep drag region and a mousedown does not call startDragging', () => {
     render(<StandaloneAddUrlWindow linkId="11111111-2222-3333-4444-555555555555" />)
     const title = screen.getByText('Add URL')
     expect(
       title.closest('div')?.getAttribute('data-tauri-drag-region'),
     ).toBe('deep')
     fireEvent.mouseDown(title)
-    expect(startDraggingMock).toHaveBeenCalledTimes(1)
+    expect(startDraggingMock).not.toHaveBeenCalled()
   })
 })

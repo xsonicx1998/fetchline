@@ -4,10 +4,7 @@
 // taskbar button existed to restore it from — the taskbar-restore
 // check failed in four consecutive rounds (R76, R83, R84, R85).
 // Minimize is now a REAL minimize to the Windows taskbar; only X
-// hides to the tray. The drag region alone stalled after ~10 px
-// on Windows when child elements (the logo img, the title span)
-// intercepted hit-testing, so a mousedown on the header also
-// calls `startDragging()` explicitly (Jumani's fix).
+// hides to the tray.
 //
 // Round 87 — the REAL cause of the R86 Add URL drag failure:
 // `data-tauri-drag-region="true"` only drags on a mousedown
@@ -15,9 +12,14 @@
 // (Tauri 2.12.5's injected drag.js: `el === composedPath[0]`).
 // A grab on the logo or the title text never started a drag and
 // selected text instead. The region is now `"deep"` (any click
-// in the subtree drags), and a `startDragging()` failure is
-// reported to startup.log via `log_frontend` + console.error,
-// never swallowed.
+// in the subtree drags).
+//
+// Round 87.1 — exactly ONE drag path: the explicit
+// `startDragging()` call is gone, keeping `"deep"` alone — two
+// drag starts per click can leave the window stuck/released,
+// and the R86 onMouseDown alone already failed to move the
+// dialog. A mousedown must NOT call `startDragging()` any more;
+// the native drag script owns the drag.
 //
 // Run with: npm run test:ui
 
@@ -25,14 +27,12 @@ import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { TitleBar } from './TitleBar'
 
-const { minimizeMock, hideMock, closeMock, startDraggingMock, logFrontendMock } =
-  vi.hoisted(() => ({
-    minimizeMock: vi.fn(() => Promise.resolve()),
-    hideMock: vi.fn(() => Promise.resolve()),
-    closeMock: vi.fn(() => Promise.resolve()),
-    startDraggingMock: vi.fn(() => Promise.resolve()),
-    logFrontendMock: vi.fn(() => Promise.resolve()),
-  }))
+const { minimizeMock, hideMock, closeMock, startDraggingMock } = vi.hoisted(() => ({
+  minimizeMock: vi.fn(() => Promise.resolve()),
+  hideMock: vi.fn(() => Promise.resolve()),
+  closeMock: vi.fn(() => Promise.resolve()),
+  startDraggingMock: vi.fn(() => Promise.resolve()),
+}))
 vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: () => ({
     minimize: minimizeMock,
@@ -43,16 +43,12 @@ vi.mock('@tauri-apps/api/window', () => ({
     onResized: () => Promise.resolve(() => {}),
   }),
 }))
-vi.mock('@tauri-apps/api/core', () => ({
-  invoke: logFrontendMock,
-}))
 
 beforeEach(() => {
   minimizeMock.mockClear()
   hideMock.mockClear()
   closeMock.mockClear()
   startDraggingMock.mockClear()
-  logFrontendMock.mockClear()
 })
 
 describe('TitleBar minimize (Round 86)', () => {
@@ -79,27 +75,29 @@ describe('TitleBar minimize (Round 86)', () => {
   })
 })
 
-describe('TitleBar drag (Round 86)', () => {
-  test('mousedown on the title starts the drag', () => {
+describe('TitleBar drag (Round 87.1: exactly one path)', () => {
+  test('mousedown on the title does NOT call startDragging — the "deep" region owns the drag', () => {
     render(<TitleBar title="Sonic Manager" />)
+    // The native drag.js handles the drag from the attribute
+    // alone; the component must not start a second drag.
+    const region = screen.getByText('Sonic Manager').closest('div')
+    expect(region?.getAttribute('data-tauri-drag-region')).toBe('deep')
     fireEvent.mouseDown(screen.getByText('Sonic Manager'))
-    expect(startDraggingMock).toHaveBeenCalledTimes(1)
-  })
-
-  test('right-click mousedown does not start the drag', () => {
-    render(<TitleBar title="Sonic Manager" />)
-    fireEvent.mouseDown(screen.getByText('Sonic Manager'), { button: 2 })
     expect(startDraggingMock).not.toHaveBeenCalled()
   })
 
-  test('mousedown on a button does not start the drag', () => {
+  test('mousedown on the logo image does NOT call startDragging either', () => {
     render(<TitleBar title="Sonic Manager" />)
-    fireEvent.mouseDown(screen.getByRole('button', { name: 'Minimize' }))
+    const img = document.querySelector('img[alt=""]')
+    if (!img) throw new Error('no logo img rendered')
+    fireEvent.mouseDown(img)
     expect(startDraggingMock).not.toHaveBeenCalled()
   })
 
   test('a non-draggable window has no drag region', () => {
     render(<TitleBar title="Sonic Manager" draggable={false} />)
+    const region = screen.getByText('Sonic Manager').closest('div')
+    expect(region?.getAttribute('data-tauri-drag-region')).toBeNull()
     fireEvent.mouseDown(screen.getByText('Sonic Manager'))
     expect(startDraggingMock).not.toHaveBeenCalled()
   })
@@ -114,36 +112,6 @@ describe('TitleBar drag region (Round 87)', () => {
     // instead of dragging. "deep" covers the whole subtree.
     const region = screen.getByText('Sonic Manager').closest('div')
     expect(region?.getAttribute('data-tauri-drag-region')).toBe('deep')
-  })
-
-  test('a mousedown on the logo image starts the drag too', () => {
-    render(<TitleBar title="Sonic Manager" />)
-    const img = document.querySelector('img[alt=""]')
-    if (!img) throw new Error('no logo img rendered')
-    fireEvent.mouseDown(img)
-    expect(startDraggingMock).toHaveBeenCalledTimes(1)
-  })
-
-  test('a startDragging failure is reported, never swallowed', async () => {
-    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-    try {
-      startDraggingMock.mockRejectedValueOnce(new Error('permission denied'))
-      render(<TitleBar title="Sonic Manager" />)
-      fireEvent.mouseDown(screen.getByText('Sonic Manager'))
-      await vi.waitFor(() => {
-        expect(logFrontendMock).toHaveBeenCalledWith(
-          'log_frontend',
-          expect.objectContaining({
-            message: expect.stringContaining('startDragging failed'),
-          }),
-        )
-      })
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining('startDragging failed'),
-      )
-    } finally {
-      consoleSpy.mockRestore()
-    }
   })
 
   test('the standalone Add URL dialog title bar drags (R86 regression)', () => {
@@ -162,7 +130,5 @@ describe('TitleBar drag region (Round 87)', () => {
     )
     const region = screen.getByText('movie.mp4').closest('div')
     expect(region?.getAttribute('data-tauri-drag-region')).toBe('deep')
-    fireEvent.mouseDown(screen.getByText('movie.mp4'))
-    expect(startDraggingMock).toHaveBeenCalledTimes(1)
   })
 })

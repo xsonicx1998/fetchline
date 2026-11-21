@@ -28,6 +28,20 @@ tokio = { version = "1", features = ["full"] }
 # database file by hand.
 rusqlite = { version = "0.32", features = ["bundled"] }
 
+# Round 87.1 — debug hooks: the `debug-hooks` feature gates
+# the debug-only environment overrides (`SONIC_FORCE_YTDLP_FORMAT`
+# and `SONIC_FORCE_URL_EXPIRE_NOW_PLUS_SECS`, read through
+# `debug_env` in manager.rs). OFF by default: a normal release
+# build never consults the environment for behaviour, so a stray
+# value on a user's machine cannot change what the shipped app
+# downloads. The VPS retest builds the TEST binary with
+# `--features debug-hooks` (forwarded by the src-tauri crate)
+# so the forced-failure tail check and the both-expired DASH
+# re-resolve check can run there; the shipped installer is
+# built without it. Startup logs "debug hooks ON" when it is.
+[features]
+debug-hooks = []
+
 # Round 75: the named mutex the extension's host probes to tell
 # whether the app is alive (Win32_System_Threading +
 # Win32_Foundation). Windows-only; the Linux build never sees it.

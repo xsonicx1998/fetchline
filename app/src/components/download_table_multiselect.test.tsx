@@ -9,6 +9,7 @@
 // Run with: npm run test:ui
 
 import { describe, expect, test, vi } from 'vitest'
+import { useState } from 'react'
 import { fireEvent, render, screen } from '@testing-library/react'
 import type { CategoryRow, DownloadRow, QueueRow } from '../lib/types'
 import { DownloadTable } from './DownloadTable'
@@ -87,7 +88,7 @@ function isSelected(filename: string): boolean {
 }
 
 function renderTable(props?: {
-  onSelect?: (id: string) => void
+  onSelect?: (id: string | null) => void
   onSelectionChange?: (ids: string[]) => void
   onRemove?: (d: DownloadRow) => void
   onRemoveMany?: (ds: DownloadRow[]) => void
@@ -217,5 +218,82 @@ describe('downloads-table multi-select (Round 87)', () => {
     expect(isSelected('file-a.zip')).toBe(false)
     expect(isSelected('file-b.zip')).toBe(false)
     expect(isSelected('file-c.zip')).toBe(true)
+  })
+})
+
+describe('deselecting the last row (Round 87.1)', () => {
+  // A wrapper that mirrors App: the anchor (`selectedId`) and
+  // the multi-selection live in the parent, fed by the table's
+  // callbacks — exactly the wiring whose staleness deleted a
+  // deselected row in R87.
+  function StatefulTable({
+    onRemove,
+    onRemoveMany,
+  }: {
+    onRemove: (d: DownloadRow) => void
+    onRemoveMany: (ds: DownloadRow[]) => void
+  }) {
+    const [selectedId, setSelectedId] = useState<string | null>('d1')
+    // The multi-selection itself lives in the table; the parent
+    // only mirrors it (and clears the anchor when it empties),
+    // so only the setter is kept here.
+    const [, setSelectedIds] = useState<string[]>(['d1'])
+    return (
+      <DownloadTable
+        downloads={DOWNLOADS}
+        categories={CATEGORIES}
+        queues={QUEUES}
+        selectedId={selectedId}
+        onSelect={setSelectedId}
+        onSelectionChange={(ids) => {
+          setSelectedIds(ids)
+          if (ids.length === 0) setSelectedId(null)
+        }}
+        onRemoveMany={onRemoveMany}
+        onOpenProgress={noop}
+        onAdd={noop}
+        onOpenFile={noop}
+        onOpenWith={noop}
+        onOpenFolder={noop}
+        onRedownload={noop}
+        onResume={noop}
+        onPause={noop}
+        onMoveToCategory={noop}
+        onRefreshAddress={noop}
+        onRemove={onRemove}
+        onMoveToQueue={noop}
+        onDeleteFromQueue={noop}
+        onShowProperties={noop}
+      />
+    )
+  }
+
+  test('Ctrl+clicking the last selected row off clears the anchor, and Delete is then a no-op', () => {
+    const onRemove = vi.fn()
+    const onRemoveMany = vi.fn()
+    render(<StatefulTable onRemove={onRemove} onRemoveMany={onRemoveMany} />)
+    expect(isSelected('file-a.zip')).toBe(true)
+    // Ctrl+click the only selected row: it toggles OFF.
+    fireEvent.click(rowElement('file-a.zip'), { ctrlKey: true })
+    expect(isSelected('file-a.zip')).toBe(false)
+    // Delete with nothing selected removes nothing at all —
+    // neither the multi path nor the single-row fallback.
+    fireEvent.keyDown(rowElement('file-a.zip'), { key: 'Delete' })
+    expect(onRemoveMany).not.toHaveBeenCalled()
+    expect(onRemove).not.toHaveBeenCalled()
+    // And the row is still there to click again.
+    fireEvent.click(rowElement('file-a.zip'))
+    expect(isSelected('file-a.zip')).toBe(true)
+  })
+
+  test('Ctrl+clicking the last selected row off reports onSelect(null)', () => {
+    const onSelect = vi.fn()
+    const onSelectionChange = vi.fn()
+    renderTable({ onSelect, onSelectionChange })
+    fireEvent.click(rowElement('file-b.zip'))
+    expect(onSelect).toHaveBeenLastCalledWith('d2')
+    fireEvent.click(rowElement('file-b.zip'), { ctrlKey: true })
+    expect(onSelectionChange).toHaveBeenLastCalledWith([])
+    expect(onSelect).toHaveBeenLastCalledWith(null)
   })
 })

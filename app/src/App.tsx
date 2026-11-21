@@ -1064,6 +1064,16 @@ export default function App() {
     else if (selected) requestRemove(selected)
   }
 
+  /** Round 87.1 — the table mirrors its multi-selection
+   *  here; when it empties (Ctrl+click toggled the last row
+   *  OFF) the anchor goes with it, so toolbar / menu Delete
+   *  has nothing to act on instead of deleting the stale
+   *  anchor row. */
+  function handleSelectionChange(ids: string[]) {
+    setSelectedIds(ids)
+    if (ids.length === 0) setSelectedId(null)
+  }
+
   const toolbarActions = {
     add: () => setShowAdd(true),
     resume: () => selected && void run(() => resumeDownload(selected.id), { immediate: true }),
@@ -1269,7 +1279,7 @@ export default function App() {
               queues={queues}
               selectedId={selectedId}
               onSelect={setSelectedId}
-              onSelectionChange={setSelectedIds}
+              onSelectionChange={handleSelectionChange}
               onRemoveMany={requestRemoveMany}
               onOpenProgress={(id) => void openProgressWindowFor(id, false)}
               onAdd={() => setShowAdd(true)}

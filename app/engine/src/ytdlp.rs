@@ -1449,6 +1449,23 @@ pub fn format_label(height: u32, _has_audio: bool, _needs_merge: bool) -> String
     }
 }
 
+/// Round 87.1 — is this stem a reserved Windows device name
+/// (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`)?
+/// Case-insensitive, stem only (no extension — the caller
+/// splits that off first). Windows refuses to create such a
+/// file at all, so a video titled e.g. "CON" fails with os
+/// error 123 before a single byte; renaming it (`CON_`) keeps
+/// the download working. `CONSOLE` / `COM10` / `LPT0` are NOT
+/// reserved and pass through unchanged.
+pub(crate) fn is_reserved_windows_device_name(stem: &str) -> bool {
+    let upper = stem.to_ascii_uppercase();
+    matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (upper.len() == 4
+            && (upper.starts_with("COM") || upper.starts_with("LPT"))
+            && upper.as_bytes()[3].is_ascii_digit()
+            && upper.as_bytes()[3] != b'0')
+}
+
 /// A Windows-safe filename from a video title. The illegal
 /// characters (`<>:"/\|?*` and control characters) become
 /// `_`, whitespace runs collapse to one space, and leading /
@@ -1504,6 +1521,29 @@ pub fn sanitize_title_filename(title: &str, ext: &str) -> String {
         stem = stem.trim_end_matches(|c| c == '.' || c == ' ').to_string();
         if stem.is_empty() {
             stem = "video".to_string();
+        }
+    }
+    // Round 87.1 — a reserved Windows device name as the whole
+    // stem (`CON`, `COM1`, …) can never be created on Windows;
+    // rename it, keeping the extension. The title may already
+    // carry `.ext`, so the check sees the stem WITHOUT it; the
+    // 100-char cut above cannot produce a reserved stem (they
+    // are ≤ 4 chars), and the check runs after it so a long
+    // title that truncates onto a reserved word is covered too.
+    {
+        let mut bare = stem.as_str();
+        if !ext.is_empty() {
+            let suffix = format!(".{ext}");
+            if bare.to_ascii_lowercase().ends_with(&suffix) {
+                bare = &bare[..bare.len() - suffix.len()];
+            }
+        }
+        if is_reserved_windows_device_name(bare) {
+            stem = if bare.len() < stem.len() {
+                format!("{bare}_.{ext}")
+            } else {
+                format!("{bare}_")
+            };
         }
     }
     if ext.is_empty() {
@@ -3081,6 +3121,29 @@ mod tests {
         let got = sanitize_title_filename(&long, "mp4");
         assert_eq!(got.len(), 100 + ".mp4".len());
         assert!(got.starts_with(&"a".repeat(100)));
+    }
+
+    /// Round 87.1 — the same reserved-device rule as
+    /// `sanitize_filename`: a title that IS a device name
+    /// (`CON`, `COM1`, …) is renamed, whether or not it
+    /// already carries the extension; anything else passes
+    /// through. (This sanitizer has no production callers
+    /// today — the direct path uses the manager's
+    /// `sanitize_filename` — but it is `pub` and the rule must
+    /// hold wherever it is used.)
+    #[test]
+    fn sanitize_title_filename_renames_reserved_windows_device_names() {
+        assert_eq!(sanitize_title_filename("CON", "mp4"), "CON_.mp4");
+        assert_eq!(sanitize_title_filename("CON.mp4", "mp4"), "CON_.mp4");
+        assert_eq!(sanitize_title_filename("com1", "mp4"), "com1_.mp4");
+        assert_eq!(sanitize_title_filename("LPT9", "webm"), "LPT9_.webm");
+        assert_eq!(sanitize_title_filename("NUL", "mp4"), "NUL_.mp4");
+        assert_eq!(sanitize_title_filename("CONSOLE", "mp4"), "CONSOLE.mp4");
+        assert_eq!(sanitize_title_filename("COM10", "mp4"), "COM10.mp4");
+        assert_eq!(sanitize_title_filename("my.con", "mp4"), "my.con.mp4");
+        assert_eq!(sanitize_title_filename("video", "mp4"), "video.mp4");
+        // No extension at all: the renamed stem stands alone.
+        assert_eq!(sanitize_title_filename("AUX", ""), "AUX_");
     }
 
     #[test]

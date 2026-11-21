@@ -12,7 +12,12 @@ interface DownloadTableProps {
    *  queue" section. */
   queues: QueueRow[]
   selectedId: string | null
-  onSelect: (id: string) => void
+  /** Round 87.1 — the anchor can now be cleared: when the
+   *  user Ctrl+clicks the last selected row OFF, the table
+   *  reports `null` so App drops its stale anchor too (the
+   *  R87 bug: the anchor still pointed at the deselected row
+   *  and Delete removed it anyway). */
+  onSelect: (id: string | null) => void
   /** Round 87 (13b) — multi-select: the table reports the
    *  whole selection (not just the anchor) so the toolbar /
    *  menu Delete removes ALL selected rows at once. */
@@ -214,14 +219,23 @@ export function DownloadTable({
       anchorRef.current = d.id
     }
     commitSelection(next)
-    onSelect(d.id)
+    // Round 87.1 — an emptied set clears the anchor too:
+    // reporting the toggled-off row as the anchor again
+    // would leave App pointing at a row nothing selects, and
+    // its Delete would remove that row. A non-empty set still
+    // reports the clicked row as the anchor.
+    onSelect(next.size === 0 ? null : d.id)
   }
 
   /** Round 87 (13b) — Delete removes ALL selected rows at
-   *  once (in table order); with no multi-selection it removes
-   *  just this row, as before. */
+   *  once (in table order). Round 87.1 — with NOTHING
+   *  selected it is a NO-OP: the old fallback removed the
+   *  focused row, so Ctrl+clicking the last row off and
+   *  pressing Delete deleted a row nothing selected.
+   */
   function removeSelected(d: DownloadRow) {
-    if (selectedIds.size > 0 && onRemoveMany) {
+    if (selectedIds.size === 0) return
+    if (onRemoveMany) {
       const rows = downloads.filter((row) => selectedIds.has(row.id))
       onRemoveMany(rows.length > 0 ? rows : [d])
     } else {

@@ -323,6 +323,67 @@ describe('Facebook reel resolve', () => {
     expect(vi.mocked(api.probeUrl)).not.toHaveBeenCalled()
   })
 
+  test('submitting the reel sends the height-0 best row’s format_id to the download start', async () => {
+    // Round 87.1 (item 6, TRACE FIRST) — the R87 parser
+    // synthesizes quality rows with height 0 for codec-less
+    // progressive MP4s. The trace proves selection is by
+    // format_id, never by height: the dialog passes the whole
+    // row to `addResolvedVideoDownload` (see the video-URL
+    // submit test), the extension's pick carries `format_id`
+    // (video-detect.js), and the engine's
+    // `add_resolved_video_download` uses `row.format_id` /
+    // `row.url` directly — `select_quality` (height-keyed) is
+    // only called inside `quality_rows` for height-keyed rows,
+    // and the height-0 fallback rows bypass it entirely. This
+    // test pins the dialog half: submitting a reel whose rows
+    // are BOTH height 0 must start the download with the `hd`
+    // row's format_id, not a height lookup.
+    vi.mocked(api.ytdlpResolve).mockResolvedValue({
+      title: 'Reel video',
+      is_live: false,
+      degraded: false,
+      warning: null,
+      formats: [
+        row({
+          height: 0,
+          label: 'sd',
+          ext: 'mp4',
+          has_audio: false,
+          needs_merge: false,
+          filesize: null,
+          url: 'https://video-ord5-2.xx.fbcdn.net/sd.mp4',
+          format_id: 'sd',
+        }),
+        row({
+          height: 0,
+          label: 'hd',
+          ext: 'mp4',
+          has_audio: false,
+          needs_merge: false,
+          filesize: null,
+          url: 'https://video-ord5-1.xx.fbcdn.net/hd.mp4',
+          format_id: 'hd',
+        }),
+      ],
+    })
+    const { onAdded } = renderDialog(REEL_URL)
+    await waitFor(() => expect(screen.getByText('hd · MP4')).toBeTruthy(), {
+      timeout: 5000,
+    })
+
+    fireEvent.click(screen.getByText('Start Download'))
+    await waitFor(() => expect(onAdded).toHaveBeenCalledWith('dl-1'), { timeout: 5000 })
+
+    expect(vi.mocked(api.addResolvedVideoDownload)).toHaveBeenCalledTimes(1)
+    const call = vi.mocked(api.addResolvedVideoDownload).mock.calls[0][0]
+    // The height-0 row is selected by its format_id, not by a
+    // height that does not exist.
+    expect(call.row.height).toBe(0)
+    expect(call.row.format_id).toBe('hd')
+    expect(call.row.url).toBe('https://video-ord5-1.xx.fbcdn.net/hd.mp4')
+    expect(call.row.label).toBe('hd')
+  })
+
   test('zero formats WITH a warning says the video was found but unusable', async () => {
     vi.mocked(api.ytdlpResolve).mockResolvedValue({
       ...resolveResult(),

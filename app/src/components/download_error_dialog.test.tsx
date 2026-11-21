@@ -109,6 +109,15 @@ describe('error dialog queue', () => {
     expect(document.activeElement?.textContent).toBe('OK')
   })
 
+  test('the Details error text stays selectable (Round 87.1)', async () => {
+    // R87 disabled text selection page-wide; the error text
+    // is copyable — the Details span carries `.selectable`.
+    renderDialog()
+    await waitFor(() => expect(screen.getByText('Connection lost')).toBeTruthy())
+    const details = screen.getByText('Connection lost')
+    expect(details.className).toContain('selectable')
+  })
+
   test('queues three errors: exactly one OK click per error, then closes', async () => {
     renderDialog()
     await waitFor(() => expect(screen.getByText('Connection lost')).toBeTruthy())

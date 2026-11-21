@@ -212,6 +212,19 @@ fn build_manager(app: &AppHandle) -> Result<Arc<DownloadManager>, String> {
         }
     };
     log_startup(log, "store opened");
+    // Round 87.1 — one line naming the binary: when the
+    // `debug-hooks` cargo feature is on, the debug env hooks
+    // (`SONIC_FORCE_YTDLP_FORMAT`,
+    // `SONIC_FORCE_URL_EXPIRE_NOW_PLUS_SECS`) are honoured, so
+    // a retest can see from startup.log which binary it is
+    // testing. The TEST build enables the feature; the shipped
+    // installer is built without it, and then this line is
+    // absent entirely.
+    #[cfg(feature = "debug-hooks")]
+    log_startup(
+        log,
+        "debug hooks ON — SONIC_FORCE_YTDLP_FORMAT / SONIC_FORCE_URL_EXPIRE_NOW_PLUS_SECS are honoured in this build",
+    );
     // Round 56 (§7.1): point the store's diagnostics sink at the
     // same startup.log — the engine's probe/checkpoint/lock log
     // lines land in the file the live tests already read. The
