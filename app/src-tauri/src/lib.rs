@@ -3325,6 +3325,9 @@ fn build_system_tray(app: &AppHandle) -> Result<(), String> {
                 // Move fires constantly while the cursor crosses
                 // the icon — logging it would flood startup.log.
                 TrayIconEvent::Move { .. } => {}
+                // TrayIconEvent is #[non_exhaustive] (tauri 2.12.5):
+                // a wildcard arm is required for the match to compile.
+                _ => {}
             }
         })
         .build(app)
