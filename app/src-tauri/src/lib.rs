@@ -1372,6 +1372,37 @@ async fn open_error_dialog(
     let log = startup_log_path_from_app(&app);
     let log = log.as_deref();
     let label = error_window_label(&download_id);
+    // Round 85 — ONE error dialog at a time. The R84 retest
+    // found OK "sometimes needs 2–3 clicks": every failed
+    // download opened its OWN stacked window (one per id), so
+    // one OK click only dismissed the top copy. If any error
+    // dialog window already exists, queue this failure INTO it
+    // instead of opening another: the dialog shows "N more
+    // errors" and OK steps through them, with "Dismiss all" to
+    // clear the queue. The frontend listens for
+    // `error-dialog-queued` (see DownloadErrorDialog). The
+    // check runs under the window-build mutex, so two failures
+    // in the same poll cannot race past each other into two
+    // windows.
+    if let Some(existing) = app
+        .webview_windows()
+        .values()
+        .find(|w| w.label().starts_with("error-"))
+    {
+        let _ = existing.emit(
+            "error-dialog-queued",
+            serde_json::json!({ "download_id": download_id }),
+        );
+        show_window_ready(existing);
+        log_startup(
+            log,
+            &format!(
+                "error dialog {} already open — queued {download_id} into it",
+                existing.label()
+            ),
+        );
+        return Ok(());
+    }
     if let Some(window) = app.get_webview_window(&label) {
         // Already open — bring it forward instead of a second
         // copy (the main window can notice the same failure
@@ -1398,12 +1429,10 @@ fn add_url_window_label(link_id: &str) -> String {
 /// `TitleBar.tsx` — but for a pending browser-extension or
 /// clipboard capture, NOT tied to the main window: it can appear
 /// on its own while the main window is hidden to the tray, and it
-/// pops in front (see `show_window_ready`). Fixed size
-/// (~560x520, the Add URL dialog's size), not resizable (the
-/// user's Round 74 item 16 correction: drag + resize apply only
-/// to the main window and the active progress window), and with
-/// no heartbeat registration and no auto-reload (transient, like
-/// the complete/error dialogs). The pending link id arrives
+/// pops in front (see `show_window_ready`). Preferred size
+/// ~560x520, the Add URL dialog's size, with no heartbeat
+/// registration and no auto-reload (transient, like the
+/// complete/error dialogs). The pending link id arrives
 /// through an initialization script (`window.__ADD_URL_ID__`),
 /// the same Round 57 mechanism as the progress window, with the
 /// `#add-url=<id>` hash as the frontend's fallback. The window
@@ -1411,6 +1440,20 @@ fn add_url_window_label(link_id: &str) -> String {
 /// the dialog shows the file name at the top instead of
 /// "Add URL", and the URL field is locked) — "Add URL" when the
 /// link has no file name to show.
+///
+/// Round 85 — RESIZABLE, with a small minimum (460x360) instead
+/// of the Round 74 fixed 560x520: the R84 retest found the
+/// dialog "not draggable and taller than a 500px viewport
+/// (buttons below the fold)". A fixed 520-tall window cannot fit
+/// a ~500px viewport at all — the footer is unreachable, and
+/// the minimum (which equalled the size) forbade shrinking it.
+/// The dialog itself is a flex column with a scrolling body and
+/// a shrink-0 footer (see AddDownloadDialog), so a smaller
+/// window stays usable: the body scrolls, Start Download stays
+/// visible. The preferred size is unchanged, so normal screens
+/// see exactly the same window; this only unblocks small (RDP)
+/// viewports. Drag still comes from the TitleBar's
+/// `data-tauri-drag-region` (Round 76 (1)).
 fn build_add_url_window(
     app: &AppHandle,
     manager: &Arc<DownloadManager>,
@@ -1472,8 +1515,8 @@ fn build_add_url_window(
         .title(title)
         .decorations(false)
         .inner_size(560.0, 520.0)
-        .min_inner_size(560.0, 520.0)
-        .resizable(false)
+        .min_inner_size(460.0, 360.0)
+        .resizable(true)
         .center()
         .devtools(true)
         // Round 71 (C1/C3) — #0B0F24 first paint + hidden until
@@ -3031,6 +3074,9 @@ async fn confirm_pending_link(
 /// creates the download from the row's stream URLs — never
 /// from the page URL (a watch-page URL probes size 0 with no
 /// ranges). Returns the created download id and its probe info.
+/// Round 85 — `cookies` is the browser's consented `Cookie`
+/// header for the page when the caller has one (a capture
+/// flow); the manual dialog passes none (cookieless).
 #[tauri::command]
 async fn add_resolved_video_download(
     state: State<'_, AppState>,
@@ -3042,6 +3088,7 @@ async fn add_resolved_video_download(
     queue: Option<String>,
     speed_limit_kbps: Option<i64>,
     start_now: bool,
+    cookies: Option<String>,
 ) -> Result<(String, ProbeInfo), String> {
     state
         .manager
@@ -3054,6 +3101,7 @@ async fn add_resolved_video_download(
             queue,
             speed_limit_kbps,
             start_now,
+            cookies,
         )
         .await
         .map_err(|e| e.to_string())
@@ -3172,6 +3220,22 @@ async fn delete_grabber_project(state: State<'_, AppState>, id: String) -> Resul
         .map_err(|e| e.to_string())
 }
 
+/// Round 85 — restore the main window from the tray: a window
+/// hidden to the tray (Round 65) is `show()`n; a window the OS
+/// minimized (taskbar minimize, or Windows minimizing it) needs
+/// `unminimize()` FIRST — `show()` alone leaves a minimized
+/// window minimized, which is why the R84 retest's taskbar
+/// restore did nothing while tray double-click (which fires
+/// Click Up) worked. Order: unminimize, show, focus. Every
+/// call is best-effort — a missing main window is not an error.
+fn restore_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
 /// Round 65 — system tray, like IDM: a tray icon (the app logo)
 /// lives by the clock while the app runs. Left-click shows the
 /// main window again; right-click opens the menu (Show / Exit).
@@ -3179,6 +3243,15 @@ async fn delete_grabber_project(state: State<'_, AppState>, id: String) -> Resul
 /// window is hidden. Built best-effort in setup: if the icon or
 /// the tray cannot be created the app still runs — the tray is a
 /// convenience, not a requirement.
+///
+/// Round 85 — restore handles BOTH left Click Up and left
+/// DoubleClick (a double-click used to restore only incidentally,
+/// via its two Click Up events). Every tray event is logged to
+/// startup.log (except Move, which fires constantly) so the VPS
+/// retest can tell which event actually fired. The Round 65
+/// hide-to-tray design STAYS: no real-minimize / Settings
+/// option was built here — that is a user decision, recorded
+/// in the Round 85 report, not implemented.
 fn build_system_tray(app: &AppHandle) -> Result<(), String> {
     let Some(icon) = app.default_window_icon() else {
         return Err("no default window icon for the tray".to_string());
@@ -3201,28 +3274,57 @@ fn build_system_tray(app: &AppHandle) -> Result<(), String> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event: MenuEvent| match event.id().as_ref() {
             "tray-show" => {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
+                restore_main_window(app);
             }
             "tray-exit" => app.exit(0),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
-            // Left-click (release) shows the main window again.
-            // Right-click pops the menu (handled by the tray
-            // itself); no action is needed here for it.
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = event
-            {
-                if let Some(window) = tray.app_handle().get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
+            // Left-click (release) and left double-click both
+            // restore the main window. Right-click pops the menu
+            // (handled by the tray itself); no action is needed
+            // here for it.
+            let app = tray.app_handle();
+            let log = startup_log_path_from_app(app);
+            let log = log.as_deref();
+            match event {
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } => {
+                    log_startup(log, "tray: left click (up) — restoring main window");
+                    restore_main_window(app);
                 }
+                TrayIconEvent::DoubleClick {
+                    button: MouseButton::Left,
+                    ..
+                } => {
+                    log_startup(log, "tray: left double-click — restoring main window");
+                    restore_main_window(app);
+                }
+                TrayIconEvent::Click {
+                    button,
+                    button_state,
+                    ..
+                } => {
+                    log_startup(
+                        log,
+                        &format!("tray: click {button:?} {button_state:?} — ignored"),
+                    );
+                }
+                TrayIconEvent::DoubleClick { button, .. } => {
+                    log_startup(log, &format!("tray: double-click {button:?} — ignored"));
+                }
+                TrayIconEvent::Enter { .. } => {
+                    log_startup(log, "tray: mouse enter");
+                }
+                TrayIconEvent::Leave { .. } => {
+                    log_startup(log, "tray: mouse leave");
+                }
+                // Move fires constantly while the cursor crosses
+                // the icon — logging it would flood startup.log.
+                TrayIconEvent::Move { .. } => {}
             }
         })
         .build(app)

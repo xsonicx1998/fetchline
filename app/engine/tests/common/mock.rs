@@ -129,6 +129,11 @@ pub struct MockServer {
     /// and zero GETs — these counters prove it.
     get_requests: Arc<AtomicUsize>,
     head_requests: Arc<AtomicUsize>,
+    /// Round 85 — GETs that carried a `Range` header. A normal
+    /// segmented download must still send Range for its segments
+    /// (the no-Range rule only omits the first/open-ended and
+    /// TikTok first requests) — this counter proves it.
+    ranged_gets: Arc<AtomicUsize>,
     /// Round 71 (B5) — GETs currently in flight (for the
     /// concurrency limit) and GETs refused with 429 so far.
     inflight_gets: Arc<AtomicUsize>,
@@ -152,6 +157,7 @@ impl MockServer {
         let gone = Arc::new(AtomicBool::new(false));
         let get_requests = Arc::new(AtomicUsize::new(0));
         let head_requests = Arc::new(AtomicUsize::new(0));
+        let ranged_gets = Arc::new(AtomicUsize::new(0));
         let inflight_gets = Arc::new(AtomicUsize::new(0));
         let rate_limited = Arc::new(AtomicUsize::new(0));
         let lm_version = Arc::new(AtomicU64::new(1));
@@ -172,6 +178,7 @@ impl MockServer {
         let g = Arc::clone(&gone);
         let gr = Arc::clone(&get_requests);
         let hr = Arc::clone(&head_requests);
+        let rg0 = Arc::clone(&ranged_gets);
         let ig0 = Arc::clone(&inflight_gets);
         let rl0 = Arc::clone(&rate_limited);
         let s = Arc::clone(&stop);
@@ -193,6 +200,7 @@ impl MockServer {
                         let gg = Arc::clone(&g);
                         let grr = Arc::clone(&gr);
                         let hrr = Arc::clone(&hr);
+                        let rgr = Arc::clone(&rg0);
                         let ig = Arc::clone(&ig0);
                         let rl = Arc::clone(&rl0);
                         let sab = Arc::clone(&sab0);
@@ -214,6 +222,7 @@ impl MockServer {
                                 gg.load(Ordering::SeqCst),
                                 grr,
                                 hrr,
+                                rgr,
                                 ig,
                                 rl,
                                 sab,
@@ -239,6 +248,7 @@ impl MockServer {
             gone,
             get_requests,
             head_requests,
+            ranged_gets,
             inflight_gets,
             rate_limited,
             lm_version,
@@ -342,6 +352,11 @@ impl MockServer {
         self.head_requests.load(Ordering::SeqCst)
     }
 
+    /// Round 85 — GETs that carried a `Range` header.
+    pub fn ranged_gets(&self) -> usize {
+        self.ranged_gets.load(Ordering::SeqCst)
+    }
+
     /// Round 71 (B5) — GETs refused with 429 so far: the test
     /// asserts this is > 0, proving the download completed
     /// DESPITE refusals, not because the limit never fired.
@@ -396,6 +411,7 @@ pub fn handle(
     gone: bool,
     get_requests: Arc<AtomicUsize>,
     head_requests: Arc<AtomicUsize>,
+    ranged_gets: Arc<AtomicUsize>,
     inflight_gets: Arc<AtomicUsize>,
     rate_limited: Arc<AtomicUsize>,
     stall_after_bytes: Arc<AtomicUsize>,
@@ -443,6 +459,15 @@ pub fn handle(
     let method = parts.next().unwrap_or("");
     if method == "GET" {
         get_requests.fetch_add(1, Ordering::SeqCst);
+        // Round 85 — a GET carrying a `Range` header is a
+        // ranged segment request (the probe's ranged fallback
+        // is `bytes=0-0` and counts here too).
+        if req
+            .lines()
+            .any(|l| l.to_ascii_lowercase().starts_with("range:"))
+        {
+            ranged_gets.fetch_add(1, Ordering::SeqCst);
+        }
     } else if method == "HEAD" {
         head_requests.fetch_add(1, Ordering::SeqCst);
     }

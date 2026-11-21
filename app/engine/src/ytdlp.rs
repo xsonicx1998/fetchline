@@ -302,6 +302,16 @@ impl YtDlpOutputTail {
         out.trim_end().to_string()
     }
 
+    /// Round 85 — the tail as ONE line, for the log: the same
+    /// lines `render` shows, joined with " | " instead of
+    /// newlines, so the tail text sits on the same log line as
+    /// `tail:` and a grep / Select-String for the reason finds
+    /// it. The caller redacts it first (`redact_ytdlp_text`),
+    /// exactly like the multi-line render.
+    pub fn render_one_line(&self) -> String {
+        self.render().replace('\n', " | ")
+    }
+
     /// The text the failure is mapped from: the stderr lines
     /// (the verdict lives there), falling back to stdout when
     /// stderr is empty. The combined `render` (with its
@@ -401,6 +411,16 @@ pub enum YtDlpErrorKind {
     /// for a video the watch page says isn't available
     /// anymore). `needs_login` is false for this kind.
     VideoUnavailable,
+    /// Round 85 — the CDN refused the request itself (HTTP
+    /// 403/401 on the stream URL), NOT a missing sign-in: the
+    /// video plays in the browser and the browser's cookies were
+    /// already sent where the flow has them. Mapping every 403
+    /// to LoginRequired told a signed-in user to sign in when
+    /// the site was refusing the request — the R84 TikTok /
+    /// YouTube 2160p "needs sign-in" misreport. `needs_login`
+    /// is false for this kind (the host answers that from
+    /// `kind == LoginRequired`).
+    CdnRefused,
     Private,
     GeoBlocked,
     Unsupported,
@@ -437,6 +457,7 @@ impl YtDlpError {
             YtDlpErrorKind::LoginRequired => "login_required",
             YtDlpErrorKind::BotBlocked => "bot_blocked",
             YtDlpErrorKind::VideoUnavailable => "video_unavailable",
+            YtDlpErrorKind::CdnRefused => "cdn_refused",
             YtDlpErrorKind::Private => "private",
             YtDlpErrorKind::GeoBlocked => "geo_blocked",
             YtDlpErrorKind::Unsupported => "unsupported",
@@ -473,6 +494,9 @@ impl YtDlpError {
             }
             YtDlpErrorKind::VideoUnavailable => {
                 "This video is unavailable — it may have been removed from YouTube.".to_string()
+            }
+            YtDlpErrorKind::CdnRefused => {
+                "The site refused the download request (HTTP 403)".to_string()
             }
             YtDlpErrorKind::Private => "This video is private or has been removed.".to_string(),
             YtDlpErrorKind::GeoBlocked => {
@@ -584,6 +608,21 @@ pub fn map_error(stderr: &str) -> YtDlpError {
             "This video needs you to be signed in.",
         );
     }
+    // Round 85 — the CDN refused the request itself (HTTP
+    // 403/401 on the stream URL): NOT a missing sign-in. The
+    // needles are the explicit HTTP-error phrasings, so a
+    // "please log in" line still falls through to the login
+    // rule below. Runs before the catch-all, which used to map
+    // ANY bare "403" / "401" / "cookies" to LoginRequired —
+    // the R84 "needs sign-in" misreport on TikTok and YouTube
+    // 2160p. "HTTP Error 403: Forbidden" reaches this rule
+    // (it contains both "http error 403" and "403: forbidden").
+    if has("http error 403") || has("403: forbidden") || has("401") {
+        return err(
+            YtDlpErrorKind::CdnRefused,
+            "The site refused the download request (HTTP 403).",
+        );
+    }
     if has("private") || has("has been removed") {
         return err(
             YtDlpErrorKind::Private,
@@ -596,13 +635,11 @@ pub fn map_error(stderr: &str) -> YtDlpError {
             "This video is not available in your country.",
         );
     }
-    if has("sign in")
-        || has("login required")
-        || has("log in")
-        || has("cookies")
-        || has("401")
-        || has("403")
-    {
+    // Round 85 — bare "403" / "401" / "cookies" no longer
+    // reach here: a bare 403/401 is CdnRefused (the rule
+    // above) and "cookies" alone is not a login wall. Only
+    // explicit sign-in wording stays LoginRequired.
+    if has("sign in") || has("login required") || has("log in") {
         return err(
             YtDlpErrorKind::LoginRequired,
             "This video needs you to be signed in.",
@@ -974,6 +1011,25 @@ pub fn select_quality(formats: &[ResolvedFormat], height: u32) -> Option<Selecte
     None
 }
 
+/// Round 85 — the best audio-only format for a DASH re-resolve:
+/// the same audio pick `select_quality` makes for a pair (https
+/// only, no video codec, a real audio codec; M4A/AAC in mp4
+/// first, then smallest file), without a height to match. The
+/// DASH parent stores no audio format id, so the re-resolve
+/// finds the audio half this way instead of guessing it.
+pub(crate) fn best_audio_only_format(formats: &[ResolvedFormat]) -> Option<&ResolvedFormat> {
+    formats
+        .iter()
+        .filter(|f| f.protocol == "https" && codec_is_absent(&f.vcodec) && codec_is_real(&f.acodec))
+        .min_by_key(|f| {
+            (
+                !audio_is_m4a_aac(f),
+                f.ext != "mp4",
+                f.filesize.unwrap_or(u64::MAX),
+            )
+        })
+}
+
 /// One row of the quality list the extension shows: one height,
 /// the format(s) behind it, and what downloading it entails.
 /// `needs_merge` is true for a video+audio pair and for a
@@ -1215,6 +1271,112 @@ pub fn build_ytdlp_args(
     }
     args.push("--".to_string());
     args.push(url.to_string());
+    args
+}
+
+/// Inputs for one direct (B) yt-dlp download — everything
+/// `build_direct_ytdlp_args` needs, in one place, so the arg
+/// list is built exactly once and can be unit-tested.
+pub struct DirectYtDlpArgs {
+    /// `-f` selector (see `direct_download_format_selector`).
+    pub format_selector: String,
+    /// `-P` directory, when the save path has a parent dir.
+    pub out_dir: Option<String>,
+    /// `-o` template (stem + ".%(ext)s", or the whole save path
+    /// with ".%(ext)s" when there is no output dir).
+    pub out_template: String,
+    /// Temp Netscape cookies file, when the download carries
+    /// browser cookies.
+    pub cookies_file: Option<PathBuf>,
+    /// `--add-header User-Agent: ...` (the format's UA).
+    pub user_agent: Option<String>,
+    /// `--add-header Referer: ...` (the page URL).
+    pub referer: Option<String>,
+    /// Directory holding ffmpeg + ffprobe (the caller checks
+    /// BOTH are present) — passed as `--ffmpeg-location`.
+    pub ffmpeg_dir: Option<PathBuf>,
+    /// QuickJS sidecar — passed as `--js-runtimes quickjs:<path>`.
+    pub qjs: Option<PathBuf>,
+    /// The page URL, always the LAST argument, after `--`.
+    pub source_url: String,
+}
+
+/// Build the yt-dlp argv for a direct (B) download. Pure, so
+/// the tests can inspect exactly what will run — and so the
+/// arg ORDER is pinned: every flag rides BEFORE the "--"
+/// separator and the URL is last.
+///
+/// Round 78 — the (B) fallback merges with yt-dlp itself, so
+/// it must be told where the bundled ffmpeg/ffprobe live (they
+/// are not on PATH): without `--ffmpeg-location` a merge fails
+/// with "ffprobe and ffmpeg not found". yt-dlp needs BOTH for a
+/// merge — a plain ffmpeg.exe is not enough (verified against
+/// yt-dlp's README). The JS solver is needed here too: a
+/// YouTube format that needs signature solving fails without it.
+///
+/// Round 85 (Claude delta) — the R84 bug was these two flags
+/// appended to the COMMAND after `argv` already ended with
+/// "--" + URL, so yt-dlp's parser took them as extra
+/// positional URLs — five URLs with a fixed `-o` name is
+/// exactly the "Fixed output name but more than one file to
+/// download" error (yt-dlp 2026.10.26 YoutubeDL.download:
+/// `len(url_list) > 1` with no '%' in the template). The log
+/// hid it: it printed only `argv`, and the trailing options
+/// were added to `cmd` after it, so the logged command looked
+/// identical to the working hand run. The fix is structural:
+/// the caller passes EXACTLY this list to Command and logs
+/// EXACTLY this list (redacted) — nothing is ever added to
+/// the command afterwards.
+pub fn build_direct_ytdlp_args(a: &DirectYtDlpArgs) -> Vec<String> {
+    let mut args = vec![
+        "--ignore-config".to_string(),
+        "--no-playlist".to_string(),
+        "-f".to_string(),
+        a.format_selector.clone(),
+    ];
+    if let Some(dir) = &a.out_dir {
+        args.push("-P".to_string());
+        args.push(dir.clone());
+        args.push("-o".to_string());
+        args.push(a.out_template.clone());
+    } else {
+        args.push("-o".to_string());
+        args.push(a.out_template.clone());
+    }
+    if let Some(file) = &a.cookies_file {
+        args.push("--cookies".to_string());
+        args.push(file.display().to_string());
+    }
+    if let Some(ua) = a
+        .user_agent
+        .as_deref()
+        .filter(|s| !s.contains(['\r', '\n']))
+    {
+        args.push("--add-header".to_string());
+        args.push(format!("User-Agent: {ua}"));
+    }
+    if let Some(referer) = a.referer.as_deref().filter(|s| !s.contains(['\r', '\n'])) {
+        args.push("--add-header".to_string());
+        args.push(format!("Referer: {referer}"));
+    }
+    if let Some(dir) = &a.ffmpeg_dir {
+        args.push("--ffmpeg-location".to_string());
+        args.push(clean_windows_path(dir));
+    }
+    if let Some(qjs) = &a.qjs {
+        args.push("--js-runtimes".to_string());
+        args.push(format!("quickjs:{}", clean_windows_path(qjs)));
+    }
+    // Round 85 (Jumani) — force the merged container to mp4:
+    // with the ".%(ext)s" template a DASH merge could otherwise
+    // land as webm, and yt-dlp aborts with "Fixed output name"
+    // on separate streams/sidecars; the mp4 merge makes
+    // `find_direct_ytdlp_output`'s webm-rename path a fallback
+    // only. Like every other flag, it rides BEFORE "--".
+    args.push("--merge-output-format".to_string());
+    args.push("mp4".to_string());
+    args.push("--".to_string());
+    args.push(a.source_url.clone());
     args
 }
 
@@ -2130,8 +2292,31 @@ mod tests {
                 "ERROR: [youtube] Sign in to confirm your age",
                 YtDlpErrorKind::LoginRequired,
             ),
+            // Round 85 — a bare HTTP 403 is a CDN refusal, NOT
+            // a missing sign-in: the video plays in the browser
+            // and the cookies were already sent where the flow
+            // has them. (Was LoginRequired before Round 85.)
             (
                 "ERROR: HTTP Error 403: Forbidden",
+                YtDlpErrorKind::CdnRefused,
+            ),
+            (
+                "ERROR: [tiktok] https://example.com/v.mp4: 403: Forbidden",
+                YtDlpErrorKind::CdnRefused,
+            ),
+            (
+                "ERROR: HTTP Error 401: Unauthorized",
+                YtDlpErrorKind::CdnRefused,
+            ),
+            // Round 85 — explicit sign-in wording still maps to
+            // LoginRequired even though the CDN-refusal rule runs
+            // first: neither line carries a 403/401.
+            (
+                "ERROR: Log in for access",
+                YtDlpErrorKind::LoginRequired,
+            ),
+            (
+                "ERROR: Please sign in to watch this video",
                 YtDlpErrorKind::LoginRequired,
             ),
             (
@@ -2180,6 +2365,17 @@ mod tests {
                 "ERROR: Something completely unexpected happened",
                 YtDlpErrorKind::Other,
             ),
+            // Round 85 (ChatGPT follow-up) — an output-template
+            // error is NEVER a sign-in error: the actual stderr
+            // reason surfaces verbatim (kind Other), so the
+            // dialog shows the real cause instead of "needs you
+            // to be signed in". The video id contains "403" as
+            // a substring, which is exactly why the old
+            // catch-all mis-mapped it.
+            (
+                "ERROR: Fixed output name but more than one file to download: TikTok video #7223205454032178475 (N).mp4",
+                YtDlpErrorKind::Other,
+            ),
         ];
         for (stderr, kind) in cases {
             let err = map_error(stderr);
@@ -2225,6 +2421,149 @@ mod tests {
             map_error("ERROR: Signature extraction failed").user_message(),
             "This site changed. Updating the video component may fix it."
         );
+        // Round 85 — the CDN-refusal wording is exact, and its
+        // kind string is what the host logs and the extension
+        // reads (needs_login stays false for it).
+        assert_eq!(
+            map_error("ERROR: HTTP Error 403: Forbidden").user_message(),
+            "The site refused the download request (HTTP 403)"
+        );
+        assert_eq!(
+            map_error("ERROR: HTTP Error 403: Forbidden").kind_str(),
+            "cdn_refused"
+        );
+        // Round 85 (ChatGPT follow-up) — the template error's
+        // mapped message is the actual stderr text, never a
+        // sign-in wording.
+        assert!(
+            map_error("ERROR: Fixed output name but more than one file to download: TikTok video #7223205454032178475 (N).mp4")
+                .user_message()
+                .contains("Fixed output name"),
+            "the template error must surface its actual reason"
+        );
+    }
+
+    #[test]
+    fn output_tail_one_line_is_greppable_and_redacted() {
+        // Round 85 — the one-line tail is what startup.log
+        // carries now: no newline anywhere, so `tail:` and the
+        // reason sit on the same greppable line.
+        let mut tail = YtDlpOutputTail::new();
+        tail.push_stderr("ERROR: HTTP Error 403: Forbidden");
+        tail.push_stderr("ERROR: [youtube] dQw4w9WgXcQ: Download failed");
+        tail.push_stdout("[download] 12.0% of 10.00MiB");
+        let one = tail.render_one_line();
+        assert!(
+            !one.contains('\n'),
+            "one-line tail must have no newline: {one}"
+        );
+        assert!(one.contains("ERROR: HTTP Error 403: Forbidden"));
+        assert!(one.contains(" | "), "lines are joined with ' | '");
+        assert_eq!(YtDlpOutputTail::new().render_one_line(), "");
+        // Redaction runs over the one-line form exactly like
+        // the multi-line one: a signed URL's query is cut, a
+        // cookie-file token is masked — and a "signed in" line
+        // survives it (the redactor is token-based, ytdlp.rs
+        // redact_ytdlp_token; it never wipes sign-in wording).
+        let redacted = redact_ytdlp_text(&format!(
+            "ERROR: sign in required https://example.com/v.mp4?sig=abc123 {one}"
+        ));
+        assert!(redacted.contains("sign in required"));
+        assert!(!redacted.contains("sig=abc123"));
+        assert!(redacted.contains("https://example.com/v.mp4?..."));
+        assert!(redacted.contains("ERROR: HTTP Error 403: Forbidden"));
+        let cookie_line = format!(
+            "using cookies from {}",
+            format!("{YTDLP_COOKIE_FILE_PREFIX}abc.txt")
+        );
+        assert_eq!(
+            redact_ytdlp_text(&cookie_line),
+            "using cookies from <cookies-file>"
+        );
+        // The late stderr line a drain race used to lose is
+        // still the mapped verdict: mapping reads error_text,
+        // which is the stderr ring, whatever arrived last.
+        let mut late = YtDlpOutputTail::new();
+        late.push_stderr("[download] Downloading video 1 of 1");
+        late.push_stderr("ERROR: HTTP Error 403: Forbidden");
+        assert_eq!(
+            map_error(&redact_ytdlp_text(&late.error_text())).kind,
+            YtDlpErrorKind::CdnRefused
+        );
+    }
+
+    #[test]
+    fn best_audio_only_format_prefers_m4a_aac_mp4() {
+        // Round 85 — the DASH re-resolve's audio pick: M4A/AAC
+        // in mp4 first, then any audio-only format; video-only
+        // and progressive formats never qualify, nor does http.
+        let formats = vec![
+            test_format(
+                "137",
+                "mp4",
+                Some(1080),
+                Some("avc1"),
+                Some("none"),
+                Some(100),
+                "https",
+                false,
+            ),
+            test_format(
+                "251",
+                "webm",
+                None,
+                Some("none"),
+                Some("opus"),
+                Some(50),
+                "https",
+                false,
+            ),
+            test_format(
+                "140",
+                "m4a",
+                None,
+                Some("none"),
+                Some("mp4a.40.2"),
+                Some(80),
+                "https",
+                false,
+            ),
+            test_format(
+                "139",
+                "m4a",
+                None,
+                Some("none"),
+                Some("mp4a.40.5"),
+                Some(40),
+                "http",
+                false,
+            ),
+            test_format(
+                "18",
+                "mp4",
+                Some(360),
+                Some("avc1"),
+                Some("mp4a.40.2"),
+                Some(90),
+                "https",
+                false,
+            ),
+        ];
+        let best = best_audio_only_format(&formats).expect("an audio format exists");
+        assert_eq!(best.format_id, "140");
+        // No audio-only format at all: None, not a video.
+        let video_only = vec![test_format(
+            "137",
+            "mp4",
+            Some(1080),
+            Some("avc1"),
+            Some("none"),
+            Some(100),
+            "https",
+            false,
+        )];
+        assert!(best_audio_only_format(&video_only).is_none());
+        assert!(best_audio_only_format(&[]).is_none());
     }
 
     #[test]
@@ -2287,6 +2626,80 @@ mod tests {
         let args = build_ytdlp_args(url, &opts, None);
         assert!(!args.contains(&"--js-runtimes".to_string()));
         assert!(!args.contains(&"--cookies".to_string()));
+    }
+
+    /// Round 85 (Claude delta) — the direct-download argv pins
+    /// the arg order: "--" is second-to-last, the URL is last,
+    /// nothing starting with "-" appears after "--", and
+    /// --ffmpeg-location / --js-runtimes ride BEFORE "--".
+    /// This is the regression test for the R84 bug, where those
+    /// two flags were appended to the command AFTER "--" + URL
+    /// and yt-dlp read them as extra positional URLs ("Fixed
+    /// output name but more than one file to download").
+    #[test]
+    fn build_direct_ytdlp_args_flags_before_separator_url_last() {
+        let url = "https://www.tiktok.com/@chisbetyu81/video/7223205454032178475";
+        // Minimal: no cookies, no headers, no ffmpeg, no qjs.
+        let minimal = DirectYtDlpArgs {
+            format_selector: "h264_480p_721027-0/b[ext=mp4]/b".to_string(),
+            out_dir: Some(r"C:\Users\Administrator\Downloads\Round76".to_string()),
+            out_template: "TikTok video #7223205454032178475.%(ext)s".to_string(),
+            cookies_file: None,
+            user_agent: None,
+            referer: None,
+            ffmpeg_dir: None,
+            qjs: None,
+            source_url: url.to_string(),
+        };
+        let args = build_direct_ytdlp_args(&minimal);
+        // (a) "--" is second-to-last, the URL is last.
+        assert_eq!(args[args.len() - 2], "--");
+        assert_eq!(args[args.len() - 1], url);
+        // (b) nothing starting with "-" appears after "--".
+        let sep = args.iter().position(|a| a == "--").unwrap();
+        assert_eq!(args.len(), sep + 2);
+        assert!(args[sep + 1..].iter().all(|a| !a.starts_with('-')));
+        // Full: everything set — the option flags are present
+        // and BEFORE "--".
+        let full = DirectYtDlpArgs {
+            format_selector: "h264_480p_721027-0/b[ext=mp4]/b".to_string(),
+            out_dir: Some(r"C:\Users\Administrator\Downloads\Round76".to_string()),
+            out_template: "TikTok video #7223205454032178475.%(ext)s".to_string(),
+            cookies_file: Some(PathBuf::from(
+                r"C:\Users\ADMINI~1\AppData\Local\Temp\fetchline-ytdlp-cookies-x.txt",
+            )),
+            user_agent: Some(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+                    .to_string(),
+            ),
+            referer: Some(url.to_string()),
+            ffmpeg_dir: Some(PathBuf::from(r"C:\Sonic Manager\bin")),
+            qjs: Some(PathBuf::from(r"C:\Sonic Manager\qjs.exe")),
+            source_url: url.to_string(),
+        };
+        let args = build_direct_ytdlp_args(&full);
+        let sep = args.iter().position(|a| a == "--").unwrap();
+        // (a) again, with everything set.
+        assert_eq!(args[sep + 1], url);
+        assert_eq!(args.len(), sep + 2);
+        // (b) again.
+        assert!(args[sep + 1..].iter().all(|a| !a.starts_with('-')));
+        // (c) --ffmpeg-location and --js-runtimes are present
+        // and BEFORE "--" — never after it.
+        let before: &[String] = &args[..sep];
+        assert!(before.contains(&"--ffmpeg-location".to_string()));
+        assert!(before.contains(&"--js-runtimes".to_string()));
+        assert!(before
+            .windows(2)
+            .any(|w| w[0] == "--js-runtimes" && w[1].starts_with("quickjs:")));
+        assert!(before.contains(&"--cookies".to_string()));
+        assert!(before.contains(&"--add-header".to_string()));
+        // Round 85 (Jumani) — the merge is forced to mp4,
+        // also before "--".
+        assert!(before.contains(&"--merge-output-format".to_string()));
+        assert!(before
+            .windows(2)
+            .any(|w| w[0] == "--merge-output-format" && w[1] == "mp4"));
     }
 
     #[test]

@@ -987,6 +987,7 @@ async fn resolved_video_download_uses_stream_url_not_page_url() {
             None,
             None,
             true,
+            None,
         )
         .await
         .unwrap();
@@ -1045,6 +1046,7 @@ async fn resolved_dash_pair_creates_audio_child_even_when_saved_for_later() {
             None,
             None,
             false, // saved for later — the children must still exist
+            None,
         )
         .await
         .unwrap();
@@ -1091,6 +1093,7 @@ async fn resolved_video_download_failure_creates_no_download() {
             None,
             None,
             true,
+            None,
         )
         .await
         .unwrap_err();
@@ -1100,16 +1103,19 @@ async fn resolved_video_download_failure_creates_no_download() {
     );
 }
 
-// -- Round 80 — a probe refused with 403 falls back to yt-dlp -----
+// -- Round 80 — a TikTok page goes direct to yt-dlp -------------
 // TikTok's CDN answers 403 to our raw probe even with the
 // format's headers (Round 79 retest: resolve OK, Start 403, and
-// the retry repeated the identical 403). The add must fall back
-// to yt-dlp's own downloader — the (B) path — instead of failing
-// with no row. Only 401/403 fall back: a 404 keeps today's
-// behaviour (no row, the real error).
+// the retry repeated the identical 403). Round 85 (Claude delta)
+// skips the probe for TikTok pages entirely — the add goes
+// direct to yt-dlp's own downloader (the (B) path) from the
+// start, so the mock's 403 is never even seen. The 401/403
+// fallback arm stays as a safety net for any caller that still
+// probes a TikTok URL first. A 404 keeps today's behaviour (no
+// row, the real error) — see the YouTube 404 test below.
 
 #[tokio::test]
-async fn resolved_video_download_probe_403_falls_back_to_direct_ytdlp() {
+async fn resolved_video_download_tiktok_page_goes_direct_from_the_start() {
     let server = MockServer::start(MockConfig {
         fail_status: Some(403),
         ..Default::default()
@@ -1127,13 +1133,14 @@ async fn resolved_video_download_probe_403_falls_back_to_direct_ytdlp() {
             None,
             None,
             false, // not started — no yt-dlp binary on this VM
+            None,
         )
         .await
         .unwrap();
     let dl = mgr.get_download(&id).unwrap().unwrap();
     assert!(
         dl.direct_ytdlp,
-        "a 403 probe must fall back to the direct yt-dlp path"
+        "a TikTok page must go direct to yt-dlp from the start"
     );
     assert_eq!(dl.url, server.url);
     assert_eq!(dl.source_url.as_deref(), Some(page_url));
@@ -1145,12 +1152,12 @@ async fn resolved_video_download_probe_403_falls_back_to_direct_ytdlp() {
 }
 
 #[tokio::test]
-async fn resolved_video_download_probe_403_dash_pair_falls_back_merged() {
-    // A DASH pair whose video probe is refused must fall back
-    // with the combined "video+audio" selector, so yt-dlp merges
-    // the pair itself — and must NOT create DASH children (the
-    // (B) runner owns the merge; orphan children would sit
-    // pending forever).
+async fn resolved_video_download_tiktok_dash_pair_goes_direct_merged() {
+    // A DASH pair on a TikTok page goes direct from the start
+    // (Round 85 Claude delta — no probe) with the combined
+    // "video+audio" selector, so yt-dlp merges the pair itself
+    // — and must NOT create DASH children (the (B) runner owns
+    // the merge; orphan children would sit pending forever).
     let video = MockServer::start(MockConfig {
         fail_status: Some(403),
         ..Default::default()
@@ -1177,7 +1184,7 @@ async fn resolved_video_download_probe_403_dash_pair_falls_back_merged() {
             // a YouTube DASH pair with a refused probe must NOT
             // fall back (it used to, and the yt-dlp download
             // failed with exit code 1 on the VPS). This test
-            // keeps proving the merged fallback, on a TikTok page.
+            // keeps proving the merged direct path, on a TikTok page.
             "https://www.tiktok.com/@user/video/123",
             &row,
             Some("video.mp4".to_string()),
@@ -1186,6 +1193,7 @@ async fn resolved_video_download_probe_403_dash_pair_falls_back_merged() {
             None,
             None,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -1223,6 +1231,7 @@ async fn resolved_video_download_probe_404_still_fails_with_no_row() {
             None,
             None,
             true,
+            None,
         )
         .await
         .unwrap_err();
@@ -1263,6 +1272,7 @@ async fn resolved_video_download_probe_403_youtube_does_not_fall_back() {
             None,
             None,
             true,
+            None,
         )
         .await
         .unwrap_err();
@@ -1367,11 +1377,15 @@ async fn direct_ytdlp_failure_surfaces_stderr_tail_and_logs_argv() {
             None,
             None,
             false,
+            None,
         )
         .await
         .unwrap();
     let dl = mgr.get_download(&id).unwrap().unwrap();
-    assert!(dl.direct_ytdlp, "the 403 probe must fall back to direct");
+    assert!(
+        dl.direct_ytdlp,
+        "the TikTok page must go direct from the start"
+    );
     let argv_path = dir.join("fake-argv.txt");
     let _fake = FakeYtDlp::install(&argv_path);
     mgr.start_direct_ytdlp(&id).await.unwrap();
@@ -1410,8 +1424,8 @@ async fn direct_ytdlp_failure_surfaces_stderr_tail_and_logs_argv() {
     );
     assert!(argv.contains("-P"), "the output must go through -P: {argv}");
     assert!(
-        argv.contains("video.mp4"),
-        "the output name must reach yt-dlp: {argv}"
+        argv.contains("video.%(ext)s"),
+        "the output template must reach yt-dlp (stem + %(ext)s, Round 85): {argv}"
     );
     assert!(
         !argv.contains("--cookies"),
@@ -1517,5 +1531,206 @@ async fn direct_ytdlp_download_forwards_capture_cookies_and_headers() {
             .contains("Requested format is not available"),
         "the stderr reason must surface: {:?}",
         dl.error_message
+    );
+}
+
+// -- Round 85 — cookie forwarding + the -o template -----------
+
+#[tokio::test]
+async fn round85_tiktok_segmented_download_sends_row_cookies_and_referer() {
+    // Round 85 — the cURL removal test PROVED TikTok's CDN
+    // requires Cookie AND Referer: no-Cookie -> Akamai 403,
+    // no-Referer -> Akamai 403. A capture whose resolve was
+    // cookieless used to carry `cookies: []` through the
+    // extension untouched, so the pending row got no cookies
+    // and the engine GET sent no Cookie at all. The mock's
+    // header gate stands in for the CDN: it refuses any
+    // request missing the exact Cookie / Referer, so a
+    // completing download proves both headers reach the
+    // segmented GET — for a stream host (the mock) that is
+    // NOT the page host (tiktok.com), i.e. no same-host
+    // scoping drops them.
+    let server = MockServer::start(MockConfig {
+        size_bytes: Some(512 * 1024),
+        require_headers: vec![
+            ("Cookie".to_string(), "ttwid=abc; msToken=def".to_string()),
+            ("Referer".to_string(), "https://www.tiktok.com/".to_string()),
+        ],
+        ..Default::default()
+    });
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let mut settings = store.get_settings().unwrap();
+    settings.default_download_folder = dir.to_string_lossy().to_string();
+    store.update_settings(&settings).unwrap();
+    let mgr = DownloadManager::new(store, 4);
+    let store = mgr.store();
+    let cookies_json = r#"[{"name":"ttwid","value":"abc"},{"name":"msToken","value":"def"}]"#;
+    let pending = store
+        .enqueue_pending_link_resolved(
+            &server.url,
+            Some("https://www.tiktok.com/@user/video/123"),
+            Some(cookies_json),
+            &fetchline_engine::store::ResolvedLink {
+                filename: Some("video.mp4".to_string()),
+                headers: Some(
+                    r#"{"User-Agent":"Mozilla/5.0 TestAgent","Referer":"https://www.tiktok.com/"}"#
+                        .to_string(),
+                ),
+                source_url: Some("https://www.tiktok.com/@user/video/123".to_string()),
+                format_id: Some("18".to_string()),
+                audio_url: None,
+                fragmented: false,
+                filesize: Some(512 * 1024),
+            },
+        )
+        .unwrap();
+    let (id, _) = mgr
+        .confirm_pending_link(&pending.id, None, None, None, None, None, false)
+        .await
+        .unwrap();
+    let dl = mgr.get_download(&id).unwrap().unwrap();
+    assert!(!dl.direct_ytdlp, "a non-fragmented capture is segmented");
+    mgr.start_download(&id).await.unwrap();
+    assert!(
+        wait_for_status(&mgr, &id, "complete", 30).await,
+        "the segmented download must complete once Cookie + Referer reach the CDN, last status: {}",
+        mgr.get_download(&id).unwrap().unwrap().status
+    );
+    let dl = mgr.get_download(&id).unwrap().unwrap();
+    assert_eq!(dl.downloaded_bytes, 512 * 1024);
+    assert_eq!(std::fs::read(&dl.save_path).unwrap(), payload(512 * 1024));
+}
+
+// A fake yt-dlp that SUCCEEDS — and emulates yt-dlp 2026.10.26's
+// own `download()` guard: more than one positional after `--`
+// with no '%' in the `-o` value is the "Fixed output name but
+// more than one file to download" error (exit 1). On success it
+// writes the merged file under the `-o` template (expanding
+// "%(ext)s" to "mp4") in the `-P` dir, so the completion check
+// has a file to find. Same install path / lock as the failing
+// fake above: one test at a time.
+#[cfg(unix)]
+struct FakeYtDlpSuccess {
+    dir: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl FakeYtDlpSuccess {
+    fn install(argv_path: &std::path::Path) -> Self {
+        let dir = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let script = dir.join("yt-dlp");
+        let body = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"2026.10.26\"; exit 0; fi\necho \"$@\" >> \"{}\"\nprev=\"\"; after=0; count=0; outtmpl=\"\"; outdir=\"\"\nfor a in \"$@\"; do\n  if [ \"$after\" = 1 ]; then count=$((count + 1)); continue; fi\n  case \"$prev\" in -o) outtmpl=\"$a\" ;; -P) outdir=\"$a\" ;; esac\n  case \"$a\" in --) after=1 ;; esac\n  prev=\"$a\"\ndone\ncase \"$outtmpl\" in *%*) ;; *) if [ \"$count\" -gt 1 ]; then echo \"ERROR: Fixed output name but more than one file to download: $outtmpl\" >&2; exit 1; fi ;; esac\nname=$(printf '%s' \"$outtmpl\" | sed 's/%(ext)s/mp4/')\nif [ -n \"$outdir\" ]; then target=\"$outdir/$name\"; else target=\"$name\"; fi\nprintf 'fake-merged-video-bytes' > \"$target\"\necho \"[download] 100% of 22.00B at 1.00B/s ETA 00:00\"\nexit 0\n",
+            argv_path.display()
+        );
+        std::fs::write(&script, body).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        Self { dir }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for FakeYtDlpSuccess {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.dir.join("yt-dlp"));
+    }
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn round85_dash_merge_direct_fallback_succeeds_with_ext_template() {
+    // Round 85 — the R84 TikTok manual-path failure: yt-dlp
+    // refused with "Fixed output name but more than one file
+    // to download" because (a) the `-o` template was a fixed
+    // name with no %(ext)s, and (b) --ffmpeg-location /
+    // --js-runtimes were appended AFTER "--" + URL, so yt-dlp
+    // counted them as extra URLs. A DASH video+audio selection
+    // (137+140) direct from the start (Round 85 Claude delta —
+    // the TikTok page skips the probe) must now complete, with
+    // exactly one positional after "--" and "%(ext)s" in the
+    // template.
+    let _fake_guard = FAKE_YTDLP_LOCK.lock().unwrap();
+    let server = MockServer::start(MockConfig {
+        fail_status: Some(403),
+        ..Default::default()
+    });
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let log_path = dir.join("startup.log");
+    store.set_log_path(log_path.clone());
+    let mut settings = store.get_settings().unwrap();
+    settings.default_download_folder = dir.to_string_lossy().to_string();
+    store.update_settings(&settings).unwrap();
+    let mgr = DownloadManager::new(store, 4);
+    let mut row = resolved_row(&server.url);
+    row.height = 1080;
+    row.label = "1080p".to_string();
+    row.has_audio = false;
+    row.needs_merge = true;
+    row.filesize = Some(64 * 1024);
+    row.audio_url = Some(server.url.clone());
+    row.audio_format_id = Some("140".to_string());
+    row.format_id = "137".to_string();
+    let (id, _) = mgr
+        .add_resolved_video_download(
+            "https://www.tiktok.com/@user/video/123",
+            &row,
+            Some("video.mp4".to_string()),
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+    let dl = mgr.get_download(&id).unwrap().unwrap();
+    assert!(
+        dl.direct_ytdlp,
+        "the TikTok page must go direct from the start"
+    );
+    let argv_path = dir.join("fake-argv3.txt");
+    let _fake = FakeYtDlpSuccess::install(&argv_path);
+    mgr.start_direct_ytdlp(&id).await.unwrap();
+    assert!(
+        wait_for_status(&mgr, &id, "complete", 30).await,
+        "the direct run must complete, last status: {}",
+        mgr.get_download(&id).unwrap().unwrap().status
+    );
+    let dl = mgr.get_download(&id).unwrap().unwrap();
+    assert!(
+        std::fs::metadata(&dl.save_path)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false),
+        "the merged file must land on the save path: {}",
+        dl.save_path
+    );
+    let argv = std::fs::read_to_string(&argv_path).unwrap();
+    let after_dashdash = argv.split(" -- ").nth(1).unwrap_or("");
+    assert_eq!(
+        after_dashdash.split_whitespace().count(),
+        1,
+        "exactly one positional (the URL) may follow --: {argv}"
+    );
+    assert!(
+        argv.contains("137+140/b[ext=mp4]/b"),
+        "the DASH selector must combine video+audio: {argv}"
+    );
+    assert!(
+        argv.contains("video.%(ext)s"),
+        "the -o template must carry %(ext)s: {argv}"
+    );
+    assert!(
+        !argv.contains("Fixed output name"),
+        "no SameFileError may be raised: {argv}"
     );
 }

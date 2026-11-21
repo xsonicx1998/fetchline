@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { listDownloads, playErrorSound, withTimeout } from '../lib/api'
 import type { DownloadRow } from '../lib/types'
@@ -12,7 +13,8 @@ import { TitleBar } from './TitleBar'
  *  "An error occurred during download. Please try again." +
  *  "Details:" + the reason + OK). A separate OS window per
  *  failed download (opened by the `open_error_dialog` Tauri
- *  command), frameless with the shared title bar — the FILENAME
+ *  command — Round 85: ONE window for all failures, later ones
+ *  queue into it), frameless with the shared title bar — the FILENAME
  *  as the title (like IDM's popup) — and a purple→pink gradient
  *  divider under the title bar, like the progress bar. The body
  *  shows a yellow warning triangle, the message, and "Details:"
@@ -33,6 +35,18 @@ import { TitleBar } from './TitleBar'
  *  The row is polled until it appears (same pattern as the
  *  progress window and the complete dialog); a download that
  *  vanished from the list shows the empty state instead.
+ *
+ *  Round 85 — ONE dialog for every failure. The R84 retest
+ *  found OK "sometimes needs 2–3 clicks": each failed download
+ *  opened its OWN stacked OS window, so one OK click only
+ *  dismissed the top copy. `open_error_dialog` now opens a
+ *  single window and emits `error-dialog-queued` for later
+ *  failures; this dialog keeps them in a queue and OK steps
+ *  through them in the SAME window ("2 more errors" + a
+ *  "Dismiss all" button), so one click is always exactly one
+ *  error and the last OK closes the window. The message
+ *  variant (an overlay in the main window) never queues — the
+ *  main window already replaces it, so only one exists.
  *
  *  Round 69 (d) — the message variant: an ADD-time failure (the
  *  probe said 404, the server could not be reached) creates no
@@ -67,11 +81,71 @@ export function DownloadErrorDialog({
   const [pollError, setPollError] = useState<string | null>(null)
   const soundPlayedRef = useRef(false)
   const foundRef = useRef(false)
+  /** Round 85 — the queue of failed download ids this ONE
+   *  window shows, head first. It starts with the id the
+   *  window was opened for; later failures arrive through the
+   *  `error-dialog-queued` event (see the listener below).
+   *  The message variant has no row, so its queue stays empty. */
+  const [queue, setQueue] = useState<string[]>(() =>
+    downloadId ? [downloadId] : [],
+  )
+  const currentId = queue[0]
+  const queuedCount = queue.length > 0 ? queue.length - 1 : 0
 
   // Dark only (Round 45): same as the progress window.
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', 'dark')
   }, [])
+
+  // Round 85 — later failures queue into this window instead
+  // of opening another one (Rust emits the event from
+  // `open_error_dialog`). Duplicates are ignored — the same
+  // failure re-noticed across polls must not show twice.
+  useEffect(() => {
+    if (message !== undefined || !downloadId) return
+    let unlisten: (() => void) | undefined
+    void listen<{ download_id: string }>('error-dialog-queued', (e) => {
+      const id = e.payload.download_id
+      if (typeof id === 'string' && id.length > 0) {
+        setQueue((q) => (q.includes(id) ? q : [...q, id]))
+      }
+    })
+      .then((fn) => {
+        unlisten = fn
+      })
+      .catch(() => undefined)
+    return () => {
+      unlisten?.()
+    }
+  }, [downloadId, message])
+
+  function closeDialog() {
+    if (onClose) {
+      onClose()
+      return
+    }
+    void getCurrentWindow().close()
+  }
+
+  /** Round 85 — OK / Escape dismisses THIS error; when more
+   *  are queued the dialog steps to the next one in the same
+   *  window instead of closing, so one click is always exactly
+   *  one error. The last error (or the message variant, which
+   *  never queues) closes the dialog. */
+  function dismissCurrent() {
+    if (message === undefined && queue.length > 1) {
+      setQueue((q) => q.slice(1))
+      return
+    }
+    closeDialog()
+  }
+
+  /** Round 85 — "Dismiss all" clears the whole queue at once:
+   *  the remaining failures stay visible as Error rows in the
+   *  main window (with Resume), so nothing is lost. */
+  function dismissAll() {
+    closeDialog()
+  }
 
   // Round 70 — keyboard dismissal: the dialog opens with OK
   // focused (autoFocus on the button, so Enter confirms at
@@ -83,14 +157,16 @@ export function DownloadErrorDialog({
   // Add dialog underneath the overlay, which left the overlay
   // itself open). Both variants (separate window and
   // main-window overlay) share this component, so both get the
-  // same keys.
+  // same keys. Round 85 — Escape dismisses the current error
+  // like OK does (steps through the queue, closes on the last).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') closeDialog()
+      if (e.key === 'Escape') dismissCurrent()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [onClose, downloadId, message])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onClose, queue, message])
 
   // The error alert, once, when the dialog shows.
   useEffect(() => {
@@ -101,7 +177,13 @@ export function DownloadErrorDialog({
 
   useEffect(() => {
     // Round 69 (d) — the message variant has no row to poll for.
-    if (message !== undefined || !downloadId) return
+    if (message !== undefined || !currentId) return
+    // Round 85 — the queue's head changed (OK stepped to the
+    // next error): forget the previous row and poll for this one.
+    foundRef.current = false
+    setDownload(null)
+    setLoaded(false)
+    setPollError(null)
     let stopped = false
     async function poll() {
       if (foundRef.current) return
@@ -112,7 +194,7 @@ export function DownloadErrorDialog({
           'Backend did not respond within 5 seconds',
         )
         if (stopped) return
-        const row = rows.find((d) => d.id === downloadId) ?? null
+        const row = rows.find((d) => d.id === currentId) ?? null
         if (row) {
           foundRef.current = true
           setDownload(row)
@@ -131,15 +213,7 @@ export function DownloadErrorDialog({
       stopped = true
       window.clearInterval(timer)
     }
-  }, [downloadId, message])
-
-  function closeDialog() {
-    if (onClose) {
-      onClose()
-      return
-    }
-    void getCurrentWindow().close()
-  }
+  }, [currentId, message])
 
   // Round 69 (d) — the message variant shows its text directly;
   // the row variant shows the row's `error_message`.
@@ -151,7 +225,7 @@ export function DownloadErrorDialog({
   if (!isMessage && (!loaded || !download)) {
     return (
       <div className="flex h-full flex-col bg-bg text-text">
-        <TitleBar title="Download failed" showMinimize={false} showMaximize={false} draggable={false} />
+        <TitleBar title="Download failed" showMinimize={false} showMaximize={false} draggable={false} onClose={dismissCurrent} />
         <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
           {pollError ? (
             <p className="text-sm text-danger">{pollError}</p>
@@ -162,7 +236,7 @@ export function DownloadErrorDialog({
                 : 'Loading download…'}
             </p>
           )}
-          <Button variant="secondary" onClick={closeDialog}>
+          <Button variant="secondary" autoFocus onClick={dismissCurrent}>
             Close
           </Button>
         </div>
@@ -172,7 +246,7 @@ export function DownloadErrorDialog({
 
   return (
     <div className="flex h-full flex-col bg-bg text-text">
-      <TitleBar title={barTitle} showMinimize={false} showMaximize={false} onClose={onClose} draggable={false} />
+      <TitleBar title={barTitle} showMinimize={false} showMaximize={false} onClose={dismissCurrent} draggable={false} />
       {/* Purple→pink divider under the title bar, like the
           progress bar (approved mockup). */}
       <div
@@ -207,22 +281,42 @@ export function DownloadErrorDialog({
           </p>
         </div>
       </div>
-      <div className="flex shrink-0 justify-end px-6 pb-5">
-        <Button
-          autoFocus
-          variant="primary"
-          size="md"
-          onClick={closeDialog}
-          style={{
-            background: 'linear-gradient(90deg, #8B20FF, #F02DCD)',
-            boxShadow: '0 4px 16px rgba(240,45,205,0.40)',
-            paddingLeft: 34,
-            paddingRight: 34,
-          }}
-          className="hover:brightness-110"
-        >
-          OK
-        </Button>
+      {/* Round 85 — the queue: while more errors wait, the
+          footer says how many and offers "Dismiss all"; OK
+          dismisses just this one and steps to the next. The
+          `key` remounts OK when the shown error changes, so
+          autoFocus fires again and Enter always lands on OK. */}
+      <div className="flex shrink-0 items-center justify-between gap-3 px-6 pb-5">
+        {queuedCount > 0 ? (
+          <p className="text-[13px] text-text-muted">
+            {queuedCount} more error{queuedCount === 1 ? '' : 's'}
+          </p>
+        ) : (
+          <span />
+        )}
+        <div className="flex shrink-0 items-center gap-2.5">
+          {queuedCount > 0 ? (
+            <Button variant="ghost" size="md" onClick={dismissAll}>
+              Dismiss all
+            </Button>
+          ) : null}
+          <Button
+            key={currentId ?? 'message'}
+            autoFocus
+            variant="primary"
+            size="md"
+            onClick={dismissCurrent}
+            style={{
+              background: 'linear-gradient(90deg, #8B20FF, #F02DCD)',
+              boxShadow: '0 4px 16px rgba(240,45,205,0.40)',
+              paddingLeft: 34,
+              paddingRight: 34,
+            }}
+            className="hover:brightness-110"
+          >
+            OK
+          </Button>
+        </div>
       </div>
     </div>
   )

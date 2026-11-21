@@ -185,6 +185,10 @@ export async function addResolvedVideoDownload(args: {
   queue?: string | null
   speedLimitKbps?: number | null
   startNow: boolean
+  // Round 85 — the browser's consented `Cookie` header for the
+  // page, when the caller has one. The manual dialog has none
+  // (its resolve is cookieless) and omits it.
+  cookies?: string | null
 }): Promise<[string, ProbeInfo]> {
   return invoke<[string, ProbeInfo]>('add_resolved_video_download', {
     pageUrl: args.pageUrl,
@@ -195,6 +199,7 @@ export async function addResolvedVideoDownload(args: {
     queue: args.queue ?? null,
     speedLimitKbps: args.speedLimitKbps ?? null,
     startNow: args.startNow,
+    cookies: args.cookies ?? null,
   })
 }
 

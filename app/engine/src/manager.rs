@@ -2493,6 +2493,82 @@ impl DownloadManager {
     /// 403/410 can re-resolve. The speed cap is applied before
     /// the start, like the confirm path. Returns the created
     /// download id and its probe info.
+    /// Round 85 — `cookies` is the browser's consented `Cookie`
+    /// header for the page (TikTok: ttwid/msToken), when the
+    /// caller has one: it rides the probe and the segment
+    /// requests (and the direct yt-dlp call's temp file) for
+    /// this download only — TikTok's CDN answers 403 without
+    /// it. `None` is the manual Add URL dialog: its resolve is
+    /// cookieless by design (no browser session), and the
+    /// manual path is fixed by the direct yt-dlp output
+    /// template instead. The cookies are scoped by download
+    /// id, never by host: the page host (tiktok.com) and the
+    /// stream host (v16-*.tiktok.com) differ, and the header
+    /// must reach the stream host anyway.
+    ///
+    /// Round 85 (Claude delta) — the direct-yt-dlp path for a
+    /// resolved TikTok row, shared by the "direct from the
+    /// start" branch and the 401/403 probe-fallback arm: yt-dlp
+    /// merges a DASH pair itself (the combined "video+audio"
+    /// selector), and the download keeps the format's headers
+    /// (rebuilt from the row's headers JSON — the probe call
+    /// moved them) and the cookies when the caller had them
+    /// (the temp Netscape file in `run_ytdlp_direct_inner`;
+    /// the manual Add URL flow passes None here, cookieless).
+    /// Returns the download id, the probe-free ProbeInfo, and
+    /// the effective format id.
+    async fn add_tiktok_direct_download(
+        &self,
+        row: &crate::ytdlp::QualityRow,
+        filename: Option<String>,
+        folder: Option<String>,
+        category_id: Option<String>,
+        queue_id: Option<String>,
+        cookies: Option<String>,
+        probe_filename: Option<String>,
+    ) -> Result<(String, ProbeInfo, String)> {
+        let mut effective_format_id = row.format_id.clone();
+        if row.needs_merge {
+            if let Some(audio_format_id) = row
+                .audio_format_id
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+            {
+                effective_format_id = format!("{}+{}", row.format_id, audio_format_id);
+            }
+        }
+        let headers_json = serde_json::to_string(&row.headers).unwrap_or_default();
+        let fallback_headers = Self::headers_from_json(Some(&headers_json));
+        let fallback_headers = if fallback_headers.is_empty() {
+            None
+        } else {
+            Some(fallback_headers)
+        };
+        let id = self
+            .add_direct_ytdlp_download(
+                &row.url,
+                filename,
+                folder,
+                category_id,
+                queue_id,
+                cookies,
+                fallback_headers,
+            )
+            .await?;
+        Ok((
+            id,
+            ProbeInfo {
+                size: None,
+                accept_ranges: false,
+                etag: None,
+                last_modified: None,
+                filename: probe_filename,
+                final_url: row.url.clone(),
+            },
+            effective_format_id,
+        ))
+    }
+
     pub async fn add_resolved_video_download(
         self: &Arc<Self>,
         page_url: &str,
@@ -2503,6 +2579,7 @@ impl DownloadManager {
         queue_id: Option<String>,
         speed_limit_kbps: Option<i64>,
         start_now: bool,
+        cookies: Option<String>,
     ) -> Result<(String, ProbeInfo)> {
         let settings = self.store.get_settings().unwrap_or_default();
         if !settings.platform_downloads_enabled {
@@ -2537,6 +2614,14 @@ impl DownloadManager {
         // in Round 80+81 with "yt-dlp exited with exit code: 1",
         // 0 B. For any other host a probe 401/403 surfaces the
         // real probe error (no row), exactly like Round 79.
+        // Round 85 (Claude delta) — TikTok goes direct from the
+        // start now (the `is_tiktok_page` branch below): the
+        // probe 403 is guaranteed, so the probe-then-fallback
+        // hop is skipped. The 401/403 arm stays as a safety net
+        // for any caller that still probes a TikTok URL. For any
+        // other host a probe 401/403 still surfaces the real
+        // probe error (no row) — YouTube is NOT switched to
+        // direct on a probe 403.
         let mut use_direct = row.fragmented;
         let mut effective_format_id = row.format_id.clone();
         let (download_id, probe) = if row.fragmented {
@@ -2547,7 +2632,7 @@ impl DownloadManager {
                     folder,
                     category_id,
                     queue_id,
-                    None,
+                    cookies.clone(),
                     headers,
                 )
                 .await?;
@@ -2562,6 +2647,32 @@ impl DownloadManager {
                     final_url: row.url.clone(),
                 },
             )
+        } else if is_tiktok_page(page_url) {
+            // Round 85 (Claude delta) — TikTok goes direct to
+            // yt-dlp from the start: the engine probe of the
+            // media URL is guaranteed 403 (the CDN needs the
+            // browser's cookies + Referer), so probing first
+            // only adds a failed request and a fallback hop.
+            // The 401/403 arm below stays as a safety net for
+            // any caller that still probes a TikTok URL.
+            let _ = self.store.log(&format!(
+                "resolved add: TikTok page — direct yt-dlp from the start, no probe of {}",
+                row.url
+            ));
+            use_direct = true;
+            let (id, probe, format_id) = self
+                .add_tiktok_direct_download(
+                    row,
+                    filename,
+                    folder,
+                    category_id,
+                    queue_id,
+                    cookies,
+                    probe_filename,
+                )
+                .await?;
+            effective_format_id = format_id;
+            (id, probe)
         } else {
             match self
                 .add_download_with_cookies_and_headers(
@@ -2570,7 +2681,7 @@ impl DownloadManager {
                     folder.clone(),
                     category_id.clone(),
                     queue_id.clone(),
-                    None,
+                    cookies.clone(),
                     headers,
                 )
                 .await
@@ -2580,55 +2691,28 @@ impl DownloadManager {
                     if matches!(e, EngineError::Status(401 | 403, _))
                         && is_tiktok_page(page_url) =>
                 {
+                    // Safety net only now: TikTok goes direct
+                    // from the start (the branch above), so this
+                    // arm fires only if some other caller still
+                    // probes a TikTok URL first.
                     let _ = self.store.log(&format!(
                         "resolved add: probe of {} refused ({e}) — falling back to the direct yt-dlp download",
                         row.url
                     ));
                     use_direct = true;
-                    if row.needs_merge {
-                        if let Some(audio_format_id) = row
-                            .audio_format_id
-                            .as_deref()
-                            .filter(|s| !s.trim().is_empty())
-                        {
-                            effective_format_id = format!("{}+{}", row.format_id, audio_format_id);
-                        }
-                    }
-                    // Round 83 — the fallback download keeps
-                    // the format's headers (the probe call moved
-                    // them, so they are rebuilt from the row's
-                    // headers JSON): the direct yt-dlp call
-                    // needs the same User-Agent / Referer the
-                    // resolve negotiated. No cookies here — the
-                    // manual Add URL resolve is cookieless.
-                    let fallback_headers = Self::headers_from_json(Some(&headers_json));
-                    let fallback_headers = if fallback_headers.is_empty() {
-                        None
-                    } else {
-                        Some(fallback_headers)
-                    };
-                    let id = self
-                        .add_direct_ytdlp_download(
-                            &row.url,
+                    let (id, probe, format_id) = self
+                        .add_tiktok_direct_download(
+                            row,
                             filename,
                             folder,
                             category_id,
                             queue_id,
-                            None,
-                            fallback_headers,
+                            cookies,
+                            probe_filename,
                         )
                         .await?;
-                    (
-                        id,
-                        ProbeInfo {
-                            size: None,
-                            accept_ranges: false,
-                            etag: None,
-                            last_modified: None,
-                            filename: probe_filename,
-                            final_url: row.url.clone(),
-                        },
-                    )
+                    effective_format_id = format_id;
+                    (id, probe)
                 }
                 Err(e) => return Err(e),
             }
@@ -5334,6 +5418,18 @@ impl DownloadManager {
             .store
             .get_download(id)?
             .ok_or_else(|| EngineError::NotFound(id.to_string()))?;
+        // Round 85 — entry logging: Resume used to act without
+        // recording which row it touched, so a wrong-row resume
+        // (R84: "Resume clicked the wrong row") left nothing to
+        // check after the fact. The id and the status it was
+        // resumed from land in startup.log first; `source_url`
+        // is the page URL, never a signed stream URL.
+        self.store.log(&format!(
+            "resume {id}: status={} source_url={} format_id={}",
+            row.status,
+            row.source_url.as_deref().unwrap_or("-"),
+            row.format_id.as_deref().unwrap_or("-"),
+        ));
         if row.status == "downloading" {
             // Round 55 (defect 4): a row can say `downloading`
             // while no run exists for it — a wedged run, or a crash
@@ -5393,8 +5489,16 @@ impl DownloadManager {
         // error: the row already knows its size and segment map,
         // and the engine verifies the bytes at the end. A dead
         // link (404/…) still refuses.
+        // Round 85 — the re-probe carries the format's
+        // User-Agent / Referer (`probe_url_with_headers`), not
+        // just cookies: a resolved video's stream host answers
+        // the default "Fetchline/0.1" UA with 403, so a resume
+        // re-probe without them fails a download whose segments
+        // would have sent them. Without stored headers this is
+        // exactly `probe_url_with_cookies`.
+        let headers = self.headers_for(id);
         let info = match self
-            .probe_url_with_cookies(&row.url, cookies.as_deref())
+            .probe_url_with_headers(&row.url, cookies.as_deref(), headers.as_ref())
             .await
         {
             Ok(info) => Some(info),
@@ -5404,6 +5508,46 @@ impl DownloadManager {
                 ));
                 None
             }
+            // Round 85 — a 403/410 on the probe means the signed
+            // stream URL expired while the download waited: the
+            // run loop's re-resolve never runs, because the probe
+            // fails before `start_download`. Re-resolve the page
+            // once (same format, once per session — the guard
+            // lives in `reresolve_once`) and re-probe the fresh
+            // URL instead of failing on the dead one. A row with
+            // no page URL / format id returns false at once, so
+            // plain downloads fail exactly as before. The
+            // re-resolve is cookieless (see the cookie map in
+            // `reresolve_once`): a login-gated format whose fresh
+            // URL needs the browser session still fails here.
+            Err(e) if self.is_reresolvable_error(&e) => match self.reresolve_once(id).await {
+                Ok(true) => {
+                    let fresh = self
+                        .store
+                        .get_download(id)?
+                        .ok_or_else(|| EngineError::NotFound(id.to_string()))?;
+                    match self
+                        .probe_url_with_headers(&fresh.url, cookies.as_deref(), headers.as_ref())
+                        .await
+                    {
+                        Ok(info) => Some(info),
+                        Err(e2) if is_probe_retryable(&e2) => {
+                            self.store.log(&format!(
+                                    "resume of {id}: re-probe after re-resolve failed transiently after retries ({e2}) — continuing from the stored info"
+                                ));
+                            None
+                        }
+                        Err(e2) => {
+                            let _ = self.store.set_status(id, "error", Some(&e2.to_string()));
+                            return Err(e2);
+                        }
+                    }
+                }
+                _ => {
+                    let _ = self.store.set_status(id, "error", Some(&e.to_string()));
+                    return Err(e);
+                }
+            },
             Err(e) => {
                 let _ = self.store.set_status(id, "error", Some(&e.to_string()));
                 return Err(e);
@@ -5841,6 +5985,185 @@ impl DownloadManager {
         Ok(true)
     }
 
+    /// Round 85 — re-resolve a DASH parent's two children once:
+    /// the children carry no `source_url` / `format_id` of their
+    /// own (only the parent does), so a child's 403/410 — an
+    /// expired signed stream URL — can never be fixed by
+    /// `reresolve_once(child)`, which returns false at once.
+    /// Resolve the parent's page once (same video format, best
+    /// audio-only format — the parent stores no audio format
+    /// id), size-guard both halves like `reresolve_once` does,
+    /// and point the children at the fresh URLs with fresh
+    /// headers. The children also gain the parent's page URL +
+    /// their format id, so a later 403 re-resolves the child
+    /// directly. Returns `Ok(true)` when at least one child was
+    /// updated. Cookieless, like `reresolve_once`, and at most
+    /// once per parent per session (the same `reresolved` set,
+    /// keyed by the parent id).
+    async fn reresolve_dash_parent(&self, parent_id: &str) -> Result<bool> {
+        let parent = self
+            .store
+            .get_download(parent_id)?
+            .ok_or_else(|| EngineError::NotFound(parent_id.to_string()))?;
+        let Some(source_url) = parent.source_url.clone().filter(|u| !u.trim().is_empty()) else {
+            return Ok(false);
+        };
+        // A direct-fallback parent stores "video+audio" as its
+        // format id; a DASH parent stores the video id alone —
+        // take the video half either way.
+        let Some(format_id) = parent
+            .format_id
+            .clone()
+            .filter(|f| !f.trim().is_empty())
+            .map(|f| f.split('+').next().unwrap_or("").to_string())
+            .filter(|f| !f.is_empty())
+        else {
+            return Ok(false);
+        };
+        {
+            let mut done = self.reresolved.lock().unwrap();
+            if !done.insert(parent_id.to_string()) {
+                return Ok(false);
+            }
+        }
+        let settings = self.store.get_settings().unwrap_or_default();
+        if !settings.platform_downloads_enabled {
+            return Ok(false);
+        }
+        let opts = crate::ytdlp::ResolveOptions {
+            paths: crate::ytdlp::locate_sidecars(&Self::sidecar_exe_dir()),
+            cookies: Vec::new(),
+            extractor_args: settings.ytdlp_extractor_args.clone(),
+            timeout_secs: crate::ytdlp::RESOLVE_TIMEOUT_SECS,
+        };
+        let video = match crate::ytdlp::resolve(&source_url, &opts).await {
+            Ok(v) => v,
+            Err(e) => {
+                self.store.log(&format!(
+                    "re-resolve of DASH parent {parent_id} failed: {} ({})",
+                    e.user_message(),
+                    e.kind_str()
+                ));
+                return Ok(false);
+            }
+        };
+        let Some(video_format) = video.formats.iter().find(|f| f.format_id == format_id) else {
+            self.store.log(&format!(
+                "re-resolve of DASH parent {parent_id}: format {format_id} no longer listed"
+            ));
+            return Ok(false);
+        };
+        let Some(audio_format) = crate::ytdlp::best_audio_only_format(&video.formats) else {
+            self.store.log(&format!(
+                "re-resolve of DASH parent {parent_id}: no audio-only format listed"
+            ));
+            return Ok(false);
+        };
+        let children = self.store.list_child_downloads(parent_id)?;
+        let video_child = children
+            .iter()
+            .find(|c| c.child_kind.as_deref() == Some("video"));
+        let audio_child = children
+            .iter()
+            .find(|c| c.child_kind.as_deref() == Some("audio"));
+        let (Some(video_child), Some(audio_child)) = (video_child, audio_child) else {
+            self.store.log(&format!(
+                "re-resolve of DASH parent {parent_id}: video or audio child missing"
+            ));
+            return Ok(false);
+        };
+        // The same formats must be the same files: a different
+        // size means the resolver found something else, and the
+        // stored bytes must never be stitched onto it.
+        if let (Some(size), Some(new_size)) = (video_child.size_bytes, video_format.filesize) {
+            if size != new_size as i64 {
+                self.store.log(&format!(
+                    "re-resolve of DASH parent {parent_id}: video format {format_id} changed size ({size} -> {new_size}) — not retrying"
+                ));
+                return Ok(false);
+            }
+        }
+        if let (Some(size), Some(new_size)) = (audio_child.size_bytes, audio_format.filesize) {
+            if size != new_size as i64 {
+                self.store.log(&format!(
+                    "re-resolve of DASH parent {parent_id}: audio format {} changed size ({size} -> {new_size}) — not retrying",
+                    audio_format.format_id
+                ));
+                return Ok(false);
+            }
+        }
+        let mut updated = false;
+        if !video_format.url.trim().is_empty() && video_format.url != video_child.url {
+            self.store.set_download_url(
+                &video_child.id,
+                &video_format.url,
+                Some(&video_format.url),
+            )?;
+            updated = true;
+        }
+        if !audio_format.url.trim().is_empty() && audio_format.url != audio_child.url {
+            self.store.set_download_url(
+                &audio_child.id,
+                &audio_format.url,
+                Some(&audio_format.url),
+            )?;
+            updated = true;
+        }
+        if !updated {
+            return Ok(false);
+        }
+        // Fresh headers replace the stored ones, per child.
+        let video_headers = Self::headers_map_from_http_headers(&video_format.http_headers);
+        if !video_headers.is_empty() {
+            self.download_headers
+                .lock()
+                .unwrap()
+                .insert(video_child.id.clone(), video_headers);
+        }
+        let audio_headers = Self::headers_map_from_http_headers(&audio_format.http_headers);
+        if !audio_headers.is_empty() {
+            self.download_headers
+                .lock()
+                .unwrap()
+                .insert(audio_child.id.clone(), audio_headers);
+        }
+        // The children gain re-resolve meta of their own, so a
+        // later 403 fixes the child directly.
+        let _ = self.store.set_download_ytdlp_meta(
+            &video_child.id,
+            Some(&source_url),
+            Some(&video_format.format_id),
+            false,
+        );
+        let _ = self.store.set_download_ytdlp_meta(
+            &audio_child.id,
+            Some(&source_url),
+            Some(&audio_format.format_id),
+            false,
+        );
+        self.store.log(&format!(
+            "re-resolved DASH parent {parent_id}: video {} + audio {} refreshed",
+            video_format.format_id, audio_format.format_id
+        ));
+        Ok(true)
+    }
+
+    /// Round 85 — the DASH half of the run-loop re-resolve: when
+    /// `reresolve_once(id)` returns false, the row may be a DASH
+    /// child whose parent holds the page URL + format id.
+    /// Returns `Ok(true)` when the parent re-resolve updated a
+    /// child (the caller then retries the run).
+    async fn reresolve_dash_child(&self, id: &str) -> Result<bool> {
+        let row = self
+            .store
+            .get_download(id)?
+            .ok_or_else(|| EngineError::NotFound(id.to_string()))?;
+        let Some(parent_id) = row.parent_id.clone().filter(|p| !p.trim().is_empty()) else {
+            return Ok(false);
+        };
+        self.reresolve_dash_parent(&parent_id).await
+    }
+
     /// Start a DASH (video+audio) download: create (or reuse,
     /// on resume) the two child downloads, link them to the
     /// parent, and spawn the merge supervisor. The parent itself
@@ -5886,7 +6209,29 @@ impl DownloadManager {
                 .find(|c| c.child_kind.as_deref() == Some("audio"))
                 .cloned();
             match (video, audio) {
-                (Some(v), Some(a)) => Ok((v, a)),
+                (Some(v), Some(a)) => {
+                    // Round 85 — backfill the video child's
+                    // re-resolve meta from the parent when it
+                    // was created before this existed: a later
+                    // 403 on its signed URL then re-resolves
+                    // the child directly (`reresolve_once`).
+                    // The audio child gets its meta from
+                    // `reresolve_dash_parent` (no audio format
+                    // id is stored on the parent).
+                    if v.format_id.is_none() {
+                        if let (Some(source_url), Some(format_id)) =
+                            (parent.source_url.as_deref(), parent.format_id.as_deref())
+                        {
+                            let _ = self.store.set_download_ytdlp_meta(
+                                &v.id,
+                                Some(source_url),
+                                Some(format_id),
+                                false,
+                            );
+                        }
+                    }
+                    Ok((v, a))
+                }
                 _ => Err(EngineError::InvalidState(
                     "This download's video or audio part is missing".to_string(),
                 )),
@@ -5948,6 +6293,21 @@ impl DownloadManager {
                 .ok_or_else(|| EngineError::NotFound(audio.0.clone()))?;
             self.store.link_child_to_parent(&video.0, id, "video")?;
             self.store.link_child_to_parent(&audio.0, id, "audio")?;
+            // Round 85 — the video child inherits the parent's
+            // page URL + format id at creation, so a later 403
+            // on its signed URL re-resolves the child directly
+            // (`reresolve_once`) instead of failing. The audio
+            // child gets its meta from `reresolve_dash_parent`.
+            if let (Some(source_url), Some(format_id)) =
+                (parent.source_url.as_deref(), parent.format_id.as_deref())
+            {
+                let _ = self.store.set_download_ytdlp_meta(
+                    &video.0,
+                    Some(source_url),
+                    Some(format_id),
+                    false,
+                );
+            }
             let total = video.1.size.unwrap_or(0) as i64 + audio.1.size.unwrap_or(0) as i64;
             if total > 0 {
                 let _ = self.store.update_known_remote(id, Some(total), None, None);
@@ -6037,6 +6397,24 @@ impl DownloadManager {
             self.emit_dash_progress(&parent_id, "downloading").await;
             // A failed child fails the parent with its message.
             if video.status == "error" || audio.status == "error" {
+                // Round 85 — log WHICH child failed, with its
+                // format id, stream host and message: the old
+                // branch failed the parent with the child's
+                // message and logged nothing, so a 2160p DASH
+                // failure never said whether the video half, the
+                // audio half, or both had refused — or why.
+                // Hosts only, never full signed URLs.
+                self.store.log(&format!(
+                    "dash {parent_id} failed: video child {video_id} status={} format_id={} host={} error={:?}; audio child {audio_id} status={} format_id={} host={} error={:?}",
+                    video.status,
+                    video.format_id.as_deref().unwrap_or("-"),
+                    url_host(&video.url).unwrap_or_default(),
+                    video.error_message,
+                    audio.status,
+                    audio.format_id.as_deref().unwrap_or("-"),
+                    url_host(&audio.url).unwrap_or_default(),
+                    audio.error_message,
+                ));
                 let msg = video
                     .error_message
                     .clone()
@@ -6302,11 +6680,24 @@ impl DownloadManager {
             .parent()
             .map(|p| crate::ytdlp::clean_windows_path(p))
             .filter(|s| !s.is_empty());
-        let out_name = save_path_buf
-            .file_name()
-            .map(|n| n.to_string_lossy().replace('%', "%%"))
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "video".to_string());
+        // Round 85 — the output template is stem + ".%(ext)s"
+        // (see `direct_output_template`): a fixed name made
+        // yt-dlp refuse with "Fixed output name but more than
+        // one file to download" whenever it saw more than one
+        // file to write. With no output dir (a bare filename)
+        // the template carries the whole save path, its
+        // extension replaced by "%(ext)s" — the file still
+        // lands exactly where the row says, under its stem.
+        let out_template = if out_dir.is_some() {
+            direct_output_template(&save_path_buf)
+        } else {
+            let mut full = save_path_buf.clone();
+            full.set_extension("");
+            format!(
+                "{}.%(ext)s",
+                crate::ytdlp::clean_windows_path(&full).replace('%', "%%")
+            )
+        };
         // Round 83 — the direct call gets the same session the
         // resolve had: the browser's cookies (when the download
         // was created from a capture that carried them) via a
@@ -6331,67 +6722,39 @@ impl DownloadManager {
                 }
             }
         }
-        let mut argv: Vec<String> = vec![
-            "--ignore-config".to_string(),
-            "--no-playlist".to_string(),
-            "-f".to_string(),
-            selector,
-        ];
-        if let Some(dir) = &out_dir {
-            argv.push("-P".to_string());
-            argv.push(dir.clone());
-            argv.push("-o".to_string());
-            argv.push(out_name);
-        } else {
-            argv.push("-o".to_string());
-            argv.push(crate::ytdlp::clean_windows_path(Path::new(&save_path)));
-        }
-        if let Some(file) = &cookies_file {
-            argv.push("--cookies".to_string());
-            argv.push(file.path.display().to_string());
-        }
-        if let Some(headers) = &req_headers {
-            if let Some(ua) = headers
-                .user_agent
-                .as_deref()
-                .filter(|s| !s.contains(['\r', '\n']))
-            {
-                argv.push("--add-header".to_string());
-                argv.push(format!("User-Agent: {ua}"));
-            }
-            if let Some(referer) = headers
-                .referer
-                .as_deref()
-                .filter(|s| !s.contains(['\r', '\n']))
-            {
-                argv.push("--add-header".to_string());
-                argv.push(format!("Referer: {referer}"));
-            }
-        }
-        argv.push("--".to_string());
-        argv.push(source_url.clone());
+        // Round 85 (Claude delta) — the whole argv is built by
+        // ONE pure function (`build_direct_ytdlp_args`,
+        // ytdlp.rs): the R84 bug was `--ffmpeg-location` /
+        // `--js-runtimes` appended to the command AFTER `argv`
+        // already ended with "--" + URL, so yt-dlp read them as
+        // extra positional URLs — five URLs with a fixed `-o`
+        // name is exactly the "Fixed output name but more than
+        // one file to download" error. The builder puts every
+        // flag BEFORE "--" and the URL last (the tests pin that
+        // order); `cmd` gets exactly this list, and the failure
+        // log below prints exactly this list (redacted) —
+        // nothing else is ever added to the command.
+        let argv = crate::ytdlp::build_direct_ytdlp_args(&crate::ytdlp::DirectYtDlpArgs {
+            format_selector: selector,
+            out_dir,
+            out_template,
+            cookies_file: cookies_file.as_ref().map(|f| f.path.clone()),
+            user_agent: req_headers.as_ref().and_then(|h| h.user_agent.clone()),
+            referer: req_headers.as_ref().and_then(|h| h.referer.clone()),
+            ffmpeg_dir: if paths.ffmpeg.is_some() && paths.ffprobe.is_some() {
+                paths
+                    .ffmpeg
+                    .as_ref()
+                    .and_then(|f| f.parent())
+                    .map(|p| p.to_path_buf())
+            } else {
+                None
+            },
+            qjs: paths.qjs.clone(),
+            source_url: source_url.clone(),
+        });
         let mut cmd = tokio::process::Command::new(&paths.ytdlp);
         cmd.args(&argv);
-        // Round 78 — the (B) fallback merges with yt-dlp itself,
-        // so it must be told where the bundled ffmpeg/ffprobe
-        // live (they are not on PATH): without
-        // `--ffmpeg-location` a merge fails with "ffprobe and
-        // ffmpeg not found". yt-dlp needs BOTH for a merge — a
-        // plain ffmpeg.exe is not enough (verified against
-        // yt-dlp's README). The JS solver is needed here too: a
-        // YouTube format that needs signature solving fails
-        // without it.
-        if paths.ffmpeg.is_some() && paths.ffprobe.is_some() {
-            if let Some(dir) = paths.ffmpeg.as_ref().and_then(|f| f.parent()) {
-                cmd.args(["--ffmpeg-location", &crate::ytdlp::clean_windows_path(dir)]);
-            }
-        }
-        if let Some(qjs) = &paths.qjs {
-            cmd.args([
-                "--js-runtimes",
-                &format!("quickjs:{}", crate::ytdlp::clean_windows_path(qjs)),
-            ]);
-        }
         #[cfg(windows)]
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         cmd.kill_on_drop(true);
@@ -6454,22 +6817,32 @@ impl DownloadManager {
                             // fallback) is in startup.log's
                             // "resolved add: probe of ... refused"
                             // lines.
-                            while let Ok((is_err, line)) = line_rx.try_recv() {
-                                if is_err {
-                                    tail.push_stderr(&line);
-                                } else {
-                                    tail.push_stdout(&line);
-                                }
-                            }
+                            // Round 85 — the drain is BLOCKING
+                            // (400 ms deadline, 15 ms sleeps):
+                            // a bare `try_recv` loop only took
+                            // what was already queued when the
+                            // child exited, so stderr lines still
+                            // in flight from the drain tasks were
+                            // lost and the tail read empty.
+                            drain_ytdlp_line_rx_blocking(&mut line_rx, &mut tail).await;
                             let version = crate::ytdlp::ytdlp_version(&paths).await;
+                            // Round 85 — the tail is ONE line
+                            // (`render_one_line`, lines joined
+                            // with " | "): the old multi-line
+                            // "tail:\n{...}" made grep /
+                            // Select-String show `tail:` empty
+                            // while the reason sat on the lines
+                            // below it. The mapped error is still
+                            // built from `error_text` on the SAME
+                            // tail object, just before this log.
                             let redacted_tail =
-                                crate::ytdlp::redact_ytdlp_text(&tail.render());
+                                crate::ytdlp::redact_ytdlp_text(&tail.render_one_line());
                             let mapped =
                                 crate::ytdlp::map_error(&crate::ytdlp::redact_ytdlp_text(
                                     &tail.error_text(),
                                 ));
                             let _ = self.store.log(&format!(
-                                "direct yt-dlp download {id} failed: {status}; yt-dlp {}; format_id {format_id}; page {}; argv: {}; tail:\n{}",
+                                "direct yt-dlp download {id} failed: {status}; yt-dlp {}; format_id {format_id}; page {}; argv: {}; tail: {}",
                                 version.as_deref().unwrap_or("unknown"),
                                 crate::ytdlp::redact_ytdlp_text(&source_url),
                                 crate::ytdlp::redact_ytdlp_text(&argv.join(" ")),
@@ -6514,7 +6887,20 @@ impl DownloadManager {
                 }
             }
         }
-        // yt-dlp wrote the file directly to the save path.
+        // yt-dlp wrote the file directly to the save path — or,
+        // when the merged container differs from the row's
+        // extension (the "-o" template carries "%(ext)s"), next
+        // to it under the same stem: move that file onto the
+        // save path so the row's path stays exact, then check.
+        if std::fs::metadata(&save_path)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false)
+        {
+            // Present under the expected name: fall through to
+            // the completion below.
+        } else if let Some(found) = find_direct_ytdlp_output(&save_path_buf) {
+            let _ = std::fs::rename(&found, &save_path_buf);
+        }
         match std::fs::metadata(&save_path) {
             Ok(m) if m.len() > 0 => {
                 let _ = self
@@ -6685,7 +7071,27 @@ impl DownloadManager {
                     )
                     .await
                 }
-                _ => Err(e),
+                // Round 85 — the row may be a DASH child: it
+                // carries no page URL / format id, so the
+                // re-resolve above returns false at once. The
+                // PARENT does — re-resolve the pair through it
+                // and retry the child against its fresh URL.
+                _ => match self.reresolve_dash_child(&id).await {
+                    Ok(true) => {
+                        self.store.log(&format!(
+                            "re-resolved DASH parent for {id} after {e} — retrying the run against the fresh URL"
+                        ));
+                        self.run_inner(
+                            &id,
+                            &pause,
+                            &retry,
+                            &per_download_limiter,
+                            &last_progress_ms,
+                        )
+                        .await
+                    }
+                    _ => Err(e),
+                },
             },
             other => other,
         };
@@ -8429,6 +8835,40 @@ pub async fn merge_dash_files(video: &str, audio: &str, output: &str, ffmpeg: &P
 /// into one line. Empty segments are skipped. Returns when
 /// the stream ends, errors, or either receiver is gone (the
 /// run ended — the loop stopped listening).
+/// Round 85 — the blocking drain for the direct yt-dlp
+/// failure branch: after the child exits, its drain tasks may
+/// still be delivering the last stderr lines (pipe EOF lags
+/// the exit status). A bare `try_recv` loop takes only what is
+/// already queued and drops the rest — the R84 empty tail.
+/// This waits up to 400 ms for stragglers (15 ms sleeps on
+/// Empty) and stops at once when both drain tasks are done
+/// (Disconnected). The caller owns the tail; lines pushed here
+/// are the same lines the live loop pushed.
+async fn drain_ytdlp_line_rx_blocking(
+    line_rx: &mut tokio::sync::mpsc::Receiver<(bool, String)>,
+    tail: &mut crate::ytdlp::YtDlpOutputTail,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(400);
+    loop {
+        match line_rx.try_recv() {
+            Ok((is_err, line)) => {
+                if is_err {
+                    tail.push_stderr(&line);
+                } else {
+                    tail.push_stdout(&line);
+                }
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                if tokio::time::Instant::now() >= deadline {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(15)).await;
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+        }
+    }
+}
+
 async fn drain_ytdlp_lines<R>(
     reader: R,
     is_stderr: bool,
@@ -9238,10 +9678,18 @@ async fn download_segment_once(
         )
         .await;
     }
-    let range = match end {
-        Some(e) => format!("bytes={start}-{e}"),
-        None => format!("bytes={start}-"),
-    };
+    // Round 85 — the Range header rides only when a range
+    // was decided (see `segment_range_header`): a TikTok
+    // first segment and an open-ended first segment send NO
+    // Range at all. Retained per the ChatGPT reconciliation
+    // (Claude wanted it dropped): the browser's ranged
+    // request got 206 with cookies + Referer, so cookies are
+    // the primary fix and no-Range is secondary — but a plain
+    // GET for a whole-file segment is what browsers do for
+    // full downloads, so keeping it through the retest is
+    // low-risk, and the retest arbitrates it as a separate
+    // variable.
+    let range = segment_range_header(start, end, url);
     // Site logins (S09): the saved credential for this host rides
     // on the segment request, like on the probe — per request, so
     // the shared client never carries one site's password to
@@ -9254,7 +9702,14 @@ async fn download_segment_once(
     // preemptively when the auth setting is `basic` — see
     // `proxy.rs`).
     let build_req = |proxy_basic: Option<(&str, &str)>| {
-        let mut req = client.get(url).header(RANGE, range.clone());
+        let mut req = client.get(url);
+        // Round 85 — the Range header rides only when a range
+        // was decided (see `segment_range_header`): a TikTok
+        // first segment and an open-ended first segment send NO
+        // Range at all — the CDN refuses `Range: bytes=0-`.
+        if let Some(range) = range.as_ref() {
+            req = req.header(RANGE, range.clone());
+        }
         if let Some((user, pass)) = site_auth {
             req = req.basic_auth(user, Some(pass));
         }
@@ -9869,6 +10324,85 @@ pub(crate) fn is_tiktok_page(url: &str) -> bool {
     }
 }
 
+/// Round 85 — is this URL a TikTok STREAM host (the host a
+/// resolved TikTok format actually downloads from), as opposed
+/// to a TikTok page host (`is_tiktok_page`)? Stream hosts are
+/// tiktokcdn.com (and its subdomains) as well as tiktok.com
+/// itself — the R83 retest's stream host was
+/// v16-webapp-prime.us.tiktok.com.
+pub(crate) fn is_tiktok_stream_host(url: &str) -> bool {
+    match url_host(url) {
+        Some(host) => {
+            host == "tiktok.com"
+                || host.ends_with(".tiktok.com")
+                || host == "tiktokcdn.com"
+                || host.ends_with(".tiktokcdn.com")
+        }
+        None => false,
+    }
+}
+
+/// Round 85 — the direct yt-dlp output template: the save
+/// name's stem + ".%(ext)s". A FIXED name (no `%`) is not
+/// multi-file-safe: yt-dlp refuses it with "Fixed output name
+/// but more than one file to download" whenever it sees more
+/// than one file to write — a video+audio merge, or (the R84
+/// TikTok case) extra positionals after `--`. The stem keeps
+/// the app's naming exactly (the duplicate "(3)" suffix, the
+/// title); only the extension becomes the template field, so a
+/// merged mp4 still lands on the save path. A '%' in the stem
+/// is escaped ("%%") so yt-dlp does not read it as a field.
+fn direct_output_template(save_path: &Path) -> String {
+    let stem = save_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().replace('%', "%%"))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "video".to_string());
+    format!("{stem}.%(ext)s")
+}
+
+/// Round 85 — find the file yt-dlp actually wrote when the
+/// save path is missing: with the "%(ext)s" template the
+/// merged container can differ from the row's extension (a
+/// webm merge for an ".mp4" save path), so the file sits next
+/// to the save path under the same stem. Returns the largest
+/// such file, if any. The caller renames it onto the save
+/// path, so the row's path stays exact.
+fn find_direct_ytdlp_output(save_path: &Path) -> Option<PathBuf> {
+    let dir = save_path.parent()?;
+    let stem = save_path.file_stem()?.to_string_lossy().into_owned();
+    let save_name = save_path.file_name()?.to_string_lossy().into_owned();
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut best: Option<(u64, PathBuf)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == save_name || !path.is_file() {
+            continue;
+        }
+        if path.file_stem().map(|s| s.to_string_lossy()) != Some(stem.clone().into()) {
+            continue;
+        }
+        let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        if len > 0 && best.as_ref().map(|(l, _)| len > *l).unwrap_or(true) {
+            best = Some((len, path));
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+fn segment_range_header(start: u64, end: Option<u64>, url: &str) -> Option<String> {
+    let omit_range = (start == 0 && end.is_none()) || (start == 0 && is_tiktok_stream_host(url));
+    if omit_range {
+        None
+    } else {
+        Some(match end {
+            Some(e) => format!("bytes={start}-{e}"),
+            None => format!("bytes={start}-"),
+        })
+    }
+}
+
 pub(crate) fn filename_from_url(url: &str) -> Option<String> {
     let parsed = reqwest::Url::parse(url).ok()?;
     let last = parsed.path_segments()?.next_back()?;
@@ -10071,5 +10605,173 @@ mod tests {
         assert_eq!(parse_ytdlp_eta("00:41"), Some(41));
         assert_eq!(parse_ytdlp_eta("01:02:03"), Some(3723));
         assert_eq!(parse_ytdlp_eta("x"), None);
+    }
+
+    /// Round 85 — Patch 2: the first request of a TikTok
+    /// download carries NO `Range` header, and neither does an
+    /// open-ended first segment anywhere (the old code always
+    /// sent `bytes=0-`). A later segment or a bounded segment
+    /// still sends its range, so normal segmented downloads
+    /// are untouched. Retained per the ChatGPT reconciliation
+    /// (Claude wanted it dropped) — the retest arbitrates it
+    /// as a separate variable.
+    #[test]
+    fn segment_range_header_omits_tiktok_first_and_open_ended_first() {
+        // TikTok first segment: no Range, bounded or not.
+        assert_eq!(
+            segment_range_header(0, None, "https://v16-webapp-prime.us.tiktok.com/video.mp4"),
+            None
+        );
+        assert_eq!(
+            segment_range_header(0, Some(999), "https://v16m.tiktokcdn.com/v.mp4"),
+            None
+        );
+        // Open-ended first segment anywhere: no Range.
+        assert_eq!(
+            segment_range_header(0, None, "https://example.com/file.bin"),
+            None
+        );
+        // Later segments and bounded segments still send Range.
+        assert_eq!(
+            segment_range_header(100, None, "https://example.com/file.bin").as_deref(),
+            Some("bytes=100-")
+        );
+        assert_eq!(
+            segment_range_header(0, Some(1023), "https://example.com/file.bin").as_deref(),
+            Some("bytes=0-1023")
+        );
+        assert_eq!(
+            segment_range_header(500, Some(999), "https://v16m.tiktokcdn.com/v.mp4").as_deref(),
+            Some("bytes=500-999")
+        );
+        // A resumed TikTok segment (start > 0) still ranges.
+        assert_eq!(
+            segment_range_header(4096, None, "https://v16-webapp-prime.us.tiktok.com/v.mp4")
+                .as_deref(),
+            Some("bytes=4096-")
+        );
+    }
+
+    /// Round 85 — the direct yt-dlp output template keeps the
+    /// app's naming (stem, duplicate "(3)" suffix) and only
+    /// the extension becomes "%(ext)s", so a fixed name can
+    /// never trip yt-dlp's "Fixed output name but more than
+    /// one file to download" again. A '%' in the stem is
+    /// escaped so yt-dlp does not read it as a field.
+    #[test]
+    fn direct_output_template_keeps_stem_and_adds_ext_field() {
+        assert_eq!(
+            direct_output_template(Path::new("/tmp/TikTok video #123 (3).mp4")),
+            "TikTok video #123 (3).%(ext)s"
+        );
+        assert_eq!(
+            direct_output_template(Path::new("/tmp/video.mp4")),
+            "video.%(ext)s"
+        );
+        // No extension on the save name: the stem is the whole
+        // name and the template still adds the field.
+        assert_eq!(
+            direct_output_template(Path::new("/tmp/video")),
+            "video.%(ext)s"
+        );
+        // A '%' in the title is escaped, never a template field.
+        assert_eq!(
+            direct_output_template(Path::new("/tmp/100% sure.mp4")),
+            "100%% sure.%(ext)s"
+        );
+    }
+
+    /// Round 85 — the completion fallback finds the merged file
+    /// when its container differs from the row's extension: the
+    /// largest same-stem file next to the save path, never the
+    /// save path itself and never an empty file.
+    #[test]
+    fn find_direct_ytdlp_output_finds_same_stem_other_ext() {
+        let dir = std::env::temp_dir().join(format!("fetchline-direct-out-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let save_path = dir.join("video (3).mp4");
+        let webm = dir.join("video (3).webm");
+        let small = dir.join("video (3).mkv");
+        let other = dir.join("other.mp4");
+        std::fs::write(&webm, vec![1u8; 100]).unwrap();
+        std::fs::write(&small, vec![1u8; 10]).unwrap();
+        std::fs::write(&other, vec![1u8; 500]).unwrap();
+        // An empty same-stem file never qualifies.
+        std::fs::write(dir.join("video (3).flv"), []).unwrap();
+        // The largest same-stem file wins; a different stem
+        // never qualifies, however large.
+        assert_eq!(
+            find_direct_ytdlp_output(&save_path).as_deref(),
+            Some(webm.as_path())
+        );
+        // Nothing but the save path itself: no candidate.
+        let _ = std::fs::remove_file(&webm);
+        let _ = std::fs::remove_file(&small);
+        assert!(find_direct_ytdlp_output(&save_path).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Round 85 — Patch 2: the TikTok stream-host helper
+    /// covers the page host AND the CDN host (tiktokcdn.com),
+    /// case-insensitively, and nothing that merely looks like
+    /// one.
+    #[test]
+    fn tiktok_stream_host_matches_cdn_and_page_hosts() {
+        assert!(is_tiktok_stream_host("https://tiktok.com/v.mp4"));
+        assert!(is_tiktok_stream_host("https://www.tiktok.com/v.mp4"));
+        assert!(is_tiktok_stream_host("https://v16m.tiktokcdn.com/v.mp4"));
+        assert!(is_tiktok_stream_host("https://tiktokcdn.com/v.mp4"));
+        assert!(is_tiktok_stream_host("https://V16M.TIKTOKCDN.COM/v.mp4"));
+        assert!(!is_tiktok_stream_host("https://example.com/v.mp4"));
+        assert!(!is_tiktok_stream_host("https://nottiktokcdn.com/v.mp4"));
+        assert!(!is_tiktok_stream_host(
+            "https://tiktokcdn.com.evil.com/v.mp4"
+        ));
+        assert!(!is_tiktok_stream_host("not a url"));
+    }
+
+    /// Round 85 — Patch 1 regression: a child that exits while
+    /// stderr is still being delivered must not lose the final
+    /// lines. The sender delivers the verdict 100 ms after the
+    /// first line (the drain task still running when the child
+    /// "exited"); the blocking drain keeps it, the tail maps to
+    /// the right kind, and the one-line log form carries the
+    /// reason with no cookie material. A bare `try_recv` loop
+    /// — the old code — takes only what is already queued and
+    /// fails this test.
+    #[tokio::test]
+    async fn blocking_drain_keeps_late_stderr_lines() {
+        let started = std::time::Instant::now();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<(bool, String)>(256);
+        tokio::spawn(async move {
+            tx.send((true, "[download] Downloading video 1 of 1".to_string()))
+                .await
+                .unwrap();
+            // The child has "exited"; the drain task is still
+            // delivering the verdict line.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            tx.send((true, "ERROR: HTTP Error 403: Forbidden".to_string()))
+                .await
+                .unwrap();
+            // The sender drops here: Disconnected ends the drain.
+        });
+        let mut tail = crate::ytdlp::YtDlpOutputTail::new();
+        drain_ytdlp_line_rx_blocking(&mut rx, &mut tail).await;
+        // Disconnected ends the drain at once — it must not
+        // wait out the whole 400 ms deadline.
+        assert!(
+            started.elapsed() < Duration::from_millis(350),
+            "the drain should end on disconnect, not on the deadline"
+        );
+        assert!(!tail.is_empty());
+        assert!(tail
+            .error_text()
+            .contains("ERROR: HTTP Error 403: Forbidden"));
+        let mapped = crate::ytdlp::map_error(&crate::ytdlp::redact_ytdlp_text(&tail.error_text()));
+        assert_eq!(mapped.kind, crate::ytdlp::YtDlpErrorKind::CdnRefused);
+        let one = crate::ytdlp::redact_ytdlp_text(&tail.render_one_line());
+        assert!(!one.contains('\n'));
+        assert!(one.contains("ERROR: HTTP Error 403: Forbidden"));
     }
 }

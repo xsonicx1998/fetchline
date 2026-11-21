@@ -326,14 +326,27 @@ async function handToFetchline(message) {
   // carries a `cookies` field (a resolved quality pick — "only
   // the cookies used for that resolve, if any", possibly []) is
   // passed through untouched, never re-filled from the media URL.
+  // Round 85 — REVISED: an EMPTY array is not a cookie set, it
+  // is the absence of one. A public TikTok video's first resolve
+  // is cookieless (no consent grant yet), so its pick carries
+  // `cookies: []` — and the old `!("cookies" in message)` check
+  // then blocked the refill from the media URL, so the pending
+  // row got no cookies and the engine GET sent no Cookie at all:
+  // TikTok's CDN answers that with 403. An empty array is now
+  // refilled from the media URL like a direct pick (the browser's
+  // own cookie store domain-matches `.tiktok.com` cookies to the
+  // v16 CDN host); a NON-empty array still passes through
+  // untouched.
   let cookieUrl = null;
   if (message.type === "download_link" && message.url) cookieUrl = message.url;
+  const hasCookies =
+    Array.isArray(message.cookies) && message.cookies.length > 0;
   if (
     message.type === "video_found" &&
     message.variants &&
     message.variants[0] &&
     message.variants[0].url &&
-    !("cookies" in message)
+    !hasCookies
   ) {
     cookieUrl = message.variants[0].url;
   }

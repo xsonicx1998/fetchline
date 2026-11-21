@@ -769,7 +769,7 @@ export function AddDownloadDialog({
         className={
           standalone
             ? 'flex min-h-0 w-full flex-1 flex-col overflow-hidden bg-bg text-text'
-            : 'w-full max-w-[620px] overflow-hidden rounded-xl border border-[#8B20FF]/45 bg-bg text-text shadow-[0_0_0_1px_rgba(0,200,255,0.12),0_24px_70px_rgba(0,0,0,0.65),0_0_44px_rgba(139,32,255,0.22)]'
+            : 'flex max-h-full w-full max-w-[620px] flex-col overflow-hidden rounded-xl border border-[#8B20FF]/45 bg-bg text-text shadow-[0_0_0_1px_rgba(0,200,255,0.12),0_24px_70px_rgba(0,0,0,0.65),0_0_44px_rgba(139,32,255,0.22)]'
         }
       >
         {/* Round 81 (double title, ex-Round 77 item a) — in the
@@ -808,12 +808,24 @@ export function AddDownloadDialog({
 
         {/* Body — IDM field order, tightened spacing. In the
             standalone window it scrolls inside the fixed-size
-            window instead of overflowing it. */}
+            window instead of overflowing it. Round 85 — the
+            in-window dialog scrolls too: it used to have no
+            max-height and no scroll, so on a short (RDP) main
+            window the fields ran past the viewport and Start
+            Download sat below the fold with no way to reach it
+            except Tab. The body is now min-h-0 + flex-1 +
+            overflow-y-auto in BOTH variants, inside a box capped
+            at the viewport (standalone: the window's h-full
+            column; in-window: max-h-full of the padded overlay),
+            and the footer below is shrink-0, so Start Download
+            is always visible. No fields were removed and no
+            control was shrunk — the dialog is the same height on
+            a normal screen; only short viewports scroll. */}
         <div
           className={
             standalone
               ? 'flex min-h-0 flex-1 flex-col gap-[11px] overflow-y-auto px-[22px] pb-1 pt-4'
-              : 'flex flex-col gap-[11px] px-[22px] pb-1 pt-4'
+              : 'flex min-h-0 flex-1 flex-col gap-[11px] overflow-y-auto px-[22px] pb-1 pt-4'
           }
         >
           <div>
@@ -1022,12 +1034,14 @@ export function AddDownloadDialog({
 
         {/* Actions — the default-action button is the gradient
          *  primary (with the default setting that is Start
-         *  Download, exactly as the mockup shows). */}
+         *  Download, exactly as the mockup shows). Round 85 —
+         *  shrink-0 in both variants: the footer is the sticky
+         *  part of the flex column, never scrolled away. */}
         <div
           className={
             standalone
               ? 'flex shrink-0 items-center justify-end gap-2.5 px-[22px] pb-[18px] pt-4'
-              : 'flex items-center justify-end gap-2.5 px-[22px] pb-[18px] pt-4'
+              : 'flex shrink-0 items-center justify-end gap-2.5 px-[22px] pb-[18px] pt-4'
           }
         >
           <Button

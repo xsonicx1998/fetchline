@@ -605,10 +605,15 @@ test("cookies_for returns the page's cookies as name/value pairs", async () => {
   }));
 });
 
-test("video_found with explicit cookies is passed through, never re-filled", async () => {
-  // A resolved pick carries cookies: [] (no cookies were used
-  // for that resolve) — the background must not refill them
-  // from the media URL behind the content script's back.
+test("video_found with an empty cookies array is re-filled from the media URL", async () => {
+  // Round 85 — REVISED: a resolved pick carries cookies: []
+  // when its resolve was cookieless (a public TikTok video's
+  // first resolve has no consent grant yet). An empty array is
+  // not a cookie set, it is the absence of one — the old
+  // pass-through left the pending row cookieless and the engine
+  // GET sent no Cookie at all (TikTok's CDN answers 403). The
+  // refill uses the browser's own cookie store, which
+  // domain-matches `.tiktok.com` cookies to the CDN host.
   const env = loadBackground({
     nativeReply: { ok: true },
     cookies: [{ name: "session", value: "abc" }],
@@ -626,7 +631,31 @@ test("video_found with explicit cookies is passed through, never re-filled", asy
   );
   await tick(20);
   assert.equal(reply.ok, true);
-  assert.equal(JSON.stringify(env.sentMessages[0].cookies), JSON.stringify([]));
+  assert.equal(JSON.stringify(env.sentMessages[0].cookies), JSON.stringify([{ name: "session", value: "abc" }]));
+});
+
+test("video_found with non-empty cookies is passed through, never re-filled", async () => {
+  // A resolved pick that DID use cookies keeps exactly those
+  // cookies — the background must not refill them from the
+  // media URL behind the content script's back.
+  const env = loadBackground({
+    nativeReply: { ok: true },
+    cookies: [{ name: "other", value: "zzz" }],
+  });
+  let reply = null;
+  env.listeners.message(
+    {
+      type: "video_found",
+      page_url: RESOLVE_PAGE,
+      variants: [{ url: "https://cdn.example.com/v1080.mp4", resolved: true }],
+      cookies: [{ name: "session", value: "abc" }],
+    },
+    {},
+    (r) => { reply = r; },
+  );
+  await tick(20);
+  assert.equal(reply.ok, true);
+  assert.equal(JSON.stringify(env.sentMessages[0].cookies), JSON.stringify([{ name: "session", value: "abc" }]));
 });
 
 test("video_found without a cookies field still attaches the media URL's cookies (old path)", async () => {

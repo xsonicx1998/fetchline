@@ -4413,3 +4413,186 @@ fn accept_ranges_persisted_on_download_row() {
         Some(true)
     );
 }
+
+/// Round 85 — Patch 2: a normal segmented download still sends
+/// `Range` for its segments. The no-Range rule only omits the
+/// first/open-ended and TikTok first requests, so a plain
+/// multi-segment download must show ranged GETs at the mock.
+#[tokio::test]
+async fn round85_segmented_download_still_sends_range() {
+    let server = MockServer::start(MockConfig {
+        chunk: 65536,
+        delay: Duration::ZERO,
+        hide_length: false,
+        ..Default::default()
+    });
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let mgr = DownloadManager::new(Arc::clone(&store), 4);
+    let (id, _) = mgr
+        .add_download(
+            &server.url,
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    mgr.start_download(&id).await.unwrap();
+    assert!(wait_for_status(&mgr, &id, "complete", 30).await);
+    assert!(
+        server.ranged_gets() > 0,
+        "segmented GETs must carry a Range header"
+    );
+}
+
+/// Round 85 — Patch 5: Resume acts only on the requested row,
+/// and a 403 probe on a yt-dlp-resolved row attempts the
+/// re-resolve instead of failing on the dead URL outright. No
+/// yt-dlp binary exists in the test env, so the re-resolve
+/// fails and the row ends in error — the path taken is what
+/// this proves, plus that the sibling row is untouched.
+#[tokio::test]
+async fn round85_resume_touches_only_requested_row_and_reresolves_on_403() {
+    let server = MockServer::start(MockConfig {
+        fail_status: Some(403),
+        ..Default::default()
+    });
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let mgr = DownloadManager::new(Arc::clone(&store), 4);
+    // Sibling: a plain queued row Resume must not touch.
+    let sibling = store
+        .create_download(
+            "https://example.com/sibling.bin",
+            None,
+            "sibling.bin",
+            &dir.join("sibling.bin").to_string_lossy(),
+            "cat-video",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    // The resolved row: a yt-dlp row whose signed URL is dead.
+    let row = store
+        .create_download(
+            &server.url,
+            None,
+            "video.mp4",
+            &dir.join("video.mp4").to_string_lossy(),
+            "cat-video",
+            Some(1024),
+            None,
+            None,
+            Some(true),
+        )
+        .unwrap();
+    store
+        .set_download_ytdlp_meta(
+            &row,
+            Some("https://example.com/watch?v=x"),
+            Some("137"),
+            false,
+        )
+        .unwrap();
+    let err = mgr.resume_download(&row).await.unwrap_err();
+    assert!(
+        err.to_string().contains("403"),
+        "resume must fail with the probe 403: {err}"
+    );
+    let row_after = mgr.get_download(&row).unwrap().unwrap();
+    assert_eq!(row_after.status, "error");
+    let sibling_after = mgr.get_download(&sibling).unwrap().unwrap();
+    assert_eq!(
+        sibling_after.status, "queued",
+        "resume must not touch the sibling row"
+    );
+}
+
+/// Round 85 — Patch 6: a DASH child's 403 reaches the parent
+/// re-resolve instead of failing the pair outright. The parent
+/// here has no page URL / format id, so the re-resolve returns
+/// false and the pair fails — but the run-loop hook runs (the
+/// children fail with the 403, the parent fails with the
+/// child's message) and the supervisor logs which child failed.
+#[tokio::test]
+async fn round85_dash_child_403_fails_parent_with_child_message() {
+    let server = MockServer::start(MockConfig {
+        fail_status: Some(403),
+        ..Default::default()
+    });
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let mgr = DownloadManager::new(Arc::clone(&store), 4);
+    // One attempt: a 403 fails at once instead of retrying
+    // with backoffs for ~30 s.
+    let mut settings = store.get_settings().unwrap();
+    settings.max_retries = 1;
+    mgr.update_settings(&settings).unwrap();
+    let parent = store
+        .create_download(
+            &server.url,
+            None,
+            "video.mp4",
+            &dir.join("video.mp4").to_string_lossy(),
+            "cat-video",
+            Some(1024),
+            None,
+            None,
+            Some(true),
+        )
+        .unwrap();
+    let video = store
+        .create_download(
+            &server.url,
+            None,
+            "video.video.mp4",
+            &dir.join("video.video.mp4").to_string_lossy(),
+            "cat-video",
+            Some(512),
+            None,
+            None,
+            Some(true),
+        )
+        .unwrap();
+    let audio = store
+        .create_download(
+            &server.url,
+            None,
+            "video.audio.m4a",
+            &dir.join("video.audio.m4a").to_string_lossy(),
+            "cat-video",
+            Some(512),
+            None,
+            None,
+            Some(true),
+        )
+        .unwrap();
+    store.create_segments(&video, &[(0, None)]).unwrap();
+    store.create_segments(&audio, &[(0, None)]).unwrap();
+    store
+        .link_child_to_parent(&video, &parent, "video")
+        .unwrap();
+    store
+        .link_child_to_parent(&audio, &parent, "audio")
+        .unwrap();
+    mgr.resume_download(&parent).await.unwrap();
+    assert!(wait_for_status(&mgr, &parent, "error", 60).await);
+    let parent_row = mgr.get_download(&parent).unwrap().unwrap();
+    assert_eq!(parent_row.merge_status.as_deref(), Some("failed"));
+    assert!(
+        parent_row
+            .error_message
+            .as_deref()
+            .unwrap_or("")
+            .contains("403"),
+        "the parent must fail with the child's 403 message: {:?}",
+        parent_row.error_message
+    );
+    for child in [&video, &audio] {
+        assert_eq!(mgr.get_download(child).unwrap().unwrap().status, "error");
+    }
+}
