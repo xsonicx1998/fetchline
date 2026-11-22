@@ -23,6 +23,9 @@ import { getPendingLink } from '../lib/api'
 import { StandaloneAddUrlWindow } from './StandaloneAddUrlWindow'
 
 const startDraggingMock = vi.fn(() => Promise.resolve())
+const { invokeMock } = vi.hoisted(() => ({
+  invokeMock: vi.fn(() => Promise.resolve()),
+}))
 vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: () => ({
     minimize: () => Promise.resolve(),
@@ -35,7 +38,7 @@ vi.mock('@tauri-apps/api/window', () => ({
   }),
 }))
 vi.mock('@tauri-apps/api/core', () => ({
-  invoke: () => Promise.resolve(),
+  invoke: invokeMock,
 }))
 vi.mock('../lib/api', () => ({
   // Never resolves: the window stays on "Loading captured
@@ -83,5 +86,23 @@ describe('StandaloneAddUrlWindow manual mode (Round 87.2)', () => {
     const urlField = screen.getByLabelText('URL') as HTMLInputElement
     expect(urlField.disabled).toBe(false)
     expect(urlField.value).toBe('')
+  })
+
+  test('mousedown on the manual window title logs the hit (SPAN, deep) and does not call startDragging (Round 87.4)', () => {
+    // The R87.3 retest dragged this exact title twice and the
+    // window never moved, with no code-level cause left — the
+    // hit-logger is what proves the hit element live, from
+    // startup.log, even if the debug port fails again.
+    invokeMock.mockClear()
+    startDraggingMock.mockClear()
+    render(<StandaloneAddUrlWindow manual />)
+    fireEvent.mouseDown(screen.getByText('Add URL'))
+    expect(startDraggingMock).not.toHaveBeenCalled()
+    expect(invokeMock).toHaveBeenCalledWith(
+      'log_frontend',
+      expect.objectContaining({
+        message: expect.stringContaining('target=SPAN'),
+      }),
+    )
   })
 })

@@ -25,13 +25,35 @@
 
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
+// @ts-ignore — Vitest runs in node so these resolve at runtime;
+// tsc cannot see node types in this frontend project.
+import { readFileSync } from 'node:fs'
+// @ts-ignore — see above.
+import { dirname, join } from 'node:path'
+// @ts-ignore — see above.
+import { fileURLToPath } from 'node:url'
 import { TitleBar } from './TitleBar'
+// Round 87.4 — the global stylesheet as text, so the test can
+// pin the rule that a drag never highlights text (jsdom has no
+// layout/selection engine, so a behavioural assertion here
+// would pass vacuously; and a `?raw` import comes back empty
+// under Vitest's CSS handling, so the file is read directly).
+const indexCss = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), '..', 'index.css'),
+  'utf-8',
+)
 
 const { minimizeMock, hideMock, closeMock, startDraggingMock } = vi.hoisted(() => ({
   minimizeMock: vi.fn(() => Promise.resolve()),
   hideMock: vi.fn(() => Promise.resolve()),
   closeMock: vi.fn(() => Promise.resolve()),
   startDraggingMock: vi.fn(() => Promise.resolve()),
+}))
+const { invokeMock } = vi.hoisted(() => ({
+  invokeMock: vi.fn(() => Promise.resolve()),
+}))
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: invokeMock,
 }))
 vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: () => ({
@@ -49,6 +71,7 @@ beforeEach(() => {
   hideMock.mockClear()
   closeMock.mockClear()
   startDraggingMock.mockClear()
+  invokeMock.mockClear()
 })
 
 describe('TitleBar minimize (Round 86)', () => {
@@ -146,5 +169,80 @@ describe('TitleBar drag region (Round 87)', () => {
     )
     const region = screen.getByText('movie.mp4').closest('div')
     expect(region?.getAttribute('data-tauri-drag-region')).toBe('deep')
+  })
+})
+
+describe('TitleBar mousedown hit-log (Round 87.4)', () => {
+  test('mousedown on the title logs the hit (SPAN, deep) — and still does NOT call startDragging', () => {
+    render(<TitleBar title="Sonic Manager" />)
+    fireEvent.mouseDown(screen.getByText('Sonic Manager'))
+    expect(startDraggingMock).not.toHaveBeenCalled()
+    expect(invokeMock).toHaveBeenCalledTimes(1)
+    expect(invokeMock).toHaveBeenCalledWith(
+      'log_frontend',
+      expect.objectContaining({
+        message: expect.stringContaining('target=SPAN'),
+      }),
+    )
+    expect(invokeMock).toHaveBeenCalledWith(
+      'log_frontend',
+      expect.objectContaining({
+        message: expect.stringContaining('drag-region=deep'),
+      }),
+    )
+  })
+
+  test('mousedown on the logo logs the hit (IMG, deep)', () => {
+    render(<TitleBar title="Sonic Manager" />)
+    const img = document.querySelector('img[alt=""]')
+    if (!img) throw new Error('no logo img rendered')
+    fireEvent.mouseDown(img)
+    expect(invokeMock).toHaveBeenCalledTimes(1)
+    const call = invokeMock.mock.calls[0] as unknown as
+      | [string, { message?: string }]
+      | undefined
+    const message = String(call?.[1]?.message ?? '')
+    expect(message).toContain('target=IMG')
+    expect(message).toContain('drag-region=deep')
+    expect(startDraggingMock).not.toHaveBeenCalled()
+  })
+
+  test('mousedown on the empty drag area logs the hit (DIV, deep)', () => {
+    render(<TitleBar title="Sonic Manager" />)
+    const region = screen.getByText('Sonic Manager').closest('div')
+    if (!region) throw new Error('no drag region rendered')
+    fireEvent.mouseDown(region)
+    expect(invokeMock).toHaveBeenCalledTimes(1)
+    const call = invokeMock.mock.calls[0] as unknown as
+      | [string, { message?: string }]
+      | undefined
+    const message = String(call?.[1]?.message ?? '')
+    expect(message).toContain('target=DIV')
+    expect(message).toContain('drag-region=deep')
+    expect(startDraggingMock).not.toHaveBeenCalled()
+  })
+
+  test('a non-draggable window logs nothing on mousedown', () => {
+    render(<TitleBar title="Sonic Manager" draggable={false} />)
+    fireEvent.mouseDown(screen.getByText('Sonic Manager'))
+    expect(invokeMock).not.toHaveBeenCalled()
+    expect(startDraggingMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('TitleBar drag never highlights text (Round 87.4)', () => {
+  test('the global stylesheet turns text selection off — the user asked that a drag never highlight text', () => {
+    // Round 87 (13a): `user-select: none` on the page root
+    // covers every window (they all load this bundle), so even
+    // if a drag fails to start, no text gets selected. Fields
+    // stay selectable — the exemption below must survive too.
+    expect(indexCss).toContain('user-select: none')
+    expect(indexCss).toContain('html, body')
+  })
+
+  test('text fields stay selectable despite the global rule', () => {
+    expect(indexCss).toContain('user-select: text')
+    expect(indexCss).toContain('input, textarea')
+    expect(indexCss).toContain('.selectable')
   })
 })

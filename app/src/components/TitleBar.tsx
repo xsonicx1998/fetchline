@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type MouseEvent as ReactMouseEvent } from 'react'
+import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Copy, Minus, Square, X } from 'lucide-react'
 
@@ -58,6 +59,60 @@ import { Copy, Minus, Square, X } from 'lucide-react'
  *  diagnostic hook (other callers may use it); this component
  *  simply no longer calls it.
  *
+ *  Round 87.4 — DIAGNOSIS of the R87.3 live failure (title-text
+ *  drag still dead on SHIPPED), proven from code + the
+ *  production build — no code-level cause is left:
+ *
+ *  PROVEN — the element under the title text IS the span at
+ *  :224 with `data-tauri-drag-region="deep"`, and the
+ *  production bundle (`npm run build`, the exact command the
+ *  VPS build runs via `beforeBuildCommand`) contains all three
+ *  `"deep"` attributes (parent div, logo img, title span).
+ *  Tauri is lock-pinned to 2.12.5 and its drag.js was read
+ *  verbatim: a left mousedown on that span MUST return true
+ *  from `isDragRegion` (the span is `composedPath()[0]`, attr
+ *  `'deep'` → `true`) and invoke `start_dragging`. No
+ *  clickable element sits between the span and the region,
+ *  and no `stopPropagation` / `stopImmediatePropagation` /
+ *  `onMouseDown` handler exists anywhere in `src/` that could
+ *  intercept the mousedown before drag.js's document
+ *  listener — the only `preventDefault`s are the DownloadTable
+ *  row keys, the CategorySidebar, and the right-click-menu
+ *  suppression in main.tsx.
+ *  RULED OUT — attribute stripped in the build (verified in
+ *  dist); wrong Tauri/drag.js version (lock pins 2.12.5,
+ *  drag.js identical in 2.12.7); a double title / wrong
+ *  element grabbed (the dialog's inner header is `null` in
+ *  standalone mode, AddDownloadDialog.tsx:799 — the TitleBar
+ *  span is the ONLY "Add URL" text); text selection stealing
+ *  the drag (global `user-select: none` on html/body,
+ *  index.css:67, and drag.js `preventDefault()` would kill
+ *  it anyway); an overlay on top of the span (no positioned
+ *  element in the TitleBar subtree; the buttons sit to the
+ *  RIGHT, outside the drag div); a stale frontend in the
+ *  SHIPPED build at the pipeline level (`beforeBuildCommand`
+ *  rebuilds the frontend — but the INSTALLED exe's identity
+ *  was never verified on the VPS: the 87.2 and 87.3 SHIPPED
+ *  exes were both exactly 19,808,768 B, so a wrong/old MSI
+ *  stays a live hypothesis for the retest to close).
+ *  PROVEN — why the 87.3 remote-debugging attempt failed:
+ *  `tauri-plugin-single-instance` (Cargo.toml:30,
+ *  lib.rs:3858) means a second launch only FOCUSES the
+ *  already-running instance, so the env-var relaunch never
+ *  started a new process and port 9222 never opened. The
+ *  live diagnosis MUST kill the app first (see build-log.md).
+ *
+ *  What is left is live-only: (H1) the retest's pixel
+ *  coordinates missed the span, (H2) the wrong SHIPPED
+ *  binary was actually running, or (H3) a native/WebView2
+ *  quirk invisible to code. The diagnosis does NOT prove the
+ *  attribute route cannot work, so Round 87.1 stands: NO
+ *  `startDragging()` fallback. What this round changes is
+ *  observability: a mousedown hit-logger (below) records
+ *  exactly what element every title-bar grab hit, in
+ *  startup.log, so the next retest can PROVE the hit element
+ *  even if the debug port fails again.
+ *
  *  Round 87.3 — the R87.2 retest: the manual Add URL window
  *  drags by the LOGO but NOT by the TITLE TEXT (two attempts).
  *  The region div already carries "deep", which per drag.js
@@ -88,6 +143,29 @@ import { Copy, Minus, Square, X } from 'lucide-react'
  *  quit the app. A progress window's X still closes just that
  *  window (the download keeps running); its minimize drops it
  *  to the taskbar like the main window's. */
+/** Round 87.4 — diagnostic mousedown hit-logger (NOT a drag
+ *  path): records what element a title-bar grab actually hit —
+ *  target tag, its own drag-region attribute, and the closest
+ *  ancestor's — via the `log_frontend` command, so it lands in
+ *  startup.log where the retest reads it. It changes NO drag
+ *  behaviour: no `preventDefault`, no `stopPropagation`, no
+ *  `startDragging()` — the native drag script owns the drag,
+ *  and this handler only observes (React's bubble-phase
+ *  listener runs before drag.js's document listener, and it
+ *  leaves the event untouched). A failed invoke is swallowed:
+ *  the logger must never break the title bar. Only wired on
+ *  the draggable div, so a fixed-size dialog logs nothing. */
+function logTitleBarHit(e: ReactMouseEvent) {
+  const target = e.target as HTMLElement | null
+  if (!target) return
+  const region = target.closest('[data-tauri-drag-region]')
+  const message =
+    `titlebar mousedown: target=${target.tagName} ` +
+    `drag-region=${target.getAttribute('data-tauri-drag-region') ?? 'none'} ` +
+    `closest-region=${region?.getAttribute('data-tauri-drag-region') ?? 'none'}`
+  void invoke('log_frontend', { message }).catch(() => undefined)
+}
+
 export function TitleBar({
   title,
   icon = true,
@@ -188,7 +266,11 @@ export function TitleBar({
               // two drag starts per click can leave the window
               // stuck, and the explicit call alone already
               // failed to move the dialog in R86.
+              // Round 87.4 — `onMouseDown` here is the
+              // hit-LOGGER only (see `logTitleBarHit`): it
+              // records the grab, it never starts a drag.
               'data-tauri-drag-region': 'deep' as const,
+              onMouseDown: logTitleBarHit,
             }
           : {})}
         className="flex min-w-0 flex-1 items-center gap-2 px-3"
