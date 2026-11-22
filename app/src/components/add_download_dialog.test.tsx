@@ -24,6 +24,7 @@ vi.mock('../lib/api', () => ({
   probeUrl: vi.fn(),
   setDownloadDescription: vi.fn(),
   setDownloadSpeedLimit: vi.fn(),
+  setSettingField: vi.fn(),
   startDownload: vi.fn(),
   updateCategory: vi.fn(),
   ytdlpResolve: vi.fn(),

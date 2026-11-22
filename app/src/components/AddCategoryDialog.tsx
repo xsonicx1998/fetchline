@@ -118,7 +118,14 @@ export function AddCategoryDialog({ open, onClose, onAdded }: AddCategoryDialogP
               type="text"
               value={folder}
               onChange={(e) => setFolder(e.target.value)}
-              placeholder="C:\Users\you\Downloads\Podcasts"
+              // Round 87.5 (N4) — no made-up path: the old
+              // placeholder ("C:\Users\you\Downloads\Podcasts")
+              // named a user that does not exist, and the tester
+              // read it as the stored value. There is no backend
+              // command for the real Downloads folder, so the
+              // field says what it is for instead of showing an
+              // example path.
+              placeholder="Choose where files in this category go"
               className="h-8 w-full rounded-md border border-border-input bg-bg px-3 font-mono text-base focus:border-accent"
             />
           </div>

@@ -172,59 +172,25 @@ describe('TitleBar drag region (Round 87)', () => {
   })
 })
 
-describe('TitleBar mousedown hit-log (Round 87.4)', () => {
-  test('mousedown on the title logs the hit (SPAN, deep) — and still does NOT call startDragging', () => {
+describe('TitleBar mousedown logging (Round 87.5: logger removed)', () => {
+  test('a mousedown on the title logs NOTHING any more — the 87.4 hit-logger is gone', () => {
+    // Round 87.4 added a mousedown hit-logger (every grab wrote
+    // to startup.log via `log_frontend`) to prove the hit
+    // element live. It served its purpose (title-text drag
+    // proven 6/6 on the VPS) and is removed in 87.5: there is
+    // no frontend way to know the `debug-hooks` cargo feature
+    // is on, so it cannot be gated — it is gone outright.
     render(<TitleBar title="Sonic Manager" />)
     fireEvent.mouseDown(screen.getByText('Sonic Manager'))
+    expect(invokeMock).not.toHaveBeenCalled()
     expect(startDraggingMock).not.toHaveBeenCalled()
-    expect(invokeMock).toHaveBeenCalledTimes(1)
-    expect(invokeMock).toHaveBeenCalledWith(
-      'log_frontend',
-      expect.objectContaining({
-        message: expect.stringContaining('target=SPAN'),
-      }),
-    )
-    expect(invokeMock).toHaveBeenCalledWith(
-      'log_frontend',
-      expect.objectContaining({
-        message: expect.stringContaining('drag-region=deep'),
-      }),
-    )
   })
 
-  test('mousedown on the logo logs the hit (IMG, deep)', () => {
+  test('a mousedown on the logo logs nothing either', () => {
     render(<TitleBar title="Sonic Manager" />)
     const img = document.querySelector('img[alt=""]')
     if (!img) throw new Error('no logo img rendered')
     fireEvent.mouseDown(img)
-    expect(invokeMock).toHaveBeenCalledTimes(1)
-    const call = invokeMock.mock.calls[0] as unknown as
-      | [string, { message?: string }]
-      | undefined
-    const message = String(call?.[1]?.message ?? '')
-    expect(message).toContain('target=IMG')
-    expect(message).toContain('drag-region=deep')
-    expect(startDraggingMock).not.toHaveBeenCalled()
-  })
-
-  test('mousedown on the empty drag area logs the hit (DIV, deep)', () => {
-    render(<TitleBar title="Sonic Manager" />)
-    const region = screen.getByText('Sonic Manager').closest('div')
-    if (!region) throw new Error('no drag region rendered')
-    fireEvent.mouseDown(region)
-    expect(invokeMock).toHaveBeenCalledTimes(1)
-    const call = invokeMock.mock.calls[0] as unknown as
-      | [string, { message?: string }]
-      | undefined
-    const message = String(call?.[1]?.message ?? '')
-    expect(message).toContain('target=DIV')
-    expect(message).toContain('drag-region=deep')
-    expect(startDraggingMock).not.toHaveBeenCalled()
-  })
-
-  test('a non-draggable window logs nothing on mousedown', () => {
-    render(<TitleBar title="Sonic Manager" draggable={false} />)
-    fireEvent.mouseDown(screen.getByText('Sonic Manager'))
     expect(invokeMock).not.toHaveBeenCalled()
     expect(startDraggingMock).not.toHaveBeenCalled()
   })

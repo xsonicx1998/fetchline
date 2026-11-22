@@ -53,4 +53,11 @@ webview2-com = "0.39"
 # whether the app is alive. windows-sys 0.61 is already in the
 # local registry cache, so this adds no new download on the VPS
 # build.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_DataExchange", "Win32_System_Threading"] }
+# Round 87.5 (O2/U2) — Win32_UI_Shell + Win32_UI_WindowsAndMessaging
+# for `ShellExecuteW` ("openas" verb): the "Open with..." dialog.
+# The rundll32 `OpenAs_RunDLL` call it replaces silently did
+# nothing on the VPS (see `open_file_with`); ShellExecuteW is the
+# documented, Unicode-safe way to show the dialog. The
+# ShellExecuteW link itself is gated on Win32_UI_WindowsAndMessaging
+# (SHOW_WINDOW_CMD lives there) — both features are needed.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_DataExchange", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }

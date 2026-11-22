@@ -4,16 +4,16 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Check } from 'lucide-react'
 import { formatBytes } from '../lib/format'
 import {
-  getSettings,
   listDownloads,
   openFile,
   openFileWith,
   openFolder,
   playCompletionSound,
-  updateSettings,
+  setSettingField,
+  takePendingCompleteDialogs,
   withTimeout,
 } from '../lib/api'
-import type { DownloadRow, Settings } from '../lib/types'
+import type { DownloadRow } from '../lib/types'
 import { Button } from './Button'
 import { TitleBar } from './TitleBar'
 
@@ -60,7 +60,6 @@ import { TitleBar } from './TitleBar'
 export function DownloadCompleteDialog({ downloadId }: { downloadId: string }) {
   const [download, setDownload] = useState<DownloadRow | null>(null)
   const [loaded, setLoaded] = useState(false)
-  const [settings, setSettings] = useState<Settings | null>(null)
   const [dontShow, setDontShow] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
   const [pollError, setPollError] = useState<string | null>(null)
@@ -76,17 +75,26 @@ export function DownloadCompleteDialog({ downloadId }: { downloadId: string }) {
   const queuedCount = queue.length > 0 ? queue.length - 1 : 0
 
   // Dark only (Round 45): same as the progress window.
+  // Round 87.5 — no settings are kept here any more: the
+  // "Don't show this dialog again" write reads them fresh
+  // itself (`setSettingField`), so a mount-time copy cannot
+  // go stale.
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', 'dark')
-    void getSettings()
-      .then((s) => setSettings(s))
-      .catch(() => undefined)
   }, [])
 
   // Round 87 (10) — later completions queue into this window
   // instead of opening another one (Rust emits the event from
   // `open_complete_dialog`). Duplicates are ignored — the same
   // completion re-noticed across polls must not show twice.
+  // Round 87.5 (J5) — the event alone LOST completions: an
+  // emit that lands before this listener exists goes nowhere
+  // (small.zip showed, test-link.html never did). So the
+  // backend ALSO records queued ids, and this effect drains
+  // them once the listener is registered — the listener first
+  // (nothing live is missed), the drain second (nothing
+  // pre-mount is lost); the dedup below covers an id that
+  // arrives both ways.
   useEffect(() => {
     let unlisten: (() => void) | undefined
     void listen<{ download_id: string }>('complete-dialog-queued', (e) => {
@@ -97,6 +105,12 @@ export function DownloadCompleteDialog({ downloadId }: { downloadId: string }) {
     })
       .then((fn) => {
         unlisten = fn
+        return takePendingCompleteDialogs()
+      })
+      .then((ids) => {
+        if (ids.length > 0) {
+          setQueue((q) => [...q, ...ids.filter((id) => !q.includes(id))])
+        }
       })
       .catch(() => undefined)
     return () => {
@@ -227,16 +241,16 @@ export function DownloadCompleteDialog({ downloadId }: { downloadId: string }) {
 
   /** "Don't show this dialog again": persists at once, so a
    *  dialog that opens again in this session already knows.
-   *  Re-enable it in Settings (General tab). */
+   *  Re-enable it in Settings (General tab). Round 87.5 — the
+   *  write re-reads the settings fresh first (one settings
+   *  write model, api.ts `setSettingField`): spreading this
+   *  window's mount-time settings would write every other
+   *  field back as it was at mount, clobbering a change made
+   *  in Settings meanwhile. */
   async function handleDontShowChange(checked: boolean) {
     setDontShow(checked)
-    if (!settings) return
     try {
-      const next = await updateSettings({
-        ...settings,
-        show_download_complete_dialog: !checked,
-      })
-      setSettings(next)
+      await setSettingField('show_download_complete_dialog', !checked)
     } catch (e) {
       setActionError(e instanceof Error ? e.message : String(e))
     }

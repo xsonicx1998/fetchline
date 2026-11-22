@@ -56,6 +56,21 @@ pub struct AppState {
     /// honest scope (the options are chosen while the download
     /// runs, and they fire when it completes).
     pub download_completion: Arc<StdMutex<HashMap<String, DownloadCompletionOptions>>>,
+    /// Round 87.5 (J5) — completions / failures queued into a
+    /// dialog window that already exists. `open_complete_dialog`
+    /// / `open_error_dialog` emit `complete-dialog-queued` /
+    /// `error-dialog-queued` to the open window, but a freshly
+    /// built window's frontend has not registered its listener
+    /// yet when the second completion arrives in the same poll
+    /// — the event is emitted into the void and the completion
+    /// is DROPPED (the comprehensive 87.4 test: small.zip showed,
+    /// test-link.html never did). So the id is ALSO recorded
+    /// here, and the dialog drains it on mount
+    /// (`take_pending_complete_dialogs` /
+    /// `take_pending_error_dialogs`) — the backend queue is the
+    /// durable half, the event is only the live nudge.
+    pub pending_complete_dialogs: Arc<StdMutex<Vec<String>>>,
+    pub pending_error_dialogs: Arc<StdMutex<Vec<String>>>,
 }
 
 /// Per-download completion options (Round 62) — see
@@ -224,6 +239,30 @@ fn build_manager(app: &AppHandle) -> Result<Arc<DownloadManager>, String> {
     log_startup(
         log,
         "debug hooks ON — SONIC_FORCE_YTDLP_FORMAT / SONIC_FORCE_URL_EXPIRE_NOW_PLUS_SECS are honoured in this build",
+    );
+    // Round 87.5 (item 11) — build identity, ALWAYS logged:
+    // `build: head=<sha> built=<UTC> debug-hooks=<on|off>
+    // version=<x>`. Head and time are baked at build time by
+    // build.rs (git, else FETCHLINE_BUILD_HEAD, else
+    // "unknown"); the debug-hooks flag is the cargo feature, so
+    // a shipped build that accidentally carries the TEST feature
+    // is visible in the first lines of startup.log instead of
+    // surfacing as a mystery "debug hooks ON" line (A3). The
+    // retest records this line before any check, so a
+    // wrong-binary result is caught instead of litigated.
+    #[cfg(feature = "debug-hooks")]
+    let debug_hooks = "on";
+    #[cfg(not(feature = "debug-hooks"))]
+    let debug_hooks = "off";
+    log_startup(
+        log,
+        &format!(
+            "build: head={} built={} debug-hooks={} version={}",
+            env!("FETCHLINE_BUILD_HEAD"),
+            env!("FETCHLINE_BUILD_TIME_UTC"),
+            debug_hooks,
+            env!("CARGO_PKG_VERSION"),
+        ),
     );
     // Round 56 (§7.1): point the store's diagnostics sink at the
     // same startup.log — the engine's probe/checkpoint/lock log
@@ -1296,11 +1335,30 @@ async fn open_complete_dialog(
     // The check runs under the window-build mutex, so two
     // completions in the same poll cannot race past each other
     // into two windows.
+    // Round 87.5 (J5) — the emit alone LOST completions: a
+    // window built milliseconds ago has a frontend that has not
+    // registered its listener yet, so the event went nowhere
+    // (small.zip showed, test-link.html never did). The id is
+    // therefore ALSO recorded in the backend pending queue,
+    // which the dialog drains on mount
+    // (`take_pending_complete_dialogs`) — the event is the live
+    // nudge for an already-listening window, the queue is the
+    // durable half. Duplicates are ignored here, as in the
+    // frontend.
     if let Some(existing) = app
         .webview_windows()
         .values()
         .find(|w| w.label().starts_with("complete-"))
     {
+        {
+            let mut pending = state
+                .pending_complete_dialogs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if !pending.contains(&download_id) {
+                pending.push(download_id.clone());
+            }
+        }
         let _ = existing.emit(
             "complete-dialog-queued",
             serde_json::json!({ "download_id": download_id }),
@@ -1471,12 +1529,25 @@ async fn open_error_dialog(
     // `error-dialog-queued` (see DownloadErrorDialog). The
     // check runs under the window-build mutex, so two failures
     // in the same poll cannot race past each other into two
-    // windows.
+    // windows. Round 87.5 (J5) — same durable half as the
+    // complete dialog: the emit alone can land before the
+    // dialog's frontend has registered its listener, so the id
+    // is ALSO recorded in the backend pending queue, drained on
+    // mount (`take_pending_error_dialogs`).
     if let Some(existing) = app
         .webview_windows()
         .values()
         .find(|w| w.label().starts_with("error-"))
     {
+        {
+            let mut pending = state
+                .pending_error_dialogs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if !pending.contains(&download_id) {
+                pending.push(download_id.clone());
+            }
+        }
         let _ = existing.emit(
             "error-dialog-queued",
             serde_json::json!({ "download_id": download_id }),
@@ -1502,6 +1573,36 @@ async fn open_error_dialog(
     }
     build_error_dialog_window(&app, &state.manager, &download_id)?;
     Ok(())
+}
+
+/// Round 87.5 (J5) — drain the backend pending queues (see
+/// `AppState::pending_complete_dialogs`): a dialog calls this
+/// on mount, right after registering its `*-queued` listener,
+/// and merges the returned ids into its queue. The drain takes
+/// everything and clears the queue, so an id is shown once —
+/// the listener dedups against ids that arrive live afterwards.
+/// A narrow race remains: an id queued after the dialog's
+/// window was destroyed (the user closed it in the same instant
+/// a second download finished) surfaces in the NEXT dialog for
+/// that download — shown once, late, rather than dropped.
+#[tauri::command]
+fn take_pending_complete_dialogs(state: State<'_, AppState>) -> Vec<String> {
+    let mut pending = state
+        .pending_complete_dialogs
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    std::mem::take(&mut *pending)
+}
+
+/// Round 87.5 (J5) — the error dialog's half of the drain
+/// above (see `take_pending_complete_dialogs`).
+#[tauri::command]
+fn take_pending_error_dialogs(state: State<'_, AppState>) -> Vec<String> {
+    let mut pending = state
+        .pending_error_dialogs
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    std::mem::take(&mut *pending)
 }
 
 /// Label of a pending link's standalone Add URL window
@@ -2086,12 +2187,27 @@ fn open_file(state: State<'_, AppState>, id: String) -> Result<(), String> {
 }
 
 /// Round 65 — "Open with..." (right-click menu): show the Windows
-/// "Open with" dialog for a download's file, via
-/// `rundll32 shell32.dll,OpenAs_RunDLL <path>`. The file must
+/// "Open with" dialog for a download's file. The file must
 /// exist on disk. Windows only; anywhere else it is an error and
 /// the menu item is disabled by the frontend's state rules.
+///
+/// Round 87.5 (O2/U2) — the Round 65 mechanism (`rundll32
+/// shell32.dll,OpenAs_RunDLL <path>`) silently did NOTHING on
+/// the VPS in both the row menu and the completion dialog, with
+/// no error surfaced: `spawn()` succeeding only proves rundll32
+/// started, not that the dialog appeared, and the entry point
+/// parses its file argument out of rundll32's raw command line —
+/// a path with spaces arrives quoted, which OpenAs_RunDLL does
+/// not strip, so it looks for a literally-quoted file and shows
+/// nothing. The primary path is now the documented API,
+/// `ShellExecuteW` with the "openas" verb (the same dialog
+/// Explorer shows; Unicode-safe, no command-line parsing).
+/// rundll32 stays as the fallback when ShellExecuteW reports
+/// an error (result <= 32), so behaviour never gets worse than
+/// before, and both paths log to startup.log so the retest can
+/// see which one fired.
 #[tauri::command]
-fn open_file_with(state: State<'_, AppState>, id: String) -> Result<(), String> {
+fn open_file_with(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
     let row = state
         .manager
         .get_download(&id)
@@ -2102,6 +2218,45 @@ fn open_file_with(state: State<'_, AppState>, id: String) -> Result<(), String> 
     }
     #[cfg(target_os = "windows")]
     {
+        let log = startup_log_path_from_app(&app);
+        let log = log.as_deref();
+        // UTF-16 + NUL, like tray-icon's encode_wide.
+        let wide = |s: &str| -> Vec<u16> {
+            use std::os::windows::ffi::OsStrExt;
+            std::ffi::OsStr::new(s)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect()
+        };
+        let verb = wide("openas");
+        let file = wide(&row.save_path);
+        // ShellExecuteW returns an HINSTANCE: > 32 is success,
+        // <= 32 is a SE_ERR_* error code.
+        let result = unsafe {
+            windows_sys::Win32::UI::Shell::ShellExecuteW(
+                std::ptr::null_mut(),
+                verb.as_ptr(),
+                file.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+            )
+        };
+        if (result as usize) > 32 {
+            log_startup(
+                log,
+                &format!("open with: ShellExecuteW openas ok for {}", row.save_path),
+            );
+            return Ok(());
+        }
+        let code = result as usize;
+        log_startup(
+            log,
+            &format!(
+                "open with: ShellExecuteW openas failed ({code}) for {} — falling back to rundll32",
+                row.save_path
+            ),
+        );
         use std::os::windows::process::CommandExt;
         std::process::Command::new("rundll32.exe")
             .args(["shell32.dll,OpenAs_RunDLL", &row.save_path])
@@ -2113,6 +2268,7 @@ fn open_file_with(state: State<'_, AppState>, id: String) -> Result<(), String> 
     }
     #[cfg(not(target_os = "windows"))]
     {
+        let _ = &app;
         Err("Open with is only available on Windows".to_string())
     }
 }
@@ -3486,14 +3642,41 @@ fn build_system_tray(app: &AppHandle) -> Result<(), String> {
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
-            // Left-click (release) and left double-click both
-            // restore the main window. Right-click pops the menu
-            // (handled by the tray itself); no action is needed
-            // here for it.
+            // Left-click and left double-click restore the main
+            // window. Right-click pops the menu (handled by the
+            // tray itself); no action is needed here for it.
+            // Round 87.5 (P2) — restore on the press (Down) as
+            // well as the release (Up): the comprehensive test
+            // found single- AND double-click doing nothing (3
+            // attempts; only the Show menu item restored the
+            // window). The most likely cause is upstream: the
+            // tray-icon crate drops the WHOLE event when
+            // `Shell_NotifyIconGetRect` fails — and for an icon
+            // in the hidden-icons overflow that rect is only
+            // available while the overflow flyout is open, so an
+            // Up that arrives after the flyout closes is lost.
+            // Restoring on Down as well gives the press a chance
+            // to land while the flyout is still open; it is
+            // harmless (tray icons have no drag), and a second
+            // restore from the Up / DoubleClick is a no-op. If
+            // the Up is the event that arrives, nothing changes.
+            // The retest can tell the two apart in startup.log
+            // ("down" vs "up" lines). A click from the overflow
+            // that still does nothing after this points at the
+            // rect gate itself (pin the icon to the visible tray
+            // and retry — see bugs.md).
             let app = tray.app_handle();
             let log = startup_log_path_from_app(app);
             let log = log.as_deref();
             match event {
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Down,
+                    ..
+                } => {
+                    log_startup(log, "tray: left click (down) — restoring main window");
+                    restore_main_window(app);
+                }
                 TrayIconEvent::Click {
                     button: MouseButton::Left,
                     button_state: MouseButtonState::Up,
@@ -4291,6 +4474,8 @@ pub fn run() {
                 manager,
                 webview_heartbeats,
                 download_completion: Arc::new(StdMutex::new(HashMap::new())),
+                pending_complete_dialogs: Arc::new(StdMutex::new(Vec::new())),
+                pending_error_dialogs: Arc::new(StdMutex::new(Vec::new())),
             });
             // Round 56 (§7.4): log the main window's resolved URL
             // after creation — the same diagnostic as the progress
@@ -4357,6 +4542,8 @@ pub fn run() {
             open_progress_window,
             open_complete_dialog,
             open_error_dialog,
+            take_pending_complete_dialogs,
+            take_pending_error_dialogs,
             open_add_url_window,
             open_manual_add_url_window,
             enqueue_clipboard_capture,

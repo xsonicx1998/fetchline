@@ -1944,6 +1944,32 @@ impl DownloadManager {
             .await;
     }
 
+    /// Round 87.5 (E5/R77c) — remember a folder the caller chose
+    /// outright: the Add URL dialog's folder used to live for one
+    /// download only, so the next add reverted to the category or
+    /// global default. A chosen folder is stored as the (given
+    /// or auto-assigned) category's default folder — the same
+    /// store the "Remember this path" checkbox writes — so the
+    /// next add to that category lands there too. A folder that
+    /// only repeats the category's own folder is a no-op, and no
+    /// folder (or an unknown category) changes nothing.
+    /// Best-effort: a failed remember never blocks the download.
+    fn remember_explicit_folder(&self, category: &str, explicit_folder: Option<&str>) {
+        let Some(chosen) = explicit_folder.map(str::trim).filter(|f| !f.is_empty()) else {
+            return;
+        };
+        let current = self
+            .store
+            .get_category(category)
+            .ok()
+            .flatten()
+            .map(|c| c.default_folder)
+            .unwrap_or_default();
+        if current.trim() != chosen {
+            let _ = self.store.update_category(category, Some(chosen), None);
+        }
+    }
+
     /// Round 84 — the shared tail of every add that starts from
     /// a `ProbeInfo`: filename/category/folder resolution,
     /// duplicate handling, the download + segments rows, and the
@@ -1953,6 +1979,11 @@ impl DownloadManager {
     /// (`add_resolved_stream_download`) both end here, so a
     /// resolved download gets exactly the same row shape as a
     /// probed one — only the probe itself is skipped.
+    /// Round 87.5 — the HTML refusal is enforced here too, not
+    /// only in the probe constructors: this tail is the one place
+    /// every add path funnels through, so a `ProbeInfo` that
+    /// carries `text/html` can never create a row for a web page
+    /// (J1), whatever caller built it.
     async fn create_download_from_probe(
         &self,
         url: &str,
@@ -1964,6 +1995,12 @@ impl DownloadManager {
         headers: Option<crate::probe::RequestHeaders>,
         info: ProbeInfo,
     ) -> Result<(String, ProbeInfo)> {
+        // Round 87.5 (J1) — refuse a web page as a download on
+        // EVERY add path, including the probe-free resolved path
+        // (whose hand-built `ProbeInfo` carries no content type
+        // today, so it passes — but any caller that ever sets
+        // one is refused here instead of creating the row).
+        info.refuse_html_page()?;
         let settings = self.store.get_settings().unwrap_or_default();
         let name = sanitize_filename(
             filename
@@ -1972,11 +2009,12 @@ impl DownloadManager {
                 .or_else(|| filename_from_url(&info.final_url))
                 .unwrap_or_else(|| "download".to_string()),
         );
-        let ext = Path::new(&name)
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_string();
+        // Round 87.5 (E4) — the extension used for the category
+        // pick: the filename's own extension first, then the
+        // final URL's path extension, then the probed
+        // Content-Type. A bare name used to fall straight through
+        // to Documents even when the URL or the server said mp4.
+        let ext = category_extension_for(&name, &info.final_url, info.content_type.as_deref());
         let category = match category_id {
             Some(c) if !c.trim().is_empty() => c,
             // BUG-011: auto-assign honours the file_types_auto list.
@@ -1984,8 +2022,15 @@ impl DownloadManager {
                 .store
                 .category_for_extension_filtered(&ext, &settings.file_types_auto)?,
         };
-        let folder = folder
+        // Round 87.5 (E5/R77c) — keep the caller's explicit
+        // folder apart from the resolved one: a folder chosen
+        // outright is remembered on the category below, so the
+        // next add lands there too instead of reverting.
+        let explicit_folder = folder
             .filter(|f| !f.trim().is_empty())
+            .map(|f| f.trim().to_string());
+        let folder = explicit_folder
+            .clone()
             .or_else(|| {
                 self.store
                     .get_category(&category)
@@ -2059,6 +2104,14 @@ impl DownloadManager {
         if let Some(queue) = queue_id {
             self.store.add_to_queue(&id, &queue)?;
         }
+        // Round 87.5 (E5/R77c) — remember the explicitly chosen
+        // folder on the (given or auto-assigned) category, the
+        // same store the "Remember this path" checkbox writes —
+        // only now that the row exists: a failed add (an
+        // uncreatable folder, a duplicate race) must never
+        // poison the category for the retry, which re-adds with
+        // no folder (Round 84 retry test).
+        self.remember_explicit_folder(&category, explicit_folder.as_deref());
         Ok((id, info))
     }
 
@@ -7754,20 +7807,26 @@ impl DownloadManager {
                 .filter(|f| !f.trim().is_empty())
                 .unwrap_or_else(|| "download".to_string()),
         );
+        // Round 87.5 (E4) — same extension fallbacks as the
+        // probed tail: the name first, then the URL's path
+        // extension (a direct download has no probed
+        // Content-Type to consult).
         let category = match category_id {
             Some(c) if !c.trim().is_empty() => c,
             _ => {
-                let ext = Path::new(&name)
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("")
-                    .to_string();
+                let ext = category_extension_for(&name, url, None);
                 self.store
                     .category_for_extension_filtered(&ext, &settings.file_types_auto)?
             }
         };
-        let folder = folder
+        // Round 87.5 (E5/R77c) — keep the caller's explicit
+        // folder apart from the resolved one, like the probed
+        // tail does, so a chosen folder is remembered.
+        let explicit_folder = folder
             .filter(|f| !f.trim().is_empty())
+            .map(|f| f.trim().to_string());
+        let folder = explicit_folder
+            .clone()
             .or_else(|| {
                 self.store
                     .get_category(&category)
@@ -7827,6 +7886,11 @@ impl DownloadManager {
         if let Some(queue) = queue_id {
             self.store.add_to_queue(&id, &queue)?;
         }
+        // Round 87.5 (E5/R77c) — remember the explicitly chosen
+        // folder on the category, like the probed tail — only
+        // once the row exists, so a failed add never poisons
+        // the category for the retry.
+        self.remember_explicit_folder(&category, explicit_folder.as_deref());
         Ok(id)
     }
 
@@ -11539,6 +11603,80 @@ fn segment_range_header(start: u64, end: Option<u64>, url: &str) -> Option<Strin
     }
 }
 
+/// Round 87.5 (E4) — the file extension a download's category is
+/// picked from: the filename's own extension first; when the name
+/// has none (a bare video title, a CDN URL with no suffix), the
+/// final URL's path extension; when that has none either, the
+/// probed Content-Type mapped to its file extension. Only when
+/// all three are silent does the Documents fallback in
+/// `category_for_extension` apply — before this, a bare name
+/// always fell straight through to Documents even when the URL
+/// or the server said mp4.
+fn category_extension_for(name: &str, final_url: &str, content_type: Option<&str>) -> String {
+    let from_name = Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !from_name.is_empty() {
+        return from_name;
+    }
+    if let Some(from_url) = filename_from_url(final_url) {
+        let ext = Path::new(&from_url)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !ext.is_empty() {
+            return ext;
+        }
+    }
+    content_type
+        .and_then(extension_for_content_type)
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Round 87.5 (E4) — the file extension a probed Content-Type
+/// stands for, for the seeded category vocabulary only. A
+/// generic `application/octet-stream` maps to nothing: it is
+/// the "unknown file" type, and guessing an extension for it
+/// would miscategorise real files. `text/html` maps to nothing
+/// too — a page is refused before the category is ever picked.
+fn extension_for_content_type(content_type: &str) -> Option<&'static str> {
+    let media = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    Some(match media.as_str() {
+        "video/mp4" => "mp4",
+        "video/x-matroska" => "mkv",
+        "video/x-msvideo" | "video/msvideo" => "avi",
+        "video/quicktime" => "mov",
+        "video/webm" => "webm",
+        "audio/mpeg" | "audio/mp3" => "mp3",
+        "audio/flac" | "audio/x-flac" => "flac",
+        "audio/wav" | "audio/x-wav" => "wav",
+        "audio/aac" | "audio/x-aac" => "aac",
+        "audio/ogg" => "ogg",
+        "application/pdf" => "pdf",
+        "application/msword" => "doc",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
+        "text/plain" => "txt",
+        "application/epub+zip" => "epub",
+        "application/zip" | "application/x-zip-compressed" => "zip",
+        "application/x-rar-compressed" | "application/vnd.rar" => "rar",
+        "application/x-7z-compressed" => "7z",
+        "application/x-tar" => "tar",
+        "application/gzip" | "application/x-gzip" => "gz",
+        "application/x-msdownload" => "exe",
+        "application/x-msi" => "msi",
+        _ => return None,
+    })
+}
+
 pub(crate) fn filename_from_url(url: &str) -> Option<String> {
     let parsed = reqwest::Url::parse(url).ok()?;
     let last = parsed.path_segments()?.next_back()?;
@@ -12247,6 +12385,161 @@ mod tests {
             .await;
             let row2 = store.get_download(&id2).unwrap().unwrap();
             assert_eq!(row2.status, "error", "a missing file must still fail");
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// Round 87.5 (E4) — the Content-Type map covers the seeded
+    /// category vocabulary (and common aliases), and maps the
+    /// generic / page types to nothing: an unknown type must
+    /// never be guessed into a category.
+    #[test]
+    fn extension_for_content_type_maps_the_seeded_vocabulary() {
+        assert_eq!(extension_for_content_type("video/mp4"), Some("mp4"));
+        assert_eq!(
+            extension_for_content_type("video/mp4; codecs=\"avc1\""),
+            Some("mp4")
+        );
+        assert_eq!(extension_for_content_type("VIDEO/X-MATROSKA"), Some("mkv"));
+        assert_eq!(extension_for_content_type("video/webm"), Some("webm"));
+        assert_eq!(extension_for_content_type("audio/mpeg"), Some("mp3"));
+        assert_eq!(extension_for_content_type("audio/flac"), Some("flac"));
+        assert_eq!(extension_for_content_type("application/pdf"), Some("pdf"));
+        assert_eq!(extension_for_content_type("application/zip"), Some("zip"));
+        assert_eq!(
+            extension_for_content_type("application/x-rar-compressed"),
+            Some("rar")
+        );
+        assert_eq!(
+            extension_for_content_type("application/x-msdownload"),
+            Some("exe")
+        );
+        assert_eq!(extension_for_content_type("text/plain"), Some("txt"));
+        assert_eq!(extension_for_content_type("application/octet-stream"), None);
+        assert_eq!(extension_for_content_type("text/html"), None);
+        assert_eq!(extension_for_content_type("image/png"), None);
+        assert_eq!(extension_for_content_type(""), None);
+    }
+
+    /// Round 87.5 (E4) — the category extension falls back from
+    /// the filename to the URL path to the Content-Type: a bare
+    /// name still picks up the URL's suffix, and an
+    /// extension-less URL still picks up the server's type.
+    #[test]
+    fn category_extension_for_falls_back_from_name_to_url_to_content_type() {
+        assert_eq!(
+            category_extension_for("clip.mp4", "https://cdn.example.com/x.bin", None),
+            "mp4"
+        );
+        assert_eq!(
+            category_extension_for(
+                "My Video",
+                "https://cdn.example.com/video.mp4?token=abc",
+                None
+            ),
+            "mp4"
+        );
+        assert_eq!(
+            category_extension_for(
+                "My Video",
+                "https://v16.tiktok.com/video/abc123/?a=1",
+                Some("video/mp4")
+            ),
+            "mp4"
+        );
+        assert_eq!(
+            category_extension_for(
+                "My Video",
+                "https://v16.tiktok.com/video/abc123/?a=1",
+                Some("application/octet-stream")
+            ),
+            ""
+        );
+        assert_eq!(
+            category_extension_for("archive.tar.gz", "https://example.com/x", None),
+            "gz"
+        );
+        assert_eq!(
+            category_extension_for("download", "https://example.com/", None),
+            ""
+        );
+    }
+
+    /// Round 87.5 (J1) — the shared add tail refuses a web page
+    /// itself, not only the probe constructors: a `ProbeInfo`
+    /// that carries `text/html` creates no row, while a
+    /// probe-free resolved-style info (no content type) and a
+    /// normal file info both create one.
+    #[test]
+    fn create_download_from_probe_refuses_an_html_page() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let dir =
+                std::env::temp_dir().join(format!("fetchline-html-tail-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+            let mgr = DownloadManager::new(Arc::clone(&store), 4);
+            let folder = dir.to_string_lossy().to_string();
+            let html_info = ProbeInfo {
+                size: Some(577),
+                accept_ranges: true,
+                etag: None,
+                last_modified: None,
+                filename: None,
+                content_type: Some("text/html; charset=utf-8".to_string()),
+                final_url: "https://example.com/".to_string(),
+            };
+            let err = mgr
+                .create_download_from_probe(
+                    "https://example.com/",
+                    None,
+                    Some(folder.clone()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    html_info,
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("web page (HTML)"),
+                "expected the HTML refusal, got: {err}"
+            );
+            assert!(
+                store.list_downloads().unwrap().is_empty(),
+                "a refused page must create no row"
+            );
+            // A resolved-style info (no content type) still
+            // creates the row — the refusal only fires on a
+            // page the server actually declared as HTML.
+            let (id, _) = mgr
+                .create_download_from_probe(
+                    "https://v16.tiktok.com/video/abc/?a=1",
+                    Some("My Video Title.mp4".to_string()),
+                    Some(folder),
+                    None,
+                    None,
+                    None,
+                    None,
+                    ProbeInfo {
+                        size: Some(41_500_000),
+                        accept_ranges: false,
+                        etag: None,
+                        last_modified: None,
+                        filename: Some("My Video Title.mp4".to_string()),
+                        content_type: None,
+                        final_url: "https://v16.tiktok.com/video/abc/?a=1".to_string(),
+                    },
+                )
+                .await
+                .unwrap();
+            let row = store.get_download(&id).unwrap().unwrap();
+            assert_eq!(row.category_id, "cat-video");
             let _ = std::fs::remove_dir_all(&dir);
         });
     }

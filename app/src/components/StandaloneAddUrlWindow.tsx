@@ -216,6 +216,7 @@ export function StandaloneAddUrlWindow({
               categories={categories}
               defaultAction={settings?.default_action ?? 'start_now'}
               defaultFolder={settings?.default_download_folder ?? ''}
+              autoFileTypes={settings?.file_types_auto ?? []}
               initialUrl={link?.url}
               pendingLinkId={link?.id ?? null}
               initialCookies={link?.cookies ?? null}

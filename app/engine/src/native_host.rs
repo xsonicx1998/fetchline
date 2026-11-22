@@ -648,6 +648,38 @@ fn enqueue_one(
     store.enqueue_pending_link_with_cookies(url, referrer, source, cookies_json.as_deref())
 }
 
+/// Round 87.5 (E4) — the filename a resolved video variant is
+/// stored under: the variant's own filename when it already
+/// carries an extension, else the sanitized title with the
+/// declared format appended (`"My Title"` + `"MP4"` →
+/// `"My Title.mp4"`); a missing filename with a declared format
+/// becomes `"video.<ext>"`. Without a declared format the
+/// filename is left exactly as-is — there is no type signal to
+/// recover, and inventing one would miscategorise the download.
+fn resolved_filename_with_format(
+    filename: &Option<String>,
+    format: Option<&str>,
+) -> Option<String> {
+    let name = filename.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let format = format.map(str::trim).filter(|s| !s.is_empty());
+    match (name, format) {
+        (Some(name), Some(format)) => {
+            let has_ext = std::path::Path::new(name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| !e.is_empty())
+                .unwrap_or(false);
+            if has_ext {
+                Some(name.to_string())
+            } else {
+                Some(crate::ytdlp::sanitize_title_filename(name, format))
+            }
+        }
+        (None, Some(format)) => Some(crate::ytdlp::sanitize_title_filename("", format)),
+        (name, _) => name.map(str::to_string),
+    }
+}
+
 /// Enqueue one resolved platform video (Round 78): the variant
 /// carries the resolver's metadata (filename, headers, source
 /// URL, format id, DASH audio URL, fragmented flag) and the row
@@ -700,7 +732,16 @@ pub fn enqueue_resolved(
         Some(page_url),
         cookies_json.as_deref(),
         &crate::store::ResolvedLink {
-            filename: variant.filename.clone(),
+            // Round 87.5 (E4) — a resolved variant whose filename
+            // carries no extension keeps the declared format as
+            // its only type signal: the extension normally
+            // appends it, but a bare title would otherwise save
+            // extension-less AND land in Documents, since the
+            // category pick reads the filename first. Rebuild
+            // the name here, at the boundary where the format is
+            // still known — the pending row stores no format
+            // column, so past this point the signal is gone.
+            filename: resolved_filename_with_format(&variant.filename, variant.format.as_deref()),
             headers,
             source_url: variant.source_url.clone(),
             format_id: variant.format_id.clone(),

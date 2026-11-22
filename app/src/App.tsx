@@ -43,11 +43,11 @@ import {
   renameQueue,
   resumeDownload,
   runGrabber,
+  setSettingField,
   setTaskbarProgress,
   startQueue,
   stopQueue,
   syncQueueNow,
-  updateSettings,
   withTimeout,
 } from './lib/api'
 import { formatBytes, formatEta, formatSpeed } from './lib/format'
@@ -662,15 +662,19 @@ export default function App() {
    *  just turned ON in Settings (which saves at once now and
    *  does not refresh this window until its next save). The
    *  fresh read is authoritative, and the flip reads from it
-   *  too. */
+   *  too.
+   *
+   *  Round 87.5 — the write goes through `setSettingField`
+   *  (api.ts): the one settings write model — fresh re-read +
+   *  single-field update — shared with every other writer. */
   async function toggleClipboardMonitoring() {
     if (!settings) return
     try {
       const fresh = await getSettings()
-      const updated = await updateSettings({
-        ...fresh,
-        clipboard_monitoring: !fresh.clipboard_monitoring,
-      })
+      const updated = await setSettingField(
+        'clipboard_monitoring',
+        !fresh.clipboard_monitoring,
+      )
       setSettings(updated)
     } catch (e) {
       actionError(e)
@@ -1369,6 +1373,7 @@ export default function App() {
         categories={categories}
         defaultAction={settings?.default_action ?? 'start_now'}
         defaultFolder={settings?.default_download_folder ?? ''}
+        autoFileTypes={settings?.file_types_auto ?? []}
         initialUrl={clipboardCapture?.url ?? pickedVideoUrl}
         captureMode={clipboardCapture !== null}
         captureTitle={clipboardCapture?.filename ?? null}
@@ -1400,7 +1405,12 @@ export default function App() {
           // submit (updateCategory), but the dialog's autofill
           // reads `categories` state: refresh it now, or the next
           // dialog still shows the old folder for the category.
+          // Round 87.5 (E5) — the submit may also have stored
+          // the picked folder as the GLOBAL default (no category
+          // set), so refresh the settings too, or the next dialog
+          // still shows the old default folder.
           void refreshCategories()
+          void refreshSettings()
           void refreshAll()
         }}
         onLateError={(message) => showBannerError('action', message)}

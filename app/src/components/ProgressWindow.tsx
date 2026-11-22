@@ -205,15 +205,58 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
   /** Persist a completion-options change (checkbox toggle) to
    *  Rust and to local state. A failure surfaces as the
    *  window's action error; the checkbox already moved, so the
-   *  user sees the error instead of a silent revert. */
-  async function persistOptions(next: DownloadCompletionOptions) {
+   *  user sees the error instead of a silent revert. Returns
+   *  false when the persist failed. Round 87.5 — unchecking
+   *  "shut down" also stops a countdown already running: the
+   *  old code left the 30 s timer firing after the box was
+   *  cleared. */
+  async function persistOptions(next: DownloadCompletionOptions): Promise<boolean> {
     setCloseAfter(next.close_after)
     setShutdownAfter(next.shutdown_after)
     try {
       await setDownloadCompletionOptions(downloadId, next)
     } catch (e) {
       setActionError(e instanceof Error ? e.message : String(e))
+      return false
     }
+    if (!next.shutdown_after) setShutdownCountdown(null)
+    return true
+  }
+
+  /** Round 87.5 (C4) — arming a completion option on a
+   *  download that ALREADY finished: no status flip will ever
+   *  come, so the completion effect below can never fire and
+   *  the checked box did nothing (the comprehensive test's
+   *  small files finished before the option could be armed
+   *  mid-run). A shut-down armed on a finished download starts
+   *  its 30 s countdown at once; a close armed on one exits at
+   *  once — shut down wins when both are checked, like the
+   *  effect. Only fires on a false → true flip, so unchecking
+   *  (or the countdown's own Cancel) never re-fires. */
+  function fireOptionsIfComplete(next: DownloadCompletionOptions, wasOn: boolean) {
+    if (wasOn || download?.status !== 'complete') return
+    if (completionActedRef.current) return
+    if (next.shutdown_after) {
+      completionActedRef.current = true
+      setShutdownCountdown(30)
+    } else if (next.close_after) {
+      completionActedRef.current = true
+      void exitApp().catch((e: unknown) =>
+        setActionError(e instanceof Error ? e.message : String(e)),
+      )
+    }
+  }
+
+  async function handleCloseToggle(checked: boolean) {
+    const wasOn = closeAfter
+    const ok = await persistOptions({ close_after: checked, shutdown_after: shutdownAfter })
+    if (ok) fireOptionsIfComplete({ close_after: checked, shutdown_after: shutdownAfter }, wasOn)
+  }
+
+  async function handleShutdownToggle(checked: boolean) {
+    const wasOn = shutdownAfter
+    const ok = await persistOptions({ close_after: closeAfter, shutdown_after: checked })
+    if (ok) fireOptionsIfComplete({ close_after: closeAfter, shutdown_after: checked }, wasOn)
   }
 
   useEffect(() => {
@@ -931,7 +974,7 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
               <input
                 type="checkbox"
                 checked={closeAfter}
-                onChange={(e) => void persistOptions({ close_after: e.target.checked, shutdown_after: shutdownAfter })}
+                onChange={(e) => void handleCloseToggle(e.target.checked)}
                 className="h-4 w-4 accent-[#8b20ff]"
               />
               Close program after download
@@ -940,14 +983,15 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
               <input
                 type="checkbox"
                 checked={shutdownAfter}
-                onChange={(e) => void persistOptions({ close_after: closeAfter, shutdown_after: e.target.checked })}
+                onChange={(e) => void handleShutdownToggle(e.target.checked)}
                 className="h-4 w-4 accent-[#8b20ff]"
               />
               Shut down computer after download
             </label>
             <p className="mt-2 text-text-muted">
               Shutting down waits 30 seconds with a Cancel button first. If both boxes are checked,
-              shut down wins — closing the program would stop the shutdown.
+              shut down wins — closing the program would stop the shutdown. Checking either box on
+              a download that already finished acts at once.
             </p>
           </div>
         ) : null}

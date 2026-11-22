@@ -20,6 +20,7 @@ import type { DownloadRow } from '../lib/types'
 vi.mock('../lib/api', () => ({
   listDownloads: vi.fn(),
   playErrorSound: vi.fn(),
+  takePendingErrorDialogs: vi.fn(),
   withTimeout: vi.fn((promise: Promise<unknown>) => promise),
 }))
 
@@ -87,6 +88,7 @@ beforeEach(() => {
     Promise.resolve(ROWS),
   )
   vi.mocked(api.playErrorSound).mockResolvedValue('ok')
+  vi.mocked(api.takePendingErrorDialogs).mockResolvedValue([])
 })
 
 function renderDialog() {
@@ -196,5 +198,20 @@ describe('error dialog queue', () => {
     expect(screen.queryByText(/more errors?/)).toBeNull()
     fireEvent.click(screen.getByText('OK'))
     expect(closeMock).toHaveBeenCalledTimes(1)
+  })
+
+  test('a failure queued before the listener existed is recovered from the backend drain (Round 87.5, J5)', async () => {
+    // Same durable half as the complete dialog: an emit that
+    // lands before this window's frontend registered its
+    // listener goes nowhere, so the backend records the id and
+    // the dialog drains it on mount. No live event fires here,
+    // yet the second failure appears behind OK.
+    vi.mocked(api.takePendingErrorDialogs).mockResolvedValue(['dl-2'])
+    renderDialog()
+    await waitFor(() => expect(screen.getByText('Connection lost')).toBeTruthy())
+    await waitFor(() => expect(screen.getByText('1 more error')).toBeTruthy())
+    fireEvent.click(screen.getByText('OK'))
+    await waitFor(() => expect(screen.getByText('Server not found')).toBeTruthy())
+    expect(closeMock).not.toHaveBeenCalled()
   })
 })

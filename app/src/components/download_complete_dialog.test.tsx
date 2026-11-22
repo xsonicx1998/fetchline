@@ -6,7 +6,7 @@
 //
 // Run with: npm run test:ui
 
-import { describe, expect, test, vi } from 'vitest'
+import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
 import type { DownloadRow } from '../lib/types'
 import { DownloadCompleteDialog } from './DownloadCompleteDialog'
@@ -70,6 +70,10 @@ function makeRow(id: string, filename: string): DownloadRow {
 
 const ROWS = [makeRow('d1', 'file-a.zip'), makeRow('d2', 'file-b.zip')]
 
+// Round 87.5 (J5) — ids the backend drain returns on mount;
+// the test sets them before render, the mock reads them.
+const { pendingDrainIds } = vi.hoisted(() => ({ pendingDrainIds: [] as string[] }))
+
 vi.mock('../lib/api', () => ({
   getSettings: () =>
     Promise.resolve({
@@ -84,9 +88,22 @@ vi.mock('../lib/api', () => ({
   openFileWith: () => Promise.resolve(),
   openFolder: () => Promise.resolve(),
   playCompletionSound: () => Promise.resolve(),
+  setSettingField: (key: string, value: unknown) =>
+    Promise.resolve({
+      default_action: 'start_now',
+      default_download_folder: '',
+      confirm_delete: false,
+      clipboard_monitoring: false,
+      show_download_complete_dialog: key === 'show_download_complete_dialog' ? value : true,
+    }),
+  takePendingCompleteDialogs: () => Promise.resolve([...pendingDrainIds]),
   updateSettings: (s: unknown) => Promise.resolve(s),
   withTimeout: (p: Promise<unknown>) => p,
 }))
+
+beforeEach(() => {
+  pendingDrainIds.length = 0
+})
 
 describe('DownloadCompleteDialog queue (Round 87)', () => {
   test('a queued completion steps through the same window, then closes', async () => {
@@ -129,5 +146,37 @@ describe('DownloadCompleteDialog queue (Round 87)', () => {
     expect(screen.getByText('file-a.zip').className).toContain('selectable')
     expect(screen.getByText('https://example.com/d1').className).toContain('selectable')
     expect(screen.getByText('C:\\Downloads\\file-a.zip').className).toContain('selectable')
+  })
+
+  test('a completion queued before the listener existed is recovered from the backend drain (Round 87.5, J5)', async () => {
+    // J5: small.zip + test-link.html finished together — the
+    // second id was emitted before this window's frontend had
+    // registered its listener, so the event went nowhere and
+    // the completion never showed. The backend records it too,
+    // and the dialog drains it on mount: no live event fires
+    // in this test, yet the second completion appears.
+    // (closeMock is module-level and earlier tests close the
+    // window once — clear it so this test measures only its
+    // own Close.)
+    closeMock.mockClear()
+    pendingDrainIds.push('d2')
+    render(<DownloadCompleteDialog downloadId="d1" />)
+    await screen.findByText('file-a.zip')
+    await screen.findByText('1 more completed')
+    // Close steps to the drained completion instead of closing.
+    fireEvent.click(screen.getByText('Close'))
+    await screen.findByText('file-b.zip')
+    expect(closeMock).not.toHaveBeenCalled()
+  })
+
+  test('a drained id that also arrives live shows only once', async () => {
+    pendingDrainIds.push('d2')
+    render(<DownloadCompleteDialog downloadId="d1" />)
+    await screen.findByText('file-a.zip')
+    await screen.findByText('1 more completed')
+    if (!queuedHandler) throw new Error('no complete-dialog-queued listener')
+    queuedHandler({ payload: { download_id: 'd2' } })
+    expect(screen.queryByText('2 more completed')).toBeNull()
+    expect(screen.getByText('1 more completed')).toBeTruthy()
   })
 })

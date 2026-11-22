@@ -607,6 +607,18 @@ async fn confirm_pending_link_failed_add_retries_after_fix() {
         .unwrap_err();
     let row = store.get_pending_link(&row.id).unwrap().unwrap();
     assert_eq!(row.status, "pending", "error was: {err}");
+    // Round 87.5 (E5/R77c) — the failed add must not poison the
+    // category: the uncreatable folder is NOT remembered, so the
+    // retry below resolves to the default folder instead of the
+    // blocker file.
+    assert_eq!(
+        store
+            .get_category("cat-documents")
+            .unwrap()
+            .unwrap()
+            .default_folder,
+        ""
+    );
     let (download_id, _) = mgr
         .confirm_pending_link(&row.id, None, None, None, None, None, false)
         .await
@@ -697,6 +709,70 @@ async fn confirm_pending_link_resolved_video_skips_probe() {
     assert!(err.to_string().contains("403"), "error: {err}");
     let plain = store.get_pending_link(&plain.id).unwrap().unwrap();
     assert_eq!(plain.status, "pending");
+}
+
+#[test]
+fn enqueue_resolved_appends_format_to_a_bare_title() {
+    // Round 87.5 (E4) — a resolved variant whose filename is a
+    // bare title keeps the declared format as its only type
+    // signal: the pending row stores the title WITH the format
+    // appended, so the Add URL dialog shows `Title.mp4` and the
+    // confirm's category pick reads mp4 instead of falling
+    // through to Documents. A filename that already has an
+    // extension, and a variant with no declared format, are left
+    // exactly as-is.
+    let dir = tmpdir();
+    let store = Store::open(&dir.join("app.db")).unwrap();
+    let page = "https://www.tiktok.com/@user/video/123";
+    let variant =
+        |filename: Option<&str>, format: Option<&str>| fetchline_engine::VideoVariantInput {
+            url: "https://v16.tiktok.com/video/abc/?a=1".to_string(),
+            quality: Some("854p".to_string()),
+            format: format.map(str::to_string),
+            live: false,
+            drm: false,
+            note: None,
+            resolved: true,
+            filename: filename.map(str::to_string),
+            headers: None,
+            audio_url: None,
+            source_url: Some(page.to_string()),
+            format_id: Some("18".to_string()),
+            fragmented: false,
+            filesize: Some(41_500_000),
+        };
+    let row = fetchline_engine::native_host::enqueue_resolved(
+        &store,
+        &variant(Some("My Video Title"), Some("MP4")),
+        page,
+        &[],
+    )
+    .unwrap();
+    assert_eq!(row.filename.as_deref(), Some("My Video Title.mp4"));
+    let row = fetchline_engine::native_host::enqueue_resolved(
+        &store,
+        &variant(Some("clip.mp4"), Some("MP4")),
+        page,
+        &[],
+    )
+    .unwrap();
+    assert_eq!(row.filename.as_deref(), Some("clip.mp4"));
+    let row = fetchline_engine::native_host::enqueue_resolved(
+        &store,
+        &variant(Some("My Video Title"), None),
+        page,
+        &[],
+    )
+    .unwrap();
+    assert_eq!(row.filename.as_deref(), Some("My Video Title"));
+    let row = fetchline_engine::native_host::enqueue_resolved(
+        &store,
+        &variant(None, Some("WEBM")),
+        page,
+        &[],
+    )
+    .unwrap();
+    assert_eq!(row.filename.as_deref(), Some("video.webm"));
 }
 
 #[tokio::test]

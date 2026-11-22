@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { listDownloads, playErrorSound, withTimeout } from '../lib/api'
+import { listDownloads, playErrorSound, takePendingErrorDialogs, withTimeout } from '../lib/api'
 import type { DownloadRow } from '../lib/types'
 import { Button } from './Button'
 import { TitleBar } from './TitleBar'
@@ -101,6 +101,10 @@ export function DownloadErrorDialog({
   // of opening another one (Rust emits the event from
   // `open_error_dialog`). Duplicates are ignored — the same
   // failure re-noticed across polls must not show twice.
+  // Round 87.5 (J5) — same durable half as the complete
+  // dialog: the emit alone can land before this listener
+  // exists, so the backend also records queued ids and this
+  // effect drains them once the listener is registered.
   useEffect(() => {
     if (message !== undefined || !downloadId) return
     let unlisten: (() => void) | undefined
@@ -112,6 +116,12 @@ export function DownloadErrorDialog({
     })
       .then((fn) => {
         unlisten = fn
+        return takePendingErrorDialogs()
+      })
+      .then((ids) => {
+        if (ids.length > 0) {
+          setQueue((q) => [...q, ...ids.filter((id) => !q.includes(id))])
+        }
       })
       .catch(() => undefined)
     return () => {

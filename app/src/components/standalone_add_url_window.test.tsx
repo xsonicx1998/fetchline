@@ -88,21 +88,18 @@ describe('StandaloneAddUrlWindow manual mode (Round 87.2)', () => {
     expect(urlField.value).toBe('')
   })
 
-  test('mousedown on the manual window title logs the hit (SPAN, deep) and does not call startDragging (Round 87.4)', () => {
+  test('mousedown on the manual window title logs nothing (Round 87.5: the 87.4 hit-logger is removed)', () => {
     // The R87.3 retest dragged this exact title twice and the
     // window never moved, with no code-level cause left — the
-    // hit-logger is what proves the hit element live, from
-    // startup.log, even if the debug port fails again.
+    // 87.4 hit-logger proved the hit element live, and the drag
+    // passed 6/6 on the VPS. The logger served its purpose and
+    // is gone in 87.5 (no frontend way to gate it on the
+    // `debug-hooks` cargo feature), so a grab logs nothing.
     invokeMock.mockClear()
     startDraggingMock.mockClear()
     render(<StandaloneAddUrlWindow manual />)
     fireEvent.mouseDown(screen.getByText('Add URL'))
     expect(startDraggingMock).not.toHaveBeenCalled()
-    expect(invokeMock).toHaveBeenCalledWith(
-      'log_frontend',
-      expect.objectContaining({
-        message: expect.stringContaining('target=SPAN'),
-      }),
-    )
+    expect(invokeMock).not.toHaveBeenCalled()
   })
 })

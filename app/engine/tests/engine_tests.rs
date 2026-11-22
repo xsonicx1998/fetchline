@@ -3993,6 +3993,45 @@ fn serve_one_page(html: &str) -> String {
     format!("http://127.0.0.1:{port}/page.html")
 }
 
+/// Serve typed responses on one path, in a loop, for tests that
+/// need a Content-Type the fixed MockServer cannot serve
+/// (Round 87.5: an HTML page on a path with no `.html` suffix,
+/// a video/mp4 on an extension-less path). HEAD answers headers
+/// only; GET answers headers + the fixed body.
+fn serve_typed(path: &str, content_type: &str, body: &[u8]) -> String {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let path = path.to_string();
+    let content_type = content_type.to_string();
+    let body = body.to_vec();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else {
+                continue;
+            };
+            let mut buf = [0u8; 4096];
+            let Ok(n) = stream.read(&mut buf) else {
+                continue;
+            };
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let first = req.lines().next().unwrap_or("");
+            let mut parts = first.split_whitespace();
+            let method = parts.next().unwrap_or("");
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            if method != "HEAD" {
+                let _ = stream.write_all(&body);
+            }
+        }
+    });
+    format!("http://127.0.0.1:{port}{path}")
+}
+
 /// BUG-011: `file_types_auto` drives auto-assign. An empty list means
 /// every extension is auto-assigned (the old behaviour); a non-empty
 /// list restricts auto-assign to the listed extensions, and anything
@@ -4050,6 +4089,159 @@ async fn file_types_auto_limits_auto_assign() {
     assert_eq!(
         mgr.get_download(&id).unwrap().unwrap().category_id,
         "cat-documents"
+    );
+}
+
+/// Round 87.5 (J1) — a web page pasted in Add URL is refused,
+/// not downloaded as a file: `https://example.com/` serves
+/// `text/html` on the bare path `/`, and the add fails with the
+/// HTML refusal and creates no row.
+#[tokio::test]
+async fn add_download_refuses_an_html_page_on_a_plain_path() {
+    let url = serve_typed(
+        "/",
+        "text/html; charset=utf-8",
+        b"<html><body>hi</body></html>",
+    );
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let mgr = DownloadManager::new(Arc::clone(&store), 4);
+    let folder = dir.to_string_lossy().to_string();
+    let err = mgr
+        .add_download(&url, None, Some(folder), None, None)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("web page (HTML)"),
+        "expected the HTML refusal, got: {err}"
+    );
+    assert!(
+        store.list_downloads().unwrap().is_empty(),
+        "a refused page must create no row"
+    );
+}
+
+/// Round 87.5 (E4) — the category pick falls back from the
+/// filename to the URL extension to the probed Content-Type: a
+/// bare video title on a `.mp4` link lands in Video, and a bare
+/// title on an extension-less link that serves `video/mp4`
+/// lands in Video too. An unknown type (`octet-stream`) on an
+/// extension-less link still falls back to Documents.
+#[tokio::test]
+async fn category_auto_assign_falls_back_to_url_extension_and_content_type() {
+    let page = PageServer::start();
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let mgr = DownloadManager::new(Arc::clone(&store), 4);
+    let folder = dir.to_string_lossy().to_string();
+    // URL extension: the name has none, the link ends .mp4.
+    let (id, _) = mgr
+        .add_download(
+            &format!("{}/video.mp4", page.base),
+            Some("My Video".to_string()),
+            Some(folder.clone()),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        mgr.get_download(&id).unwrap().unwrap().category_id,
+        "cat-video"
+    );
+    // Content-Type: neither the name nor the link has an
+    // extension, but the server says video/mp4.
+    let stream = serve_typed("/stream", "video/mp4", &payload(1024));
+    let (id, _) = mgr
+        .add_download(
+            &stream,
+            Some("My Video".to_string()),
+            Some(folder.clone()),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        mgr.get_download(&id).unwrap().unwrap().category_id,
+        "cat-video"
+    );
+    // Unknown type: no signal anywhere, Documents as before.
+    let blob = serve_typed("/blob", "application/octet-stream", &payload(512));
+    let (id, _) = mgr
+        .add_download(&blob, Some("My File".to_string()), Some(folder), None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        mgr.get_download(&id).unwrap().unwrap().category_id,
+        "cat-documents"
+    );
+}
+
+/// Round 87.5 (E5/R77c) — a folder the user picks outright is
+/// remembered on the (auto-assigned) category, so the next add
+/// lands there too instead of reverting to the default. Adding
+/// with no folder leaves the category's folder alone.
+#[tokio::test]
+async fn explicit_folder_is_remembered_on_the_category() {
+    let server = MockServer::start(MockConfig::default());
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let mgr = DownloadManager::new(Arc::clone(&store), 4);
+    let mut s = store.get_settings().unwrap();
+    s.default_download_folder = dir.join("default").to_string_lossy().to_string();
+    mgr.update_settings(&s).unwrap();
+    let chosen = dir.join("my-videos");
+    let (id, _) = mgr
+        .add_download(
+            &server.url,
+            Some("clip.mp4".to_string()),
+            Some(chosen.to_string_lossy().to_string()),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        mgr.get_download(&id).unwrap().unwrap().category_id,
+        "cat-video"
+    );
+    assert_eq!(
+        store
+            .get_category("cat-video")
+            .unwrap()
+            .unwrap()
+            .default_folder,
+        chosen.to_string_lossy()
+    );
+    // The next add with no folder lands in the remembered one.
+    let (id2, _) = mgr
+        .add_download(&server.url, Some("clip2.mp4".to_string()), None, None, None)
+        .await
+        .unwrap();
+    assert!(
+        std::path::Path::new(&mgr.get_download(&id2).unwrap().unwrap().save_path)
+            .starts_with(&chosen),
+        "save_path: {}",
+        mgr.get_download(&id2).unwrap().unwrap().save_path
+    );
+    // Adding with no folder to another category leaves that
+    // category's folder untouched.
+    let (id3, _) = mgr
+        .add_download(&server.url, Some("notes.txt".to_string()), None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        mgr.get_download(&id3).unwrap().unwrap().category_id,
+        "cat-documents"
+    );
+    assert_eq!(
+        store
+            .get_category("cat-documents")
+            .unwrap()
+            .unwrap()
+            .default_folder,
+        ""
     );
 }
 

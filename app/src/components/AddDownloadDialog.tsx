@@ -8,10 +8,12 @@ import {
   probeUrl,
   setDownloadDescription,
   setDownloadSpeedLimit,
+  setSettingField,
   startDownload,
   updateCategory,
   ytdlpResolve,
 } from '../lib/api'
+import { categoryForExtension } from '../lib/categories'
 import type { CategoryRow, ProbeInfo, QualityRow, YtdlpResolveResult } from '../lib/types'
 import { Button } from './Button'
 
@@ -26,6 +28,13 @@ interface AddDownloadDialogProps {
    *  configured — the placeholder then says so, and the engine
    *  falls back to the OS Downloads folder. */
   defaultFolder?: string
+  /** Round 87.5 (E4) — the Settings `file_types_auto`
+   *  allow-list, for the category auto-pick: the engine's
+   *  `category_for_extension_filtered` restricts auto-assign to
+   *  these types when the list is non-empty, and the dialog's
+   *  pick must agree with it. Empty (the default) means every
+   *  type auto-assigns. */
+  autoFileTypes?: string[]
   /** S08: prefill the URL field (the video panel passes the picked
    *  video's link). Empty by default — the dialog clears on open. */
   initialUrl?: string
@@ -202,6 +211,7 @@ export function AddDownloadDialog({
   categories,
   defaultAction = 'start_now',
   defaultFolder = '',
+  autoFileTypes = [],
   initialUrl = '',
   onClose,
   onAdded,
@@ -221,10 +231,21 @@ export function AddDownloadDialog({
   const [filename, setFilename] = useState('')
   const [folder, setFolder] = useState('')
   const [category, setCategory] = useState('')
+  /** Round 87.5 (E4) — the user picked a category by hand (the
+   *  select, including "Pick automatically"): the auto-pick
+   *  below must never override that choice. Reset on open. */
+  const userPickedCategory = useRef(false)
   /** Per-download speed cap in KB/s (S12); 0 = no cap, the global cap still applies. */
   const [cap, setCap] = useState(0)
   const [description, setDescription] = useState('')
-  const [rememberPath, setRememberPath] = useState(false)
+  /** Round 87.5 (E5/R77c) — the "Remember this path" checkbox
+   *  is gone: it only worked with a category picked by hand,
+   *  and categories never auto-picked, so in practice the path
+   *  was never remembered at all. A folder the user picks (the
+   *  "..." picker or a folder typed into Save As) is now
+   *  remembered on submit — the category's Save To, or the
+   *  global default folder when no category is set (see
+   *  `submit`). */
   /** File size from the URL probe, for the cyan size on the
    *  remember-path row; null while unknown / unprobed. */
   const [fileSize, setFileSize] = useState<number | null>(null)
@@ -273,9 +294,9 @@ export function AddDownloadDialog({
       setFilename(captureTitle ?? '')
       setFolder('')
       setCategory('')
+      userPickedCategory.current = false
       setCap(0)
       setDescription('')
-      setRememberPath(false)
       setFileSize(null)
       setProbeError(null)
       setResolved(null)
@@ -472,6 +493,25 @@ export function AddDownloadDialog({
     }
   }, [category, categories])
 
+  // Round 87.5 (E4) — auto-pick the category from the file
+  // type: when the filename (or the URL's last segment) is
+  // known, pre-select the category matching its extension —
+  // the same rule the engine applies on submit
+  // (`category_for_extension_filtered`), so what the dialog
+  // shows is what the row lands in. The user picking a
+  // category by hand wins: the pick only runs until then, and
+  // a file with no extension leaves the select alone instead
+  // of jumping to Documents while the name is still being
+  // typed. The pick runs on the URL at once (before the probe
+  // answers) and again when the probe / resolve fills in the
+  // real filename.
+  useEffect(() => {
+    if (!open || userPickedCategory.current) return
+    const name = filename.trim() || filenameFromUrl(url)
+    const picked = categoryForExtension(categories, name, autoFileTypes)
+    if (picked && picked !== category) setCategory(picked)
+  }, [open, filename, url, categories, autoFileTypes, category])
+
   const categoryName = useMemo(
     () => categories.find((c) => c.id === category)?.name ?? '',
     [categories, category],
@@ -527,7 +567,9 @@ export function AddDownloadDialog({
 
   const onCategoryChange = (value: string) => {
     setCategory(value)
-    if (!value) setRememberPath(false)
+    // A hand pick — including back to "Pick automatically" —
+    // wins over the auto-pick from now on (see above).
+    userPickedCategory.current = true
   }
 
   /** Round 74 (12): in capture mode the file name is the title
@@ -559,21 +601,29 @@ export function AddDownloadDialog({
     const work: Promise<string> = (async () => {
       const folderValue = folder.trim() || null
       const categoryValue = category || null
-      // Round 67 — "Remember this path" stores the folder as
-      // the category's default folder, so later adds to that
-      // category land there too. A failure here must not block
-      // the download itself.
-      if (rememberPath && categoryValue && folderValue) {
+      // Round 87.5 (E5/R77c) — a folder the user picked (the
+      // "..." picker or a folder typed into Save As) is
+      // remembered at once, so the next dialog shows it: the
+      // category's Save To when a category is set, else the
+      // global default folder. A folder the dialog filled in by
+      // itself (a category's default) is not a pick and is left
+      // alone. A failure here must not block the download
+      // itself.
+      if (folderEdited.current && folderValue) {
         try {
-          await updateCategory({ id: categoryValue, folder: folderValue })
+          if (categoryValue) {
+            await updateCategory({ id: categoryValue, folder: folderValue })
+          } else {
+            await setSettingField('default_download_folder', folderValue)
+          }
         } catch (e) {
           // Round 76 (2) — a failed remember-path save used to
-          // vanish silently (`catch {}`), so a user who checked
-          // the box never knew the folder was not stored. Surface
-          // it (main-window banner / standalone-window alert);
+          // vanish silently (`catch {}`), so a user who picked
+          // a folder never knew it was not stored. Surface it
+          // (main-window banner / standalone-window alert);
           // the download still starts.
           onLateError(
-            `Could not remember this folder for the category: ${
+            `Could not remember this folder: ${
               e instanceof Error ? e.message : String(e)
             } — the download still starts.`,
           )
@@ -937,19 +987,11 @@ export function AddDownloadDialog({
           </div>
 
           <div className="flex items-center gap-2 text-xs text-text-muted">
-            <input
-              id="add-remember"
-              type="checkbox"
-              checked={rememberPath}
-              onChange={(e) => setRememberPath(e.target.checked)}
-              disabled={!category || busy}
-              className="h-[15px] w-[15px] accent-[#8B20FF]"
-            />
-            <label htmlFor="add-remember" className="min-w-0 grow truncate">
+            <span className="min-w-0 grow truncate">
               {category
-                ? `Remember this path for “${categoryName}” category`
-                : 'Remember this path for this category'}
-            </label>
+                ? `A folder you pick is remembered for “${categoryName}”`
+                : 'A folder you pick is remembered for next time'}
+            </span>
             {fileSize !== null && (
               <span className="shrink-0 text-[13px] font-semibold text-info">
                 {formatBytes(fileSize)}

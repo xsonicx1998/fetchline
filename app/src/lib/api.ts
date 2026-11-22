@@ -651,6 +651,24 @@ export async function updateSettings(settings: Settings): Promise<Settings> {
   return invoke<Settings>('update_settings', { settings })
 }
 
+/** Round 87.5 — one consistent settings write model: change a
+ *  SINGLE field, reading the row fresh first so a write from
+ *  another window (the completion dialog's "Don't show this
+ *  dialog again", the TOOLS strip's clipboard toggle) is never
+ *  clobbered by a stale copy. Every settings writer in the UI
+ *  goes through here (or through the Settings dialog's
+ *  serialized `saveField`, which does the same read + write):
+ *  nobody spreads a mount-time settings snapshot into
+ *  `updateSettings` any more — that was the draft model that
+ *  kept losing flips closed without Save. */
+export async function setSettingField<K extends keyof Settings>(
+  key: K,
+  value: Settings[K],
+): Promise<Settings> {
+  const fresh = await getSettings()
+  return updateSettings({ ...fresh, [key]: value })
+}
+
 /** Change only the global speed cap (S12). `null` means unlimited. */
 export async function setSpeedLimit(kbps: number | null): Promise<Settings> {
   return invoke<Settings>('set_speed_limit', { kbps })
@@ -780,6 +798,22 @@ export async function openCompleteDialog(id: string): Promise<void> {
  *  to 'error'; the progress window stays open behind it). */
 export async function openErrorDialog(id: string): Promise<void> {
   return invoke('open_error_dialog', { downloadId: id })
+}
+
+/** Round 87.5 (J5) — drain the backend pending queues (see
+ *  `take_pending_complete_dialogs` in lib.rs): ids queued into
+ *  a dialog window before its frontend had registered its
+ *  `*-queued` listener. The dialog calls this on mount, right
+ *  after registering the listener, and merges the ids into its
+ *  queue (deduped there). Returns [] when nothing is pending. */
+export async function takePendingCompleteDialogs(): Promise<string[]> {
+  return invoke<string[]>('take_pending_complete_dialogs')
+}
+
+/** Round 87.5 (J5) — the error dialog's half of the drain
+ *  above. */
+export async function takePendingErrorDialogs(): Promise<string[]> {
+  return invoke<string[]>('take_pending_error_dialogs')
 }
 
 /** Round 66 — play the completion sound when the "Download

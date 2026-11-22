@@ -1,5 +1,4 @@
-import { useEffect, useState, type MouseEvent as ReactMouseEvent } from 'react'
-import { invoke } from '@tauri-apps/api/core'
+import { useEffect, useState } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Copy, Minus, Square, X } from 'lucide-react'
 
@@ -113,6 +112,18 @@ import { Copy, Minus, Square, X } from 'lucide-react'
  *  startup.log, so the next retest can PROVE the hit element
  *  even if the debug port fails again.
  *
+ *  Round 87.5 — that hit-logger is REMOVED. It served its
+ *  purpose (title-text drag proven 6/6 on the VPS) and left
+ *  every title-bar mousedown writing to startup.log in shipped
+ *  builds. Gating it behind the `debug-hooks` cargo feature
+ *  was considered, but the frontend has no way to know that
+ *  feature is on — no build-time env reaches the UI
+ *  (vite.config.ts defines none) and no new backend command
+ *  was warranted for a diagnostic — so the logger is gone
+ *  outright, not gated. The `log_frontend` command stays
+ *  registered in lib.rs as a diagnostic hook (other callers
+ *  may use it); this component simply no longer calls it.
+ *
  *  Round 87.3 — the R87.2 retest: the manual Add URL window
  *  drags by the LOGO but NOT by the TITLE TEXT (two attempts).
  *  The region div already carries "deep", which per drag.js
@@ -143,28 +154,6 @@ import { Copy, Minus, Square, X } from 'lucide-react'
  *  quit the app. A progress window's X still closes just that
  *  window (the download keeps running); its minimize drops it
  *  to the taskbar like the main window's. */
-/** Round 87.4 — diagnostic mousedown hit-logger (NOT a drag
- *  path): records what element a title-bar grab actually hit —
- *  target tag, its own drag-region attribute, and the closest
- *  ancestor's — via the `log_frontend` command, so it lands in
- *  startup.log where the retest reads it. It changes NO drag
- *  behaviour: no `preventDefault`, no `stopPropagation`, no
- *  `startDragging()` — the native drag script owns the drag,
- *  and this handler only observes (React's bubble-phase
- *  listener runs before drag.js's document listener, and it
- *  leaves the event untouched). A failed invoke is swallowed:
- *  the logger must never break the title bar. Only wired on
- *  the draggable div, so a fixed-size dialog logs nothing. */
-function logTitleBarHit(e: ReactMouseEvent) {
-  const target = e.target as HTMLElement | null
-  if (!target) return
-  const region = target.closest('[data-tauri-drag-region]')
-  const message =
-    `titlebar mousedown: target=${target.tagName} ` +
-    `drag-region=${target.getAttribute('data-tauri-drag-region') ?? 'none'} ` +
-    `closest-region=${region?.getAttribute('data-tauri-drag-region') ?? 'none'}`
-  void invoke('log_frontend', { message }).catch(() => undefined)
-}
 
 export function TitleBar({
   title,
@@ -265,12 +254,12 @@ export function TitleBar({
               // path: no `onMouseDown` → `startDragging()` —
               // two drag starts per click can leave the window
               // stuck, and the explicit call alone already
-              // failed to move the dialog in R86.
-              // Round 87.4 — `onMouseDown` here is the
-              // hit-LOGGER only (see `logTitleBarHit`): it
-              // records the grab, it never starts a drag.
+              // failed to move the dialog in R86. Round 87.5 —
+              // no `onMouseDown` here at all: the Round 87.4
+              // hit-logger that lived on it is removed (see the
+              // header comment), and the native drag script owns
+              // the drag from the attribute alone.
               'data-tauri-drag-region': 'deep' as const,
-              onMouseDown: logTitleBarHit,
             }
           : {})}
         className="flex min-w-0 flex-1 items-center gap-2 px-3"

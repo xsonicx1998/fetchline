@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { X } from 'lucide-react'
 import {
   deleteSiteLogin,
@@ -88,13 +88,28 @@ function emptyProxy(): ProxyConfigInput {
 
 /** S09 — Options dialog, all 9 tabs (components.md: Dialog, Tabs).
  *  General, File Types, Connection, Save To, Downloads, Proxy,
- *  Site logins, Dial-Up and Sounds. Everything is staged in a
- *  draft and saved at once, EXCEPT the "Download complete"
- *  dialog toggle (Round 87.3 — `toggleCompleteDialog`), which
- *  saves at once: the staged draft silently discarded a flip
- *  closed with X / Cancel / Escape, so the R87.2 retest's ON
- *  never reached the database. The engine validates and applies
- *  the save live (no restart). Passwords are never read back: the
+ *  Site logins, Dial-Up and Sounds.
+ *
+ *  Round 87.5 — ONE settings write model, no draft: every
+ *  Settings-row field writes through at once via `saveField`
+ *  (fresh re-read + `updateSettings`, serialized so rapid flips
+ *  cannot land out of order). Toggles, radios and selects write
+ *  on change; text and number fields write on blur / Enter, so
+ *  typing is never interrupted by a save. Closing with X /
+ *  Cancel / Escape loses nothing — there is no staged Settings
+ *  draft left to discard. The old model staged everything and
+ *  wrote the whole row only on "Save settings": a flip closed
+ *  without Save was silently lost (the R87.2 D2 failure), a
+ *  "Save settings" after an immediate write from ANOTHER
+ *  window (the completion dialog's "Don't show this dialog
+ *  again") wrote the stale draft over it, and the open-effect's
+ *  re-fetch on a categories change could revert an in-flight
+ *  immediate write — then a Save persisted the reverted value.
+ *  "Save settings" now stores only categories, proxy, site
+ *  logins and sounds, which keep their own staged drafts (a
+ *  proxy password or a half-typed login must not be written
+ *  field by field). The engine validates and applies the save
+ *  live (no restart). Passwords are never read back: the
  *  dialog only knows whether one is stored, and re-typing it is
  *  needed to change it. Site-login passwords go through the same
  *  protection as proxy passwords (DPAPI on Windows,
@@ -142,6 +157,13 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
   const [ytdlpUpdating, setYtdlpUpdating] = useState(false)
   const [ytdlpMessage, setYtdlpMessage] = useState<string | null>(null)
 
+  // Round 87.5 — this load runs ONLY when the dialog opens,
+  // never again while it is open: the old `[open, categories]`
+  // deps re-ran it on every categories refresh in the main
+  // window, re-fetching the settings and resetting the tab and
+  // every in-progress edit — including reverting an immediate
+  // toggle write still in flight, which a later "Save settings"
+  // then persisted as the reverted value (the D2 race).
   useEffect(() => {
     if (!open) return
     setTab('general')
@@ -174,6 +196,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
     void Promise.all([getSettings(), getProxyConfig(), listSiteLogins(), getSoundSettings(), getQuotaStatus()])
       .then(([s, p, loginsList, soundList, quota]) => {
         setSettings(s)
+        lastSavedSettings.current = s
         setQuotaStatus(quota)
         setLogins(loginsList)
         const loginDrafts: Record<string, LoginDraft> = {}
@@ -212,6 +235,25 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
     void ytdlpVersionCached()
       .then((status) => setYtdlp(status))
       .catch(() => setYtdlp(null))
+  }, [open])
+
+  /** Round 87.5 — a category created while Settings is open
+   *  (the "+" in the Add URL dialog) appears on the Save To /
+   *  File Types tabs without touching anything else: the load
+   *  above no longer re-runs, so new rows are merged in here
+   *  and existing edits (and the settings themselves) are left
+   *  exactly as they are. */
+  useEffect(() => {
+    if (!open) return
+    setCatEdits((prev) => {
+      const next = { ...prev }
+      for (const c of categories) {
+        if (!next[c.id]) {
+          next[c.id] = { folder: c.default_folder, extensions: c.file_extensions.join(', ') }
+        }
+      }
+      return next
+    })
   }, [open, categories])
 
   useEffect(() => {
@@ -232,6 +274,17 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
    *  typed; blur / Enter commits a clamped number (1–32), and
    *  an empty draft just keeps the current setting. */
   const [connectionsDraft, setConnectionsDraft] = useState<string | null>(null)
+  /** Round 87.5 — the serializer for `saveField` (below): a
+   *  promise chain, so rapid field writes land in order. This
+   *  ref must live above the `if (!open) return null` — hooks
+   *  cannot sit after an early return. */
+  const fieldSaveChain = useRef<Promise<void>>(Promise.resolve())
+  /** Round 87.5 — the last settings row known SAVED: the
+   *  revert target for a failed field write. It cannot be the
+   *  live `settings` state — a text field's `onChange` already
+   *  edited that locally before the blur-commit runs, so
+   *  "previous" there would be the bad value itself. */
+  const lastSavedSettings = useRef<Settings | null>(null)
   useEffect(() => {
     if (open) setConnectionsDraft(null)
   }, [open])
@@ -240,46 +293,121 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
     if (connectionsDraft === null) return
     const n = Number(connectionsDraft)
     if (connectionsDraft !== '' && Number.isFinite(n)) {
-      set('max_connections', Math.min(32, Math.max(1, Math.floor(n))))
+      void saveField('max_connections', Math.min(32, Math.max(1, Math.floor(n))))
     }
     setConnectionsDraft(null)
   }
 
   if (!open) return null
 
-  function set<T extends keyof Settings>(key: T, value: Settings[T]) {
+  /** Local-only edit: the input shows what the user typed at
+   *  once; the write itself happens in `saveField` (below). */
+  function setLocal<T extends keyof Settings>(key: T, value: Settings[T]) {
     setSettings((prev) => (prev ? { ...prev, [key]: value } : prev))
   }
 
-  /** Round 87.3 — the "Download complete" dialog toggle persists
-   *  AT ONCE, like its "Don't show this dialog again" twin in
-   *  DownloadCompleteDialog (which also writes immediately):
-   *  every other setting here is staged in a draft and only
-   *  reaches the database on "Save settings", so a flip closed
-   *  with X / Cancel / Escape was silently discarded — the
-   *  R87.2 retest toggled it ON, closed the dialog, and the
-   *  setting still read FALSE after a restart, with no dialog
-   *  on the next finishes. A single checkbox must not need a
-   *  second save click. The write re-reads the settings fresh
-   *  first, so a "Don't show again" checked in a completion
-   *  dialog window meanwhile is not clobbered by this dialog's
-   *  draft; the draft itself is updated from the returned
-   *  settings, so a later "Save settings" writes the same
-   *  value. On failure the checkbox reverts and the error
-   *  shows. */
-  async function toggleCompleteDialog(checked: boolean) {
-    if (!settings) return
-    set('show_download_complete_dialog', checked)
-    try {
-      const fresh = await getSettings()
-      const next = await updateSettings({
-        ...fresh,
-        show_download_complete_dialog: checked,
-      })
-      setSettings(next)
-    } catch (e) {
-      set('show_download_complete_dialog', !checked)
-      setError(e instanceof Error ? e.message : String(e))
+  /** Round 87.5 — the one settings write model: validate one
+   *  field, update it locally at once, then persist it through
+   *  a fresh re-read + `updateSettings` (the same read + write
+   *  as `setSettingField` in api.ts). Writes are serialized
+   *  through a chain, so two rapid flips cannot interleave and
+   *  land out of order — each write's re-read sees the one
+   *  before it. On failure the field reverts to the value it
+   *  had before this edit and the error shows; nothing is ever
+   *  staged for a later Save. */
+  function saveField<T extends keyof Settings>(key: T, value: Settings[T]): Promise<void> {
+    if (!settings) return Promise.resolve()
+    const previous = lastSavedSettings.current?.[key] ?? settings[key]
+    const problem = validateField(key, value, settings)
+    if (problem) {
+      setLocal(key, previous)
+      setError(problem)
+      return Promise.resolve()
+    }
+    setLocal(key, value)
+    const run = fieldSaveChain.current.then(async () => {
+      try {
+        const fresh = await getSettings()
+        const next = await updateSettings({ ...fresh, [key]: value })
+        lastSavedSettings.current = next
+        setSettings(next)
+      } catch (e) {
+        setSettings((prev) => (prev ? { ...prev, [key]: previous } : prev))
+        setError(e instanceof Error ? e.message : String(e))
+      }
+    })
+    fieldSaveChain.current = run.catch(() => undefined)
+    return run
+  }
+
+  /** Wait for any in-flight field save (a blur-commit started
+   *  just before "Save settings" was clicked). */
+  function flushFieldSaves(): Promise<void> {
+    return fieldSaveChain.current
+  }
+
+  /** Commit a text / number field's current (already typed)
+   *  value — the blur / Enter handler for those inputs. Typing
+   *  only edits locally (`setLocal`); leaving the field is
+   *  what writes it. */
+  function commitField<T extends keyof Settings>(key: T) {
+    if (settings) void saveField(key, settings[key])
+  }
+
+  /** The bounds the engine enforces on `update_settings`
+   *  (store.rs), checked here so a bad value reverts with the
+   *  plain message instead of a round-trip rejection. `current`
+   *  is the dialog's settings with this edit applied, so the
+   *  quota rule sees the whole trio. */
+  function validateField<T extends keyof Settings>(
+    key: T,
+    value: Settings[T],
+    current: Settings,
+  ): string | null {
+    const candidate = { ...current, [key]: value }
+    switch (key) {
+      case 'max_connections':
+        return candidate.max_connections < 1 || candidate.max_connections > 32
+          ? 'Connections per download must be between 1 and 32.'
+          : null
+      case 'connection_timeout_secs':
+        return candidate.connection_timeout_secs < 1 || candidate.connection_timeout_secs > 300
+          ? 'The connection timeout must be between 1 and 300 seconds.'
+          : null
+      case 'max_retries':
+        return candidate.max_retries < 0 || candidate.max_retries > 10
+          ? 'Retries must be between 0 and 10.'
+          : null
+      case 'speed_limit_kbps':
+        if ((candidate.speed_limit_kbps ?? 0) < 0) {
+          return 'The speed limit cannot be negative — use 0 for unlimited.'
+        }
+        return (candidate.speed_limit_kbps ?? 0) > 10_000_000
+          ? 'The speed limit cannot be more than 10,000,000 KB/s.'
+          : null
+      case 'quota_enabled':
+      case 'quota_mb':
+      case 'quota_hours':
+        if (candidate.quota_enabled && (candidate.quota_mb == null || candidate.quota_hours == null)) {
+          return 'Turn the quota on with both a size in MB and a window in hours.'
+        }
+        if (candidate.quota_mb != null && (candidate.quota_mb < 1 || candidate.quota_mb > 1_000_000)) {
+          return 'The download quota must be between 1 and 1,000,000 MB.'
+        }
+        if (candidate.quota_hours != null && (candidate.quota_hours < 1 || candidate.quota_hours > 720)) {
+          return 'The quota window must be between 1 and 720 hours.'
+        }
+        return null
+      case 'antivirus_timeout_secs':
+        return candidate.antivirus_timeout_secs < 5 || candidate.antivirus_timeout_secs > 600
+          ? 'The antivirus scan timeout must be between 5 and 600 seconds.'
+          : null
+      case 'dialup_redial_attempts':
+        return candidate.dialup_redial_attempts < 0 || candidate.dialup_redial_attempts > 10
+          ? 'Redial attempts must be between 0 and 10.'
+          : null
+      default:
+        return null
     }
   }
 
@@ -322,47 +450,16 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
     }
   }
 
+  /** Round 87.5 — "Save settings" stores only the staged
+   *  drafts (categories, proxy, site logins, sounds). The
+   *  Settings-row fields are NOT validated or written here any
+   *  more: each one validates and writes itself at once in
+   *  `saveField`, so a Save can never write a stale Settings
+   *  draft over another window's immediate write. */
   function validate(): string | null {
-    if (!settings) return 'Settings are still loading.'
-    if (settings.max_connections < 1 || settings.max_connections > 32) {
-      return 'Connections per download must be between 1 and 32.'
-    }
-    if (settings.connection_timeout_secs < 1 || settings.connection_timeout_secs > 300) {
-      return 'The connection timeout must be between 1 and 300 seconds.'
-    }
-    if (settings.max_retries < 0 || settings.max_retries > 10) {
-      return 'Retries must be between 0 and 10.'
-    }
-    if ((settings.speed_limit_kbps ?? 0) < 0) {
-      return 'The speed limit cannot be negative — use 0 for unlimited.'
-    }
-    // Same bound as the engine (BUG-008, MAX_SPEED_LIMIT_KBPS):
-    // larger values overflow the bytes-per-second conversion.
-    if ((settings.speed_limit_kbps ?? 0) > 10_000_000) {
-      return 'The speed limit cannot be more than 10,000,000 KB/s.'
-    }
-    // Download quota (S12): same bounds as the engine
-    // (MIN/MAX_QUOTA_MB, MIN/MAX_QUOTA_HOURS).
-    if (settings.quota_enabled && (settings.quota_mb == null || settings.quota_hours == null)) {
-      return 'Turn the quota on with both a size in MB and a window in hours.'
-    }
-    if (settings.quota_mb != null && (settings.quota_mb < 1 || settings.quota_mb > 1_000_000)) {
-      return 'The download quota must be between 1 and 1,000,000 MB.'
-    }
-    if (settings.quota_hours != null && (settings.quota_hours < 1 || settings.quota_hours > 720)) {
-      return 'The quota window must be between 1 and 720 hours.'
-    }
-    // Antivirus hook (S14): same bounds as the engine
-    // (MIN/MAX_SCAN_TIMEOUT_SECS, 5–600 s).
-    if (settings.antivirus_timeout_secs < 5 || settings.antivirus_timeout_secs > 600) {
-      return 'The antivirus scan timeout must be between 5 and 600 seconds.'
-    }
     if (proxy.enabled) {
       if (!proxy.host.trim()) return 'Give the proxy a host.'
       if (proxy.port < 1 || proxy.port > 65535) return 'The proxy port must be between 1 and 65535.'
-    }
-    if (settings.dialup_redial_attempts < 0 || settings.dialup_redial_attempts > 10) {
-      return 'Redial attempts must be between 0 and 10.'
     }
     for (const l of logins) {
       const draft = loginEdits[l.id]
@@ -392,11 +489,14 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
       setError(problem)
       return
     }
-    if (!settings) return
     setBusy(true)
     setError(null)
     try {
-      await updateSettings(settings)
+      // Round 87.5 — a blur-commit started a moment ago (the
+      // click that reached this button blurred the field first)
+      // finishes before the drafts below are written, so no
+      // field save can land after this Save.
+      await flushFieldSaves()
       for (const c of categories) {
         const edit = catEdits[c.id]
         if (!edit) continue
@@ -599,7 +699,11 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                   id="set-folder"
                   type="text"
                   value={settings.default_download_folder}
-                  onChange={(e) => set('default_download_folder', e.target.value)}
+                  onChange={(e) => setLocal('default_download_folder', e.target.value)}
+                  onBlur={() => commitField('default_download_folder')}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitField('default_download_folder')
+                  }}
                   placeholder="Leave empty for your Downloads folder"
                   className={`${inputCls} font-mono`}
                 />
@@ -612,7 +716,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                 <input
                   type="checkbox"
                   checked={settings.start_on_startup}
-                  onChange={(e) => set('start_on_startup', e.target.checked)}
+                  onChange={(e) => void saveField('start_on_startup', e.target.checked)}
                   className="h-4 w-4 accent-accent"
                 />
                 Start Sonic Manager when Windows starts
@@ -625,7 +729,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                 <input
                   type="checkbox"
                   checked={settings.browser_integration}
-                  onChange={(e) => set('browser_integration', e.target.checked)}
+                  onChange={(e) => void saveField('browser_integration', e.target.checked)}
                   className="h-4 w-4 accent-accent"
                 />
                 Catch downloads from the browser
@@ -638,7 +742,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                 <input
                   type="checkbox"
                   checked={settings.platform_downloads_enabled}
-                  onChange={(e) => set('platform_downloads_enabled', e.target.checked)}
+                  onChange={(e) => void saveField('platform_downloads_enabled', e.target.checked)}
                   disabled={!settings.browser_integration}
                   className="h-4 w-4 accent-accent"
                 />
@@ -688,7 +792,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                 <input
                   type="checkbox"
                   checked={settings.browser_start_drained}
-                  onChange={(e) => set('browser_start_drained', e.target.checked)}
+                  onChange={(e) => void saveField('browser_start_drained', e.target.checked)}
                   disabled={!settings.browser_integration}
                   className="h-4 w-4 accent-accent"
                 />
@@ -703,7 +807,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                 <input
                   type="checkbox"
                   checked={settings.clipboard_monitoring}
-                  onChange={(e) => set('clipboard_monitoring', e.target.checked)}
+                  onChange={(e) => void saveField('clipboard_monitoring', e.target.checked)}
                   className="h-4 w-4 accent-accent"
                 />
                 Watch the clipboard for download links
@@ -717,7 +821,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                 <input
                   type="checkbox"
                   checked={settings.show_progress_window}
-                  onChange={(e) => set('show_progress_window', e.target.checked)}
+                  onChange={(e) => void saveField('show_progress_window', e.target.checked)}
                   className="h-4 w-4 accent-accent"
                 />
                 Show the download progress window when a download starts
@@ -732,7 +836,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                 <input
                   type="checkbox"
                   checked={settings.show_download_complete_dialog}
-                  onChange={(e) => void toggleCompleteDialog(e.target.checked)}
+                  onChange={(e) => void saveField('show_download_complete_dialog', e.target.checked)}
                   className="h-4 w-4 accent-accent"
                 />
                 Show the &ldquo;Download complete&rdquo; dialog when a download finishes
@@ -742,8 +846,8 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                 small dialog with the file, size, address and save path, and buttons to open
                 it. Off leaves the progress window open with its Open file / Open folder
                 buttons. The dialog&apos;s own &ldquo;Don&apos;t show this dialog again&rdquo;
-                checkbox turns this off. This checkbox saves as soon as you flip it —
-                closing Settings does not undo it.
+                checkbox turns this off. Like every setting here, this checkbox saves as soon
+                as you flip it — closing Settings does not undo it.
               </p>
               <div>
                 <label htmlFor="set-excluded" className={labelCls}>
@@ -754,7 +858,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                   type="text"
                   value={settings.excluded_sites.join(', ')}
                   onChange={(e) =>
-                    set(
+                    setLocal(
                       'excluded_sites',
                       e.target.value
                         .split(',')
@@ -762,6 +866,10 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                         .filter((t) => t.length > 0),
                     )
                   }
+                  onBlur={() => commitField('excluded_sites')}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitField('excluded_sites')
+                  }}
                   placeholder="example.com, ads.example.net"
                   className={`${inputCls} font-mono`}
                 />
@@ -774,7 +882,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                 <input
                   type="checkbox"
                   checked={settings.check_updates_weekly}
-                  onChange={(e) => set('check_updates_weekly', e.target.checked)}
+                  onChange={(e) => void saveField('check_updates_weekly', e.target.checked)}
                   className="h-4 w-4 accent-accent"
                 />
                 Check for updates weekly
@@ -793,7 +901,11 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                   id="set-update-url"
                   type="text"
                   value={settings.update_url}
-                  onChange={(e) => set('update_url', e.target.value)}
+                  onChange={(e) => setLocal('update_url', e.target.value)}
+                  onBlur={() => commitField('update_url')}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitField('update_url')
+                  }}
                   placeholder="https://updates.fetchline.app/releases/latest.json"
                   className={`${inputCls} font-mono`}
                 />
@@ -821,7 +933,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                 <select
                   id="set-language"
                   value={settings.language}
-                  onChange={(e) => set('language', e.target.value)}
+                  onChange={(e) => void saveField('language', e.target.value)}
                   className={inputCls}
                 >
                   <option value="en">English</option>
@@ -864,7 +976,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                   type="text"
                   value={settings.file_types_auto.join(', ')}
                   onChange={(e) =>
-                    set(
+                    setLocal(
                       'file_types_auto',
                       e.target.value
                         .split(',')
@@ -872,6 +984,10 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                         .filter((t) => t.length > 0),
                     )
                   }
+                  onBlur={() => commitField('file_types_auto')}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitField('file_types_auto')
+                  }}
                   placeholder="Leave empty to auto-assign every file type"
                   className={`${inputCls} font-mono`}
                 />
@@ -922,7 +1038,11 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                   min={1}
                   max={300}
                   value={settings.connection_timeout_secs}
-                  onChange={(e) => set('connection_timeout_secs', Number(e.target.value) || 0)}
+                  onChange={(e) => setLocal('connection_timeout_secs', Number(e.target.value) || 0)}
+                  onBlur={() => commitField('connection_timeout_secs')}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitField('connection_timeout_secs')
+                  }}
                   className={inputCls}
                 />
               </div>
@@ -936,7 +1056,11 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                   min={0}
                   max={10}
                   value={settings.max_retries}
-                  onChange={(e) => set('max_retries', Number(e.target.value) || 0)}
+                  onChange={(e) => setLocal('max_retries', Number(e.target.value) || 0)}
+                  onBlur={() => commitField('max_retries')}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitField('max_retries')
+                  }}
                   className={inputCls}
                 />
                 <p className={hintCls}>How many times a failed part is retried before the download errors.</p>
@@ -953,7 +1077,11 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                   value={settings.speed_limit_kbps ?? 0}
                   onChange={(e) => {
                     const v = Number(e.target.value) || 0
-                    set('speed_limit_kbps', v === 0 ? null : v)
+                    setLocal('speed_limit_kbps', v === 0 ? null : v)
+                  }}
+                  onBlur={() => commitField('speed_limit_kbps')}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitField('speed_limit_kbps')
                   }}
                   className={inputCls}
                 />
@@ -968,7 +1096,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                   <input
                     type="checkbox"
                     checked={settings.quota_enabled}
-                    onChange={(e) => set('quota_enabled', e.target.checked)}
+                    onChange={(e) => void saveField('quota_enabled', e.target.checked)}
                     className="h-4 w-4 accent-accent"
                   />
                   Limit downloads to a quota
@@ -987,7 +1115,11 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                       value={settings.quota_mb ?? ''}
                       onChange={(e) => {
                         const v = Number(e.target.value)
-                        set('quota_mb', e.target.value === '' || Number.isNaN(v) ? null : v)
+                        setLocal('quota_mb', e.target.value === '' || Number.isNaN(v) ? null : v)
+                      }}
+                      onBlur={() => commitField('quota_mb')}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') commitField('quota_mb')
                       }}
                       className={inputCls}
                     />
@@ -1005,7 +1137,11 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                       value={settings.quota_hours ?? ''}
                       onChange={(e) => {
                         const v = Number(e.target.value)
-                        set('quota_hours', e.target.value === '' || Number.isNaN(v) ? null : v)
+                        setLocal('quota_hours', e.target.value === '' || Number.isNaN(v) ? null : v)
+                      }}
+                      onBlur={() => commitField('quota_hours')}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') commitField('quota_hours')
                       }}
                       className={inputCls}
                     />
@@ -1070,7 +1206,20 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                         [c.id]: { folder: e.target.value, extensions: prev[c.id]?.extensions ?? c.file_extensions.join(', ') },
                       }))
                     }
-                    placeholder="C:\Users\you\Downloads\Video"
+                    // Round 87.5 (N4) — the placeholder shows the
+                    // REAL fallback, not a made-up path: a category
+                    // with no folder of its own uses the global
+                    // default download folder, and when that is
+                    // empty too the engine falls back to the OS
+                    // Downloads folder. The old placeholder
+                    // ("C:\Users\you\Downloads\Video") named a
+                    // user that does not exist, and the tester
+                    // read it as the stored value.
+                    placeholder={
+                      settings.default_download_folder.trim()
+                        ? settings.default_download_folder
+                        : 'Leave empty for your Downloads folder'
+                    }
                     className={`${inputCls} font-mono`}
                   />
                 </div>
@@ -1085,7 +1234,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                     type="radio"
                     name="default-action"
                     checked={settings.default_action === 'start_now'}
-                    onChange={() => set('default_action', 'start_now')}
+                    onChange={() => void saveField('default_action', 'start_now')}
                     className="h-4 w-4 accent-accent"
                   />
                   Start downloading right away
@@ -1095,7 +1244,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                     type="radio"
                     name="default-action"
                     checked={settings.default_action === 'save_for_later'}
-                    onChange={() => set('default_action', 'save_for_later')}
+                    onChange={() => void saveField('default_action', 'save_for_later')}
                     className="h-4 w-4 accent-accent"
                   />
                   Save for later (file it in the main queue)
@@ -1108,7 +1257,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                     type="radio"
                     name="duplicate-action"
                     checked={settings.duplicate_action === 'rename'}
-                    onChange={() => set('duplicate_action', 'rename')}
+                    onChange={() => void saveField('duplicate_action', 'rename')}
                     className="h-4 w-4 accent-accent"
                   />
                   Keep both — save as “name (2)”
@@ -1118,7 +1267,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                     type="radio"
                     name="duplicate-action"
                     checked={settings.duplicate_action === 'overwrite'}
-                    onChange={() => set('duplicate_action', 'overwrite')}
+                    onChange={() => void saveField('duplicate_action', 'overwrite')}
                     className="h-4 w-4 accent-accent"
                   />
                   Replace the existing file
@@ -1128,7 +1277,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                 <input
                   type="checkbox"
                   checked={settings.confirm_delete}
-                  onChange={(e) => set('confirm_delete', e.target.checked)}
+                  onChange={(e) => void saveField('confirm_delete', e.target.checked)}
                   className="h-4 w-4 accent-accent"
                 />
                 Ask before removing a download
@@ -1139,7 +1288,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                   <input
                     type="checkbox"
                     checked={settings.antivirus_enabled}
-                    onChange={(e) => set('antivirus_enabled', e.target.checked)}
+                    onChange={(e) => void saveField('antivirus_enabled', e.target.checked)}
                     className="h-4 w-4 accent-accent"
                   />
                   Scan finished downloads with an antivirus scanner
@@ -1152,7 +1301,11 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                     id="set-antivirus"
                     type="text"
                     value={settings.antivirus_command ?? ''}
-                    onChange={(e) => set('antivirus_command', e.target.value.trim() === '' ? null : e.target.value)}
+                    onChange={(e) => setLocal('antivirus_command', e.target.value.trim() === '' ? null : e.target.value)}
+                  onBlur={() => commitField('antivirus_command')}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitField('antivirus_command')
+                  }}
                     placeholder={'MpCmdRun.exe -Scan -ScanType 3 -File "{file}"'}
                     disabled={!settings.antivirus_enabled}
                     className={`${inputCls} font-mono`}
@@ -1173,7 +1326,11 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                     min={5}
                     max={600}
                     value={settings.antivirus_timeout_secs}
-                    onChange={(e) => set('antivirus_timeout_secs', Number(e.target.value) || 0)}
+                    onChange={(e) => setLocal('antivirus_timeout_secs', Number(e.target.value) || 0)}
+                  onBlur={() => commitField('antivirus_timeout_secs')}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitField('antivirus_timeout_secs')
+                  }}
                     disabled={!settings.antivirus_enabled}
                     className={inputCls}
                   />
@@ -1584,8 +1741,12 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                   type="text"
                   value={settings.dialup_connection_name ?? ''}
                   onChange={(e) =>
-                    set('dialup_connection_name', e.target.value.trim() === '' ? null : e.target.value)
+                    setLocal('dialup_connection_name', e.target.value.trim() === '' ? null : e.target.value)
                   }
+                  onBlur={() => commitField('dialup_connection_name')}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitField('dialup_connection_name')
+                  }}
                   placeholder="My Connection"
                   className={inputCls}
                 />
@@ -1597,7 +1758,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                 <input
                   type="checkbox"
                   checked={settings.dialup_auto_dial}
-                  onChange={(e) => set('dialup_auto_dial', e.target.checked)}
+                  onChange={(e) => void saveField('dialup_auto_dial', e.target.checked)}
                   className="h-4 w-4 accent-accent"
                 />
                 Dial automatically when a download starts
@@ -1610,7 +1771,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                 <input
                   type="checkbox"
                   checked={settings.dialup_hangup_after_completion}
-                  onChange={(e) => set('dialup_hangup_after_completion', e.target.checked)}
+                  onChange={(e) => void saveField('dialup_hangup_after_completion', e.target.checked)}
                   className="h-4 w-4 accent-accent"
                 />
                 Hang up after a queue finishes
@@ -1631,7 +1792,11 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                   min={0}
                   max={10}
                   value={settings.dialup_redial_attempts}
-                  onChange={(e) => set('dialup_redial_attempts', Number(e.target.value) || 0)}
+                  onChange={(e) => setLocal('dialup_redial_attempts', Number(e.target.value) || 0)}
+                  onBlur={() => commitField('dialup_redial_attempts')}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitField('dialup_redial_attempts')
+                  }}
                   className={inputCls}
                 />
                 <p className={hintCls}>
@@ -1649,7 +1814,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                 <input
                   type="checkbox"
                   checked={settings.sounds_enabled}
-                  onChange={(e) => set('sounds_enabled', e.target.checked)}
+                  onChange={(e) => void saveField('sounds_enabled', e.target.checked)}
                   className="h-4 w-4 accent-accent"
                 />
                 Play notification sounds
@@ -1727,13 +1892,23 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
           ) : null}
         </div>
 
-        <div className="flex shrink-0 justify-end gap-2 border-t border-border px-6 py-4">
-          <Button variant="ghost" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button variant="primary" loading={busy} disabled={loading || !settings} onClick={() => void save()}>
-            Save settings
-          </Button>
+        <div className="flex shrink-0 items-center justify-between gap-2 border-t border-border px-6 py-4">
+          {/* Round 87.5 — settings on the tabs above save as soon
+              as you change them; this button only stores the
+              categories, proxy, site logins and sounds staged on
+              their tabs. */}
+          <p className="text-xs text-text-muted">
+            Settings save as you change them — this button is only for categories, proxy,
+            site logins and sounds.
+          </p>
+          <div className="flex shrink-0 gap-2">
+            <Button variant="ghost" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button variant="primary" loading={busy} disabled={loading || !settings} onClick={() => void save()}>
+              Save settings
+            </Button>
+          </div>
         </div>
       </div>
     </div>
