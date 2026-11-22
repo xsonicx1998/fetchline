@@ -653,13 +653,23 @@ export default function App() {
 
   /** Round 62 — the TOOLS strip's Clipboard toggle: flip the
    *  monitoring setting and refresh, so the strip's ON/OFF
-   *  indicator follows the real setting. */
+   *  indicator follows the real setting.
+   *
+   *  Round 87.3 — re-read the settings fresh first: this
+   *  window's `settings` is fetched once at mount, so spreading
+   *  it would write every other field back as it was at mount
+   *  — including a `show_download_complete_dialog` the user
+   *  just turned ON in Settings (which saves at once now and
+   *  does not refresh this window until its next save). The
+   *  fresh read is authoritative, and the flip reads from it
+   *  too. */
   async function toggleClipboardMonitoring() {
     if (!settings) return
     try {
+      const fresh = await getSettings()
       const updated = await updateSettings({
-        ...settings,
-        clipboard_monitoring: !settings.clipboard_monitoring,
+        ...fresh,
+        clipboard_monitoring: !fresh.clipboard_monitoring,
       })
       setSettings(updated)
     } catch (e) {

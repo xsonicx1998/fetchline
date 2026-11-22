@@ -89,8 +89,12 @@ function emptyProxy(): ProxyConfigInput {
 /** S09 — Options dialog, all 9 tabs (components.md: Dialog, Tabs).
  *  General, File Types, Connection, Save To, Downloads, Proxy,
  *  Site logins, Dial-Up and Sounds. Everything is staged in a
- *  draft and saved at once; the engine validates and applies the
- *  save live (no restart). Passwords are never read back: the
+ *  draft and saved at once, EXCEPT the "Download complete"
+ *  dialog toggle (Round 87.3 — `toggleCompleteDialog`), which
+ *  saves at once: the staged draft silently discarded a flip
+ *  closed with X / Cancel / Escape, so the R87.2 retest's ON
+ *  never reached the database. The engine validates and applies
+ *  the save live (no restart). Passwords are never read back: the
  *  dialog only knows whether one is stored, and re-typing it is
  *  needed to change it. Site-login passwords go through the same
  *  protection as proxy passwords (DPAPI on Windows,
@@ -245,6 +249,38 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
 
   function set<T extends keyof Settings>(key: T, value: Settings[T]) {
     setSettings((prev) => (prev ? { ...prev, [key]: value } : prev))
+  }
+
+  /** Round 87.3 — the "Download complete" dialog toggle persists
+   *  AT ONCE, like its "Don't show this dialog again" twin in
+   *  DownloadCompleteDialog (which also writes immediately):
+   *  every other setting here is staged in a draft and only
+   *  reaches the database on "Save settings", so a flip closed
+   *  with X / Cancel / Escape was silently discarded — the
+   *  R87.2 retest toggled it ON, closed the dialog, and the
+   *  setting still read FALSE after a restart, with no dialog
+   *  on the next finishes. A single checkbox must not need a
+   *  second save click. The write re-reads the settings fresh
+   *  first, so a "Don't show again" checked in a completion
+   *  dialog window meanwhile is not clobbered by this dialog's
+   *  draft; the draft itself is updated from the returned
+   *  settings, so a later "Save settings" writes the same
+   *  value. On failure the checkbox reverts and the error
+   *  shows. */
+  async function toggleCompleteDialog(checked: boolean) {
+    if (!settings) return
+    set('show_download_complete_dialog', checked)
+    try {
+      const fresh = await getSettings()
+      const next = await updateSettings({
+        ...fresh,
+        show_download_complete_dialog: checked,
+      })
+      setSettings(next)
+    } catch (e) {
+      set('show_download_complete_dialog', !checked)
+      setError(e instanceof Error ? e.message : String(e))
+    }
   }
 
   /** Round 78 — update yt-dlp from its GitHub release (the
@@ -696,7 +732,7 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                 <input
                   type="checkbox"
                   checked={settings.show_download_complete_dialog}
-                  onChange={(e) => set('show_download_complete_dialog', e.target.checked)}
+                  onChange={(e) => void toggleCompleteDialog(e.target.checked)}
                   className="h-4 w-4 accent-accent"
                 />
                 Show the &ldquo;Download complete&rdquo; dialog when a download finishes
@@ -706,7 +742,8 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                 small dialog with the file, size, address and save path, and buttons to open
                 it. Off leaves the progress window open with its Open file / Open folder
                 buttons. The dialog&apos;s own &ldquo;Don&apos;t show this dialog again&rdquo;
-                checkbox turns this off.
+                checkbox turns this off. This checkbox saves as soon as you flip it —
+                closing Settings does not undo it.
               </p>
               <div>
                 <label htmlFor="set-excluded" className={labelCls}>

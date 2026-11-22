@@ -58,6 +58,22 @@ import { Copy, Minus, Square, X } from 'lucide-react'
  *  diagnostic hook (other callers may use it); this component
  *  simply no longer calls it.
  *
+ *  Round 87.3 — the R87.2 retest: the manual Add URL window
+ *  drags by the LOGO but NOT by the TITLE TEXT (two attempts).
+ *  The region div already carries "deep", which per drag.js
+ *  covers the whole subtree, and the global `user-select: none`
+ *  rules out text selection — so there is no code-level
+ *  asymmetry between logo and title left in the parent div,
+ *  and the miss must be in how the grab reaches the native
+ *  script (ancestor walk vs. the element itself). The logo
+ *  and the title span now carry `data-tauri-drag-region="deep"`
+ *  THEMSELVES, so a mousedown on either lands directly on a
+ *  drag-region element (`composedPath()[0]`) with no ancestor
+ *  walk needed. Still exactly one drag path — no
+ *  `startDragging()` fallback (Round 87.1 stands). The
+ *  capture window shares this component, so it gains the
+ *  same fix; its drag was NOT RUN in the 87.2 retest.
+ *
  *  The icon is `/icon.png` — the chosen logo, copied into
  *  `app/public/` so Vite bundles it (the src-tauri icons are
  *  not in the frontend dist).
@@ -192,10 +208,24 @@ export function TitleBar({
             src="/icon.png"
             alt=""
             aria-hidden="true"
+            // Round 87.3 — the logo itself is a drag-region
+            // element: a grab on it lands directly on the
+            // region (see the header comment).
+            data-tauri-drag-region="deep"
             className="h-5 w-5 shrink-0"
           />
         ) : null}
-        <span className="truncate text-[13.5px] font-semibold text-text">{title}</span>
+        {/* Round 87.3 — the title span itself is a drag-region
+            element: the R87.2 retest dragged the manual Add URL
+            window by the logo but NOT by this text, so the grab
+            must land on the region directly instead of relying
+            on the parent div's "deep" ancestor walk. */}
+        <span
+          data-tauri-drag-region="deep"
+          className="truncate text-[13.5px] font-semibold text-text"
+        >
+          {title}
+        </span>
       </div>
       <div className="flex shrink-0 items-center">
         {showMinimize ? (

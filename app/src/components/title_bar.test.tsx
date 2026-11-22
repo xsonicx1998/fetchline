@@ -114,6 +114,22 @@ describe('TitleBar drag region (Round 87)', () => {
     expect(region?.getAttribute('data-tauri-drag-region')).toBe('deep')
   })
 
+  test('the title text itself carries the drag region (Round 87.3)', () => {
+    // The R87.2 retest: the manual Add URL window dragged by
+    // the LOGO but NOT by the TITLE TEXT (two attempts), even
+    // though the parent div already carried "deep". The title
+    // span now carries the attribute itself, so a grab on the
+    // text lands directly on a drag-region element
+    // (`composedPath()[0]`) with no ancestor walk needed —
+    // and the logo img does too, for symmetry.
+    render(<TitleBar title="Sonic Manager" />)
+    const title = screen.getByText('Sonic Manager')
+    expect(title.getAttribute('data-tauri-drag-region')).toBe('deep')
+    const img = document.querySelector('img[alt=""]')
+    if (!img) throw new Error('no logo img rendered')
+    expect(img.getAttribute('data-tauri-drag-region')).toBe('deep')
+  })
+
   test('the standalone Add URL dialog title bar drags (R86 regression)', () => {
     // Exactly the props StandaloneAddUrlWindow passes: no
     // minimize / maximize, draggable. The R86 retest's dialog

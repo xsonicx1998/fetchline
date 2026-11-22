@@ -71,6 +71,13 @@ describe('StandaloneAddUrlWindow manual mode (Round 87.2)', () => {
     // The same draggable title bar as a capture.
     const title = screen.getByText('Add URL')
     expect(title.closest('div')?.getAttribute('data-tauri-drag-region')).toBe('deep')
+    // Round 87.3 — the title text itself is a drag-region
+    // element (the R87.2 retest dragged by the logo but not by
+    // this text), and so is the logo.
+    expect(title.getAttribute('data-tauri-drag-region')).toBe('deep')
+    const img = document.querySelector('img[alt=""]')
+    if (!img) throw new Error('no logo img rendered')
+    expect(img.getAttribute('data-tauri-drag-region')).toBe('deep')
     // The URL field is present, empty and editable (a capture
     // locks it — `disabled={captureMode}`).
     const urlField = screen.getByLabelText('URL') as HTMLInputElement
