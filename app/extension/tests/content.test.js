@@ -1306,6 +1306,55 @@ test("a blob: video with buffered relay items gets a button and the dropdown off
   assert.equal(env.sentOfType("relay_send_buffered")[0].url, RELAY_ITEM.url);
 });
 
+// Round 88.1 — a failed relay click must be VISIBLE: the
+// Round 88 VPS retest showed only "the dropdown closed, no
+// dialog opened", with no error reported — a failed send must
+// re-open the dropdown with the reason (and a toast), never
+// vanish silently. The background's "no longer available"
+// reply (worker eviction before the restore fix) is the case.
+function relaySendMessageImplFailing(msg, cb) {
+  if (msg && msg.type === "relay_get_buffered") {
+    if (typeof cb === "function") cb({ ok: true, items: [RELAY_ITEM] });
+    return;
+  }
+  if (msg && msg.type === "relay_send_buffered") {
+    if (typeof cb === "function") {
+      cb({ ok: false, error: "That video is no longer available on this page." });
+    }
+    return;
+  }
+  if (typeof cb === "function") cb({ ok: true });
+}
+
+test("a failed relay click re-opens the dropdown with the error instead of vanishing (Round 88.1)", async () => {
+  const env = loadContent({
+    sendMessageImpl: relaySendMessageImplFailing,
+    initialVideoSpec: { url: "blob:https://example.com/abc" },
+  });
+  await tick(50);
+  env.click(env.findButton());
+  const dropdown = env.findDropdown();
+  assert.ok(dropdown, "dropdown opens on button click");
+  await tick(50);
+  const rows = dropdown.children.filter((c) => c.tagName === "BUTTON");
+  const relayRow = rows.find(
+    (r) => r.children[1] && r.children[1].textContent === "Relay",
+  );
+  assert.ok(relayRow, "a relay row with the Relay mark is listed");
+  env.click(relayRow);
+  await tick(50);
+  assert.equal(
+    dropdown.style.display,
+    "block",
+    "the dropdown re-opens with the error instead of staying closed",
+  );
+  assert.match(
+    dropdown.children.map((c) => c.textContent).join(" "),
+    /no longer available/,
+    "the failure reason is shown in the dropdown",
+  );
+});
+
 test("the content script mirrors the page context on load and on SPA navigation (Round 88)", async () => {
   const env = loadContent({ sendMessageImpl: relaySendMessageImpl });
   await tick(20);

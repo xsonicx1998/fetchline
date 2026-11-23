@@ -30,9 +30,17 @@ function loadBackground({
   partitionedCookies = [],
   cookiesError = null,
   testConsole = console,
+  // Round 88.1 — a shared session store (and local store)
+  // lets a test simulate a service-worker restart: a second
+  // load is a fresh vm context with empty in-memory maps, but
+  // the SAME chrome.storage.session — exactly what survives
+  // a real worker eviction. Defaults keep every existing test
+  // on a fresh store.
+  sessionStore: sharedSession,
+  storage: sharedStorage,
 } = {}) {
-  const storage = {};
-  const sessionStore = {};
+  const storage = sharedStorage || {};
+  const sessionStore = sharedSession || {};
   const sentMessages = [];
   const nativePorts = [];
   let nativeHandler = () => nativeReply;
@@ -1024,4 +1032,36 @@ test("a fresh HTML page load clears the old page's buffered items", async () => 
   }));
   await tick();
   assert.deepEqual(await env.buffered(5), []);
+});
+
+test("worker restart: buffered items survive in chrome.storage.session and can still be sent (Round 88.1)", async () => {
+  // The Round 88 VPS retest failure: the video button showed
+  // the buffered rows (content.js held its own copy), but the
+  // click sent nothing — the service worker had been evicted
+  // in the minutes between (RDP is slow; Chrome evicts an idle
+  // MV3 worker after ~30 s), the in-memory relayBuffer was
+  // wiped, and the session mirror was never read back, so
+  // relaySendBuffered threw "That video is no longer
+  // available" and the host never saw the capture.
+  const sessionStore = {};
+  const env1 = loadBackground({ sessionStore });
+  await env1.setPageContext(5, PAGE, "Watch");
+  env1.headersReceived(headersReceived({ headers: MP4_HEADERS }));
+  await tick();
+  assert.equal((await env1.buffered(5)).length, 1);
+  // The mirror is what survives the restart.
+  assert.equal((sessionStore["relayBuffer:5"] || []).length, 1);
+  // Simulate the restart: a fresh vm context (empty in-memory
+  // maps) sharing the SAME session store.
+  const env2 = loadBackground({ sessionStore });
+  assert.equal(
+    (await env2.buffered(5)).length,
+    1,
+    "the buffer is restored from session storage after a restart",
+  );
+  const reply = await env2.sendBuffered(5, CLIP);
+  assert.equal(reply.ok, true, `the click must send after a restart: ${JSON.stringify(reply)}`);
+  assert.equal(env2.sentMessages.length, 1);
+  assert.equal(env2.sentMessages[0].type, "relay_capture");
+  assert.equal(env2.sentMessages[0].finalUrl, CLIP);
 });

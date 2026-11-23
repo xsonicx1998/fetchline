@@ -17,8 +17,49 @@ fn main() {
     println!("cargo:rerun-if-env-changed=FETCHLINE_BUILD_HEAD");
     // Re-bake the head when the checkout moves (only when this
     // IS a checkout — the Linux dev copy is not a git repo).
-    if std::path::Path::new("../../.git/HEAD").exists() {
-        println!("cargo:rerun-if-changed=../../.git/HEAD");
+    // Round 88.1 — tracking `.git/HEAD` alone was the stale
+    // build line: HEAD only names the branch (`ref:
+    // refs/heads/main`) and does NOT change on `git pull`, so
+    // cargo reused the cached build-script output and the Round
+    // 88 binary reported the 87.8 head (352aba6) and time.
+    // Track the ref HEAD points at (and packed-refs, in case
+    // the ref is packed) so a pull invalidates the cache.
+    track_git_head();
+}
+
+/// Emit `cargo:rerun-if-changed` for the files that actually
+/// move when the checkout moves: HEAD itself (covers a
+/// detached HEAD, where it holds the SHA), plus the branch ref
+/// it points at and `packed-refs` (covers a packed ref).
+/// Handles `.git` being a directory (normal checkout) or a
+/// file (`gitdir: <path>`, worktree/submodule). Any failure is
+/// silent — the build identity falls back to "unknown", never
+/// a build failure.
+fn track_git_head() {
+    let dotgit = std::path::Path::new("../../.git");
+    let git_dir = if dotgit.is_dir() {
+        dotgit.to_path_buf()
+    } else if let Ok(text) = std::fs::read_to_string(dotgit) {
+        match text.trim().strip_prefix("gitdir:") {
+            Some(path) => std::path::PathBuf::from(path.trim()),
+            None => return,
+        }
+    } else {
+        return;
+    };
+    let head_path = git_dir.join("HEAD");
+    println!("cargo:rerun-if-changed={}", head_path.display());
+    let Ok(head) = std::fs::read_to_string(&head_path) else {
+        return;
+    };
+    if let Some(refname) = head.trim().strip_prefix("ref:") {
+        let refname = refname.trim();
+        let ref_path = git_dir.join(refname);
+        println!("cargo:rerun-if-changed={}", ref_path.display());
+        println!(
+            "cargo:rerun-if-changed={}",
+            git_dir.join("packed-refs").display()
+        );
     }
 }
 

@@ -372,6 +372,47 @@ function relayBufferItems(tabId, surfacedOnly) {
   return items;
 }
 
+// Round 88.1 — restore the per-tab buffer after a service
+// worker restart. The in-memory relayBuffer is the source of
+// truth while the worker lives, but Chrome evicts an idle MV3
+// worker after ~30 s and the restart wipes it — and the
+// session mirror (written on every mutation) was never read
+// back. The video button still showed the rows (content.js
+// holds its own copy from before the eviction), but the click
+// then failed with "That video is no longer available on this
+// page" and nothing ever reached the host — exactly the Round
+// 88 VPS retest failure (RDP is slow, so minutes pass between
+// the dropdown opening and the click). Restoring is lazy, per
+// tab, on the two read paths (relay_get_buffered and
+// relay_send_buffered); the popup reads the session mirror
+// directly and needs no restore. Only a tab with NO in-memory
+// map is restored — a live worker's map is authoritative, and
+// a consumed tab's mirror is empty anyway.
+async function relayRestoreBuffer(tabId) {
+  if (tabId == null || relayBuffer.has(tabId)) return;
+  const api = relaySessionApi();
+  if (!api) return;
+  let stored = null;
+  try {
+    stored = await api.get(relayBufferKey(tabId));
+  } catch {
+    return;
+  }
+  const items =
+    stored && Array.isArray(stored[relayBufferKey(tabId)])
+      ? stored[relayBufferKey(tabId)]
+      : [];
+  if (items.length === 0) return;
+  const tab = new Map();
+  for (const item of items) {
+    if (!item || typeof item !== "object") continue;
+    const key = item.finalUrl || item.url;
+    if (!key || tab.has(key)) continue;
+    tab.set(key, item);
+  }
+  if (tab.size > 0) relayBuffer.set(tabId, tab);
+}
+
 function relayBufferRemove(tabId, url) {
   const tab = relayBuffer.get(tabId);
   if (!tab) return;
@@ -1692,26 +1733,38 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   // Round 88 — the video button / popup ask for this tab's
   // buffered relay items. Only media + manifests are
-  // surfaced; a "maybe" is recorded, never offered.
+  // surfaced; a "maybe" is recorded, never offered. Round
+  // 88.1 — restore from the session mirror first: a worker
+  // restart wipes the in-memory buffer, and the items must
+  // still be listed.
   if (message && message.type === "relay_get_buffered") {
     const tabId =
       message.tabId != null
         ? message.tabId
         : _sender && _sender.tab && _sender.tab.id;
-    const items = tabId != null ? relayBufferItems(tabId, true) : [];
-    sendResponse({ ok: true, items });
+    (async () => {
+      if (tabId != null) await relayRestoreBuffer(tabId);
+      const items = tabId != null ? relayBufferItems(tabId, true) : [];
+      sendResponse({ ok: true, items });
+    })();
     return true;
   }
   // Round 88 — the user clicked a buffered relay item: send
   // its relay_capture to the host (cookies re-read live at
   // click time) and drop it from the buffer. The background
-  // worker is the only path to the host.
+  // worker is the only path to the host. Round 88.1 — restore
+  // from the session mirror first, or a click after a worker
+  // restart fails with "That video is no longer available"
+  // although the button still shows the row.
   if (message && message.type === "relay_send_buffered") {
     const tabId =
       message.tabId != null
         ? message.tabId
         : _sender && _sender.tab && _sender.tab.id;
-    relaySendBuffered(tabId, message.url || message.finalUrl || "")
+    (async () => {
+      if (tabId != null) await relayRestoreBuffer(tabId);
+      return relaySendBuffered(tabId, message.url || message.finalUrl || "");
+    })()
       .then((reply) => sendResponse({ ok: true, reply }))
       .catch((err) => sendResponse({ ok: false, error: String(err) }));
     return true;

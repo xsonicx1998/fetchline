@@ -582,6 +582,24 @@ async fn main() {
                         HostMessage::ResolveVideo {
                             page_url, cookies, ..
                         } => ("resolve_video", page_url.clone(), cookies.len()),
+                        // Round 88.1 — relay captures get their
+                        // own arm (the `_` fallback logged them
+                        // as "other" with an empty URL, so the
+                        // host log showed nothing for relay —
+                        // the Round 88 VPS retest could not tell
+                        // whether the host ever received one).
+                        // final_url is what the engine actually
+                        // downloads, so it owns the log line.
+                        HostMessage::RelayCapture {
+                            url,
+                            final_url,
+                            cookies,
+                            ..
+                        } => (
+                            "relay_capture",
+                            final_url.clone().unwrap_or_else(|| url.clone()),
+                            cookies.len(),
+                        ),
                         _ => ("other", String::new(), 0),
                     };
                     if !url.is_empty() {
