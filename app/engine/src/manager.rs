@@ -1831,11 +1831,20 @@ impl DownloadManager {
         url: &str,
         filename: Option<String>,
         folder: Option<String>,
+        explicit_folder: Option<String>,
         category_id: Option<String>,
         queue_id: Option<String>,
     ) -> Result<(String, ProbeInfo)> {
-        self.add_download_with_cookies(url, filename, folder, category_id, queue_id, None)
-            .await
+        self.add_download_with_cookies(
+            url,
+            filename,
+            folder,
+            explicit_folder,
+            category_id,
+            queue_id,
+            None,
+        )
+        .await
     }
 
     /// Add a download carrying the browser's cookies for its URL
@@ -1850,6 +1859,7 @@ impl DownloadManager {
         url: &str,
         filename: Option<String>,
         folder: Option<String>,
+        explicit_folder: Option<String>,
         category_id: Option<String>,
         queue_id: Option<String>,
         cookies: Option<String>,
@@ -1858,6 +1868,7 @@ impl DownloadManager {
             url,
             filename,
             folder,
+            explicit_folder,
             category_id,
             queue_id,
             cookies,
@@ -1874,6 +1885,7 @@ impl DownloadManager {
         url: &str,
         filename: Option<String>,
         folder: Option<String>,
+        explicit_folder: Option<String>,
         category_id: Option<String>,
         queue_id: Option<String>,
         headers: Option<crate::probe::RequestHeaders>,
@@ -1882,6 +1894,7 @@ impl DownloadManager {
             url,
             filename,
             folder,
+            explicit_folder,
             category_id,
             queue_id,
             None,
@@ -1905,6 +1918,7 @@ impl DownloadManager {
         url: &str,
         filename: Option<String>,
         folder: Option<String>,
+        explicit_folder: Option<String>,
         category_id: Option<String>,
         queue_id: Option<String>,
         cookies: Option<String>,
@@ -1935,6 +1949,7 @@ impl DownloadManager {
                 url,
                 filename,
                 folder,
+                explicit_folder,
                 category_id,
                 queue_id,
                 cookies,
@@ -1990,11 +2005,25 @@ impl DownloadManager {
     /// every add path funnels through, so a `ProbeInfo` that
     /// carries `text/html` can never create a row for a web page
     /// (J1), whatever caller built it.
+    /// Round 87.7 — `folder` and `explicit_folder` are different
+    /// things now: `folder` is where this download lands (the
+    /// dialog's displayed folder — which may itself have been
+    /// auto-filled from the category or the last-used folder),
+    /// while `explicit_folder` is `Some` ONLY when the user
+    /// picked that folder outright (the "..." picker, or a Save
+    /// As edit that changed the folder). Only the explicit pick
+    /// is remembered on the category below: the 87.6 retest
+    /// proved the old model — remember whatever folder was
+    /// passed — drifted the seeded folders (Video became
+    /// ZipTest, Compressed/Documents became the Downloads root)
+    /// because auto-filled folders were written back as if the
+    /// user had chosen them.
     async fn create_download_from_probe(
         &self,
         url: &str,
         filename: Option<String>,
         folder: Option<String>,
+        explicit_folder: Option<String>,
         category_id: Option<String>,
         queue_id: Option<String>,
         cookies: Option<String>,
@@ -2032,11 +2061,18 @@ impl DownloadManager {
         // folder apart from the resolved one: a folder chosen
         // outright is remembered on the category below, so the
         // next add lands there too instead of reverting.
-        let explicit_folder = folder
+        // Round 87.7 — the two are no longer the same value:
+        // `folder` is the resolution input (the dialog's
+        // displayed folder, possibly auto-filled), while
+        // `explicit_folder` is only the outright pick (see the
+        // fn docs). A derived folder resolves the save path
+        // exactly as before but is never written back.
+        let explicit_folder = explicit_folder
             .filter(|f| !f.trim().is_empty())
             .map(|f| f.trim().to_string());
-        let folder = explicit_folder
-            .clone()
+        let folder = folder
+            .filter(|f| !f.trim().is_empty())
+            .map(|f| f.trim().to_string())
             .or_else(|| {
                 self.store
                     .get_category(&category)
@@ -2149,6 +2185,7 @@ impl DownloadManager {
         url: &str,
         filename: Option<String>,
         folder: Option<String>,
+        explicit_folder: Option<String>,
         category_id: Option<String>,
         queue_id: Option<String>,
         cookies: Option<String>,
@@ -2168,6 +2205,7 @@ impl DownloadManager {
             url,
             filename,
             folder,
+            explicit_folder,
             category_id,
             queue_id,
             cookies,
@@ -2288,7 +2326,7 @@ impl DownloadManager {
             // insert in the success arm.
             let cookies_accepted = cookies.is_some();
             match self
-                .add_download_with_cookies(&row.url, None, None, None, None, cookies)
+                .add_download_with_cookies(&row.url, None, None, None, None, None, cookies)
                 .await
             {
                 Ok((id, _)) => {
@@ -2418,6 +2456,7 @@ impl DownloadManager {
         id: &str,
         filename: Option<String>,
         folder: Option<String>,
+        explicit_folder: Option<String>,
         category_id: Option<String>,
         queue_id: Option<String>,
         speed_limit_kbps: Option<i64>,
@@ -2553,6 +2592,7 @@ impl DownloadManager {
                     &row.url,
                     resolved_filename,
                     folder,
+                    explicit_folder,
                     category_id,
                     queue_id,
                     cookies,
@@ -2601,6 +2641,7 @@ impl DownloadManager {
                     &qrow,
                     resolved_filename,
                     folder,
+                    explicit_folder,
                     category_id,
                     queue_id,
                     cookies,
@@ -2619,6 +2660,7 @@ impl DownloadManager {
                 &row.url,
                 resolved_filename,
                 folder,
+                explicit_folder,
                 category_id,
                 queue_id,
                 cookies,
@@ -2631,6 +2673,7 @@ impl DownloadManager {
                 &row.url,
                 resolved_filename,
                 folder,
+                explicit_folder,
                 category_id,
                 queue_id,
                 cookies,
@@ -2783,6 +2826,7 @@ impl DownloadManager {
         row: &crate::ytdlp::QualityRow,
         filename: Option<String>,
         folder: Option<String>,
+        explicit_folder: Option<String>,
         category_id: Option<String>,
         queue_id: Option<String>,
         cookies: Option<String>,
@@ -2810,6 +2854,7 @@ impl DownloadManager {
                 &row.url,
                 filename,
                 folder,
+                explicit_folder,
                 category_id,
                 queue_id,
                 cookies,
@@ -2838,6 +2883,7 @@ impl DownloadManager {
         row: &crate::ytdlp::QualityRow,
         filename: Option<String>,
         folder: Option<String>,
+        explicit_folder: Option<String>,
         category_id: Option<String>,
         queue_id: Option<String>,
         speed_limit_kbps: Option<i64>,
@@ -2893,6 +2939,7 @@ impl DownloadManager {
                     &row.url,
                     filename,
                     folder,
+                    explicit_folder,
                     category_id,
                     queue_id,
                     cookies.clone(),
@@ -2930,6 +2977,7 @@ impl DownloadManager {
                     row,
                     filename,
                     folder,
+                    explicit_folder,
                     category_id,
                     queue_id,
                     cookies,
@@ -2944,6 +2992,9 @@ impl DownloadManager {
                     &row.url,
                     filename.clone(),
                     folder.clone(),
+                    // Round 87.7 — cloned: the 401/403 TikTok
+                    // fallback below needs the original.
+                    explicit_folder.clone(),
                     category_id.clone(),
                     queue_id.clone(),
                     cookies.clone(),
@@ -2970,6 +3021,7 @@ impl DownloadManager {
                             row,
                             filename,
                             folder,
+                            explicit_folder,
                             category_id,
                             queue_id,
                             cookies,
@@ -3960,7 +4012,14 @@ impl DownloadManager {
             let id = match &download_id {
                 Some(id) => id.clone(),
                 None => match self
-                    .add_download(&file.url, None, None, None, Some(queue_id.to_string()))
+                    .add_download(
+                        &file.url,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(queue_id.to_string()),
+                    )
                     .await
                 {
                     Ok((id, _)) => {
@@ -4083,6 +4142,7 @@ impl DownloadManager {
                     url,
                     None,
                     folder.clone(),
+                    None,
                     category_id.clone(),
                     queue_id.clone(),
                 )
@@ -5452,6 +5512,7 @@ impl DownloadManager {
             url,
             Some(entry.filename),
             Some(entry.folder),
+            None,
             entry.category_id,
             None,
         )
@@ -6812,6 +6873,11 @@ impl DownloadManager {
                     &video_url,
                     Some(video_name),
                     Some(folder.to_string_lossy().to_string()),
+                    // Round 87.7 — a DASH child's folder is derived
+                    // from its parent, not a user pick: it resolves
+                    // the save path but must never be remembered
+                    // back onto the category.
+                    None,
                     Some(parent.category_id.clone()),
                     parent.queue_id.clone(),
                     cookies.clone(),
@@ -6823,6 +6889,8 @@ impl DownloadManager {
                     &audio_url,
                     Some(audio_name),
                     Some(folder.to_string_lossy().to_string()),
+                    // Round 87.7 — same as the video child above.
+                    None,
                     Some(parent.category_id.clone()),
                     parent.queue_id.clone(),
                     cookies,
@@ -7788,6 +7856,7 @@ impl DownloadManager {
         url: &str,
         filename: Option<String>,
         folder: Option<String>,
+        explicit_folder: Option<String>,
         category_id: Option<String>,
         queue_id: Option<String>,
         cookies: Option<String>,
@@ -7828,11 +7897,16 @@ impl DownloadManager {
         // Round 87.5 (E5/R77c) — keep the caller's explicit
         // folder apart from the resolved one, like the probed
         // tail does, so a chosen folder is remembered.
-        let explicit_folder = folder
+        // Round 87.7 — same split as the probed tail: the
+        // outright pick arrives separately now, so a derived
+        // folder resolves the save path but is never written
+        // back onto the category.
+        let explicit_folder = explicit_folder
             .filter(|f| !f.trim().is_empty())
             .map(|f| f.trim().to_string());
-        let folder = explicit_folder
-            .clone()
+        let folder = folder
+            .filter(|f| !f.trim().is_empty())
+            .map(|f| f.trim().to_string())
             .or_else(|| {
                 self.store
                     .get_category(&category)
@@ -12508,6 +12582,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    None,
                     html_info,
                 )
                 .await
@@ -12528,6 +12603,7 @@ mod tests {
                     "https://v16.tiktok.com/video/abc/?a=1",
                     Some("My Video Title.mp4".to_string()),
                     Some(folder),
+                    None,
                     None,
                     None,
                     None,

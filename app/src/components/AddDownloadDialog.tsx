@@ -315,6 +315,23 @@ export function AddDownloadDialog({
   // or the "..." picker) — the category autofill below must not
   // overwrite it.
   const folderEdited = useRef(false)
+  // Round 87.7 — the Save As field edits a local draft string:
+  // the 87.6 per-keystroke parse + rejoin mangled a select-all +
+  // type (each keystroke re-prepended the folder) and a
+  // backslash deletion never reached the guard with the right
+  // folder, because the input was controlled by the parsed
+  // state. The draft is parsed with `applySaveAsEdit` only on
+  // blur / submit — see `commitSaveAsDraft`.
+  const [saveAsDraft, setSaveAsDraft] = useState<string | null>(null)
+  // Round 87.7 — the folder the user picked OUTRIGHT this
+  // session (the "..." picker, or a Save As commit whose folder
+  // differs from the one shown before). Only this is remembered
+  // on the category / passed as `explicitFolder`: a folder the
+  // dialog auto-filled (category default, last-used) is not a
+  // pick, and the 87.6 retest proved writing it back drifted
+  // the seeded folders (Video became ZipTest, Compressed and
+  // Documents became the Downloads root).
+  const folderExplicitRef = useRef<string | null>(null)
   // Round 67: the user typed a filename of their own — the size
   // probe must not overwrite it with the server's name.
   const userEditedFilename = useRef(false)
@@ -353,6 +370,8 @@ export function AddDownloadDialog({
       setError(null)
       setBusy(false)
       folderEdited.current = false
+      setSaveAsDraft(null)
+      folderExplicitRef.current = null
       // Round 78 — a row filename must not be overwritten by
       // the probe: the probe derives its name from the URL, and
       // for a googlevideo link that is "videoplayback".
@@ -586,24 +605,55 @@ export function AddDownloadDialog({
   // Round 67 — the Save As field shows the full path; editing it
   // splits on the last separator. A bare name is a rename — the
   // folder stays (the folder field below still shows it).
-  // Round 87.6 — the edit goes through `applySaveAsEdit`, so
-  // deleting the separator between the folder and the filename
-  // cannot silently fold the folder's name into the filename.
-  const saveAsValue = joinSaveAs(folder, filename)
+  // Round 87.7 — the field edits a DRAFT string now, parsed
+  // with `applySaveAsEdit` only on blur / submit. The 87.6
+  // per-keystroke parse + rejoin did NOT take effect live: a
+  // select-all + type re-prepended the folder on every
+  // keystroke (the field showed
+  // `tor\Downloads\ZipC:\Users\...\ZipTest\slow a test.mp4`),
+  // and a backslash deletion read against a stale folder state
+  // merged it (`...\ZipTestslow-a.mp4`). Typing now touches no
+  // state at all until the commit, so the text the user typed
+  // is exactly the text that gets parsed.
+  const saveAsValue = saveAsDraft ?? joinSaveAs(folder, filename)
   const onSaveAsChange = (value: string) => {
-    if (value === '') {
+    // The first keystroke locks the folder against the category
+    // autofill (the old `folderEdited` guard) and locks the
+    // filename against the probe prefill — the folder state
+    // only moves on commit, but nothing must overwrite it
+    // under the user's draft.
+    folderEdited.current = true
+    userEditedFilename.current = true
+    setSaveAsDraft(value)
+  }
+  /** Parse the open draft (if any) into folder + filename with
+   *  `applySaveAsEdit` and commit it to state. Returns the
+   *  committed values, so submit can use them at once instead
+   *  of waiting for the state update. A commit whose folder
+   *  differs from the one shown before IS an outright pick and
+   *  is recorded in `folderExplicitRef`; a rename, a backslash
+   *  deletion, or retyping the same folder leaves the ref
+   *  alone. */
+  const commitSaveAsDraft = (): { folder: string; filename: string } => {
+    if (saveAsDraft === null) return { folder, filename }
+    const draft = saveAsDraft
+    setSaveAsDraft(null)
+    if (draft === '') {
       setFolder('')
       setFilename('')
-      folderEdited.current = true
-      return
+      folderExplicitRef.current = null
+      return { folder: '', filename: '' }
     }
-    const { folder: f, filename: n } = applySaveAsEdit(folder, value)
-    if (f) {
-      setFolder(f)
-      folderEdited.current = true
+    const parsed = applySaveAsEdit(folder, draft)
+    const nextFolder = parsed.folder || folder
+    const nextFilename = parsed.filename
+    if (nextFolder !== folder) {
+      folderExplicitRef.current = nextFolder
     }
-    if (n !== filename) userEditedFilename.current = true
-    setFilename(n)
+    if (nextFilename !== filename) userEditedFilename.current = true
+    setFolder(nextFolder)
+    setFilename(nextFilename)
+    return { folder: nextFolder, filename: nextFilename }
   }
 
   const onBrowseFolder = async () => {
@@ -616,6 +666,8 @@ export function AddDownloadDialog({
       if (typeof picked === 'string' && picked) {
         setFolder(picked)
         folderEdited.current = true
+        // Round 87.7 — a "..." pick IS an outright pick.
+        folderExplicitRef.current = picked
       }
     } catch {
       // The picker was cancelled or is unavailable — the user
@@ -657,22 +709,29 @@ export function AddDownloadDialog({
     setError(null)
     const runId = ++submitSeq.current
     const work: Promise<string> = (async () => {
-      const folderValue = folder.trim() || null
+      // Round 87.7 — commit any open Save As draft FIRST, so a
+      // submit straight after typing uses exactly what the user
+      // typed (no blur happened yet), and the committed values
+      // — not the pre-edit state — go to the engine.
+      const committed = commitSaveAsDraft()
+      const submitFolder = committed.folder
+      const submitFilename = committed.filename
+      const folderValue = submitFolder.trim() || null
       const categoryValue = category || null
-      // Round 87.5 (E5/R77c) — a folder the user picked (the
-      // "..." picker or a folder typed into Save As) is
-      // remembered at once, so the next dialog shows it: the
-      // category's Save To when a category is set, else the
-      // global default folder. A folder the dialog filled in by
-      // itself (a category's default) is not a pick and is left
-      // alone. A failure here must not block the download
-      // itself.
-      if (folderEdited.current && folderValue) {
+      // Round 87.7 — only an OUTRIGHT pick is remembered (see
+      // `folderExplicitRef`): the old `folderEdited` guard fired
+      // on any Save As keystroke, so a plain rename wrote the
+      // auto-filled folder back onto the category — the second
+      // half of the 87.6 drift, beside the engine's
+      // remember-on-every-add. A failure here must not block the
+      // download itself.
+      const explicitFolder = folderExplicitRef.current
+      if (explicitFolder) {
         try {
           if (categoryValue) {
-            await updateCategory({ id: categoryValue, folder: folderValue })
+            await updateCategory({ id: categoryValue, folder: explicitFolder })
           } else {
-            await setSettingField('default_download_folder', folderValue)
+            await setSettingField('default_download_folder', explicitFolder)
           }
         } catch (e) {
           // Round 76 (2) — a failed remember-path save used to
@@ -697,8 +756,9 @@ export function AddDownloadDialog({
         // user to fix it and retry.
         const [id] = await confirmPendingLink({
           id: pendingLinkId,
-          filename: filename.trim() || null,
+          filename: submitFilename.trim() || null,
           folder: folderValue,
+          explicitFolder,
           category: categoryValue,
           queue: startNow ? null : 'queue-main',
           speedLimitKbps: cap > 0 ? cap : null,
@@ -749,12 +809,13 @@ export function AddDownloadDialog({
               : 'No downloadable qualities were found for this video.',
           )
         }
-        const videoFilename = filename.trim() || `${result.title}.${row.ext}`
+        const videoFilename = submitFilename.trim() || `${result.title}.${row.ext}`
         const [id] = await addResolvedVideoDownload({
           pageUrl: url.trim(),
           row,
           filename: videoFilename || null,
           folder: folderValue,
+          explicitFolder,
           category: categoryValue,
           queue: startNow ? null : 'queue-main',
           speedLimitKbps: cap > 0 ? cap : null,
@@ -771,8 +832,9 @@ export function AddDownloadDialog({
       }
       const [id] = await addDownload({
         url: url.trim(),
-        filename: filename.trim() || null,
+        filename: submitFilename.trim() || null,
         folder: folderValue,
+        explicitFolder,
         category: categoryValue,
         // "Save for later" files the download in the main queue, so
         // the scheduler (or Start Now) can pick it up later.
@@ -1027,6 +1089,7 @@ export function AddDownloadDialog({
                 type="text"
                 value={saveAsValue}
                 onChange={(e) => onSaveAsChange(e.target.value)}
+                onBlur={() => commitSaveAsDraft()}
                 placeholder="filename.ext"
                 title="You can rename the file here"
                 className="h-9 min-w-0 grow rounded-md border border-border-input bg-surface px-3 text-[13px] focus:border-accent focus:outline-none"

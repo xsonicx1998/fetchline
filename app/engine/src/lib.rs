@@ -30,6 +30,7 @@ pub mod proxy;
 pub mod queue;
 pub mod quota;
 pub mod secret;
+pub mod shell;
 pub mod store;
 pub mod timeutil;
 pub mod update;

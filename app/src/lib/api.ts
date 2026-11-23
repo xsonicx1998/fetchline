@@ -110,6 +110,12 @@ export async function addDownload(args: {
   url: string
   filename?: string | null
   folder?: string | null
+  // Round 87.7 — the folder the user picked outright (the "..."
+  // picker or a Save As edit that changed the folder); only
+  // this is remembered on the category. `folder` is the
+  // dialog's displayed folder (possibly auto-filled) and
+  // resolves the save path but is never written back.
+  explicitFolder?: string | null
   category?: string | null
   queue?: string | null
 }): Promise<[string, ProbeInfo]> {
@@ -206,6 +212,9 @@ export async function addResolvedVideoDownload(args: {
   row: QualityRow
   filename?: string | null
   folder?: string | null
+  // Round 87.7 — see `addDownload`: only an outright pick is
+  // remembered on the category.
+  explicitFolder?: string | null
   category?: string | null
   queue?: string | null
   speedLimitKbps?: number | null
@@ -220,6 +229,7 @@ export async function addResolvedVideoDownload(args: {
     row: args.row,
     filename: args.filename ?? null,
     folder: args.folder ?? null,
+    explicitFolder: args.explicitFolder ?? null,
     category: args.category ?? null,
     queue: args.queue ?? null,
     speedLimitKbps: args.speedLimitKbps ?? null,
@@ -242,6 +252,9 @@ export async function confirmPendingLink(args: {
   id: string
   filename?: string | null
   folder?: string | null
+  // Round 87.7 — see `addDownload`: only an outright pick is
+  // remembered on the category.
+  explicitFolder?: string | null
   category?: string | null
   queue?: string | null
   speedLimitKbps?: number | null
@@ -251,6 +264,7 @@ export async function confirmPendingLink(args: {
     id: args.id,
     filename: args.filename ?? null,
     folder: args.folder ?? null,
+    explicitFolder: args.explicitFolder ?? null,
     category: args.category ?? null,
     queue: args.queue ?? null,
     speedLimitKbps: args.speedLimitKbps ?? null,

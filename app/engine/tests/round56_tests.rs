@@ -55,6 +55,7 @@ async fn independent_watchdog_aborts_a_stalled_run() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -99,6 +100,7 @@ async fn independent_watchdog_spares_a_slow_but_moving_download() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -146,6 +148,7 @@ async fn probe_duration_is_logged() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )

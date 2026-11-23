@@ -406,7 +406,7 @@ async fn drain_leaves_browser_capture_for_the_add_url_dialog() {
     // starts it (the default is start-immediately). It must
     // complete byte-exact from the fixture, not just sit queued.
     let (download_id, _probe) = mgr
-        .confirm_pending_link(&pending_id, None, None, None, None, None, true)
+        .confirm_pending_link(&pending_id, None, None, None, None, None, None, true)
         .await
         .unwrap();
     let row = store.get_pending_link(&pending_id).unwrap().unwrap();
@@ -521,7 +521,7 @@ async fn confirm_pending_link_twice_is_an_error() {
         .enqueue_pending_link(&server.url, None, "browser")
         .unwrap();
     let (download_id, _) = mgr
-        .confirm_pending_link(&row.id, None, None, None, None, None, false)
+        .confirm_pending_link(&row.id, None, None, None, None, None, None, false)
         .await
         .unwrap();
     assert_eq!(
@@ -529,7 +529,7 @@ async fn confirm_pending_link_twice_is_an_error() {
         "queued"
     );
     let err = mgr
-        .confirm_pending_link(&row.id, None, None, None, None, None, false)
+        .confirm_pending_link(&row.id, None, None, None, None, None, None, false)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("already decided"), "error: {err}");
@@ -556,7 +556,7 @@ async fn confirm_pending_link_bad_url_stays_pending() {
         .enqueue_pending_link(&server.url, None, "browser")
         .unwrap();
     let err = mgr
-        .confirm_pending_link(&row.id, None, None, None, None, None, true)
+        .confirm_pending_link(&row.id, None, None, None, None, None, None, true)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("404"), "error: {err}");
@@ -567,7 +567,7 @@ async fn confirm_pending_link_bad_url_stays_pending() {
     // A retry is not locked out: it reaches the add path and
     // fails with the same real error, not "already decided".
     let err = mgr
-        .confirm_pending_link(&row.id, None, None, None, None, None, true)
+        .confirm_pending_link(&row.id, None, None, None, None, None, None, true)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("404"), "error: {err}");
@@ -601,6 +601,7 @@ async fn confirm_pending_link_failed_add_retries_after_fix() {
             None,
             None,
             None,
+            None,
             false,
         )
         .await
@@ -620,7 +621,7 @@ async fn confirm_pending_link_failed_add_retries_after_fix() {
         ""
     );
     let (download_id, _) = mgr
-        .confirm_pending_link(&row.id, None, None, None, None, None, false)
+        .confirm_pending_link(&row.id, None, None, None, None, None, None, false)
         .await
         .unwrap();
     assert_eq!(
@@ -680,7 +681,7 @@ async fn confirm_pending_link_resolved_video_skips_probe() {
         )
         .unwrap();
     let (download_id, _) = mgr
-        .confirm_pending_link(&row.id, None, None, None, None, None, false)
+        .confirm_pending_link(&row.id, None, None, None, None, None, None, false)
         .await
         .unwrap();
     assert_eq!(server.head_requests(), 0, "the probe must not run");
@@ -703,7 +704,7 @@ async fn confirm_pending_link_resolved_video_skips_probe() {
         .enqueue_pending_link(&server.url, None, "browser")
         .unwrap();
     let err = mgr
-        .confirm_pending_link(&plain.id, None, None, None, None, None, false)
+        .confirm_pending_link(&plain.id, None, None, None, None, None, None, false)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("403"), "error: {err}");
@@ -826,7 +827,7 @@ async fn resolved_video_headers_and_cookies_reach_the_worker() {
         )
         .unwrap();
     let (download_id, _) = mgr
-        .confirm_pending_link(&row.id, None, None, None, None, None, true)
+        .confirm_pending_link(&row.id, None, None, None, None, None, None, true)
         .await
         .unwrap();
     assert_eq!(server.head_requests(), 0, "the probe must not run");
@@ -844,7 +845,7 @@ async fn description_round_trip() {
     let dir = tmpdir();
     let mgr = test_mgr(&dir);
     let (id, _) = mgr
-        .add_download(&server.url, None, None, None, None)
+        .add_download(&server.url, None, None, None, None, None)
         .await
         .unwrap();
     assert_eq!(mgr.get_download(&id).unwrap().unwrap().description, None);
@@ -1596,7 +1597,7 @@ async fn drain_cookie_gated_link_downloads_when_cookie_present() {
     );
     assert!(summary.rejected.is_empty());
     let (download_id, _) = mgr
-        .confirm_pending_link(&pending_id, None, None, None, None, None, true)
+        .confirm_pending_link(&pending_id, None, None, None, None, None, None, true)
         .await
         .unwrap();
     assert!(
@@ -1654,7 +1655,7 @@ async fn drain_cookie_gated_link_stays_pending_without_cookie() {
     );
     assert!(summary.rejected.is_empty());
     let err = mgr
-        .confirm_pending_link(&pending_id, None, None, None, None, None, true)
+        .confirm_pending_link(&pending_id, None, None, None, None, None, None, true)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("401"), "error: {err}");
@@ -1738,7 +1739,7 @@ async fn cookies_are_dropped_when_the_app_restarts() {
             summary
         );
         let (download_id, _) = mgr
-            .confirm_pending_link(&pending_id, None, None, None, None, None, false)
+            .confirm_pending_link(&pending_id, None, None, None, None, None, None, false)
             .await
             .unwrap();
         let row = store.get_pending_link(&pending_id).unwrap().unwrap();

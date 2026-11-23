@@ -1175,6 +1175,7 @@ async fn delete_grabber_project_keeps_its_downloads_untagged() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();

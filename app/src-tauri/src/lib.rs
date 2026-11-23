@@ -305,6 +305,12 @@ async fn add_download(
     url: String,
     filename: Option<String>,
     folder: Option<String>,
+    // Round 87.7 — the folder the user picked outright (the
+    // "..." picker or a Save As edit that changed the folder);
+    // only this is remembered on the category. `folder` is the
+    // dialog's displayed folder (possibly auto-filled) and
+    // resolves the save path but is never written back.
+    explicit_folder: Option<String>,
     category: Option<String>,
     queue: Option<String>,
 ) -> Result<(String, ProbeInfo), String> {
@@ -315,7 +321,7 @@ async fn add_download(
     log_startup(log.as_deref(), &format!("cmd add_download #{n} entry"));
     let result = state
         .manager
-        .add_download(&url, filename, folder, category, queue)
+        .add_download(&url, filename, folder, explicit_folder, category, queue)
         .await
         .map_err(|e| e.to_string());
     trace_command_exit(log.as_deref(), "add_download", n, started, result.is_ok());
@@ -2216,6 +2222,32 @@ fn open_file(state: State<'_, AppState>, id: String) -> Result<(), String> {
 /// an error (result <= 32), so behaviour never gets worse than
 /// before, and both paths log to startup.log so the retest can
 /// see which one fired.
+///
+/// Round 87.7 (1) — the 87.5 diagnosis was INSUFFICIENT: the
+/// 87.6 retest proved `ShellExecuteW` "openas" fails with
+/// error 31 (SE_ERR_NOASSOC) on a GOOD path — the file exists
+/// at `C:\Users\Administrator\Downloads\ZipTest\slow a test.mp4`
+/// — and the rundll32 fallback ALSO never appeared. Two real
+/// causes, both fixed here:
+///   * the fallback was STILL broken the way the 87.5 comment
+///     describes: it passed the path through `Command::args`,
+///     which quotes spaced paths, so OpenAs_RunDLL looked for
+///     a literally-quoted file. It now goes through
+///     `fetchline_engine::shell::openas_rundll32_cmdline` (the
+///     verbatim `shell32.dll,OpenAs_RunDLL <unquoted path>`
+///     tail) passed with `CommandExt::raw_arg` — no quoting.
+///   * the primary call is now `ShellExecuteExW` with
+///     `SEE_MASK_INVOKEIDLIST` and the main window's HWND as
+///     parent: that is the documented recipe for the Open With
+///     dialog, including for a file type with NO association
+///     registered (the shell invokes the dialog instead of
+///     resolving the association itself and failing 31), and
+///     the parent HWND makes the dialog owned by the main
+///     window, so it opens ON TOP of it instead of possibly
+///     landing behind the maximized window unnoticed (the same
+///     z-order class as 87.6 item 7). The `Win32_System_Registry`
+///     windows-sys feature (Cargo.toml) gates
+///     `SHELLEXECUTEINFOW`'s `Default` impl.
 #[tauri::command]
 fn open_file_with(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
     let row = state
@@ -2240,40 +2272,57 @@ fn open_file_with(app: AppHandle, state: State<'_, AppState>, id: String) -> Res
         };
         let verb = wide("openas");
         let file = wide(&row.save_path);
-        // ShellExecuteW returns an HINSTANCE: > 32 is success,
-        // <= 32 is a SE_ERR_* error code.
-        let result = unsafe {
-            windows_sys::Win32::UI::Shell::ShellExecuteW(
-                std::ptr::null_mut(),
-                verb.as_ptr(),
-                file.as_ptr(),
-                std::ptr::null(),
-                std::ptr::null(),
-                windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
-            )
+        // Round 87.7 — parent HWND: the main window, so the
+        // dialog is owned by it and opens on top. Best-effort:
+        // no main window (or no handle) falls back to NULL,
+        // the old behaviour. windows-sys HWND is *mut c_void;
+        // tauri's `windows`-crate HWND carries the raw value
+        // in its public `.0` (isize).
+        let parent_hwnd: windows_sys::Win32::Foundation::HWND = app
+            .get_webview_window("main")
+            .and_then(|w| w.hwnd().ok())
+            .map(|h| h.0 as *mut std::ffi::c_void)
+            .unwrap_or(std::ptr::null_mut());
+        let mut info = windows_sys::Win32::UI::Shell::SHELLEXECUTEINFOW {
+            cbSize: std::mem::size_of::<windows_sys::Win32::UI::Shell::SHELLEXECUTEINFOW>() as u32,
+            fMask: windows_sys::Win32::UI::Shell::SEE_MASK_INVOKEIDLIST,
+            hwnd: parent_hwnd,
+            lpVerb: verb.as_ptr(),
+            lpFile: file.as_ptr(),
+            nShow: windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+            ..Default::default()
         };
-        if (result as usize) > 32 {
+        // ShellExecuteExW returns nonzero on success; on
+        // failure GetLastError carries the code.
+        let ok = unsafe { windows_sys::Win32::UI::Shell::ShellExecuteExW(&mut info) };
+        if ok != 0 {
             log_startup(
                 log,
-                &format!("open with: ShellExecuteW openas ok for {}", row.save_path),
+                &format!("open with: ShellExecuteExW openas ok for {}", row.save_path),
             );
             return Ok(());
         }
-        let code = result as usize;
+        let code = unsafe { windows_sys::Win32::Foundation::GetLastError() };
         log_startup(
             log,
             &format!(
-                "open with: ShellExecuteW openas failed ({code}) for {} — falling back to rundll32",
+                "open with: ShellExecuteExW openas failed ({code}) for {} — falling back to rundll32",
                 row.save_path
             ),
         );
         use std::os::windows::process::CommandExt;
         std::process::Command::new("rundll32.exe")
-            .args(["shell32.dll,OpenAs_RunDLL", &row.save_path])
+            .raw_arg(fetchline_engine::shell::openas_rundll32_cmdline(
+                &row.save_path,
+            ))
             // Round 70 — no console flash for the Open With dialog.
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(|e| e.to_string())?;
+        log_startup(
+            log,
+            &format!("open with: rundll32 fallback spawned for {}", row.save_path),
+        );
         Ok(())
     }
     #[cfg(not(target_os = "windows"))]
@@ -3421,6 +3470,9 @@ async fn confirm_pending_link(
     id: String,
     filename: Option<String>,
     folder: Option<String>,
+    // Round 87.7 — see `add_download`: only an outright pick
+    // is remembered on the category.
+    explicit_folder: Option<String>,
     category: Option<String>,
     queue: Option<String>,
     speed_limit_kbps: Option<i64>,
@@ -3432,6 +3484,7 @@ async fn confirm_pending_link(
             &id,
             filename,
             folder,
+            explicit_folder,
             category,
             queue,
             speed_limit_kbps,
@@ -3457,6 +3510,9 @@ async fn add_resolved_video_download(
     row: fetchline_engine::ytdlp::QualityRow,
     filename: Option<String>,
     folder: Option<String>,
+    // Round 87.7 — see `add_download`: only an outright pick
+    // is remembered on the category.
+    explicit_folder: Option<String>,
     category: Option<String>,
     queue: Option<String>,
     speed_limit_kbps: Option<i64>,
@@ -3470,6 +3526,7 @@ async fn add_resolved_video_download(
             &row,
             filename,
             folder,
+            explicit_folder,
             category,
             queue,
             speed_limit_kbps,

@@ -49,6 +49,7 @@ async fn add_named(
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -625,6 +626,7 @@ async fn sync_setup(
             server_url,
             Some("file.bin".to_string()),
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             Some(queue.id.clone()),
         )

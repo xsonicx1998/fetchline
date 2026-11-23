@@ -290,25 +290,166 @@ describe('last-used folder prefill + separator-loss guard (Round 87.6, items 1�
 
     // A rename edit that deletes the `\` between the folder and
     // the filename: the 87.5 retest's malformed row.
+    // Round 87.7 — the field holds a draft until blur, so the
+    // typed text shows exactly as typed (no per-keystroke
+    // re-parse), and the commit splits it apart.
     fireEvent.change(saveAs, {
       target: { value: 'C:\\Users\\Administrator\\Downloads\\ZipTestslow a test.mp4' },
     })
+    expect(saveAs.value).toBe(
+      'C:\\Users\\Administrator\\Downloads\\ZipTestslow a test.mp4',
+    )
+    fireEvent.blur(saveAs)
     expect(saveAs.value).toBe(`${ZIPTEST}\\slow a test.mp4`)
 
     fireEvent.click(screen.getByText('Start Download'))
 
     await waitFor(
+      () => expect(vi.mocked(api.addDownload)).toHaveBeenCalledTimes(1),
+      { timeout: 5000 },
+    )
+    // Round 87.7 — a rename is NOT an outright folder pick: the
+    // auto-filled folder is not written back onto the category
+    // (the 87.6 drift: Video became ZipTest), so the category
+    // remember does not fire — and the download goes to the
+    // real folder with the real name, with no explicit folder.
+    expect(vi.mocked(api.updateCategory)).not.toHaveBeenCalled()
+    expect(vi.mocked(api.setSettingField)).not.toHaveBeenCalled()
+    expect(vi.mocked(api.addDownload)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        folder: ZIPTEST,
+        filename: 'slow a test.mp4',
+        explicitFolder: null,
+      }),
+    )
+  })
+})
+
+describe('Save As draft field (Round 87.7, items 1–2)', () => {
+  const ZIPTEST = 'C:\\Users\\Administrator\\Downloads\\ZipTest'
+  const withFolder: CategoryRow[] = BUILTINS.map((c) =>
+    c.id === 'cat-video' ? { ...c, default_folder: ZIPTEST } : c,
+  )
+
+  /** Type `text` into the Save As field one character at a
+   *  time, the way a real select-all + type does it — each
+   *  keystroke is its own change event. The 87.6 per-keystroke
+   *  parse + rejoin mangled this: every keystroke re-prepended
+   *  the folder, so the field ended up
+   *  `tor\Downloads\ZipC:\Users\...\ZipTest\slow a test.mp4`. */
+  function typeCharByChar(input: HTMLInputElement, text: string) {
+    for (let i = 1; i <= text.length; i++) {
+      fireEvent.change(input, { target: { value: text.slice(0, i) } })
+    }
+  }
+
+  test('select-all + type a full path replaces cleanly, keystroke by keystroke', async () => {
+    renderDialog({ initialUrl: 'https://example.com/movie.mp4', categories: withFolder })
+    await waitFor(() => expect(categorySelect().value).toBe('cat-video'), { timeout: 5000 })
+    const saveAs = screen.getByLabelText('Save As') as HTMLInputElement
+    await waitFor(() => expect(saveAs.value).toBe(`${ZIPTEST}\\movie.mp4`), { timeout: 5000 })
+
+    const typed = `${ZIPTEST}\\slow a test.mp4`
+    typeCharByChar(saveAs, typed)
+    // The field shows exactly what was typed at every step —
+    // the folder is never re-prepended mid-typing.
+    expect(saveAs.value).toBe(typed)
+    fireEvent.blur(saveAs)
+    expect(saveAs.value).toBe(typed)
+
+    fireEvent.click(screen.getByText('Start Download'))
+    await waitFor(
+      () => expect(vi.mocked(api.addDownload)).toHaveBeenCalledTimes(1),
+      { timeout: 5000 },
+    )
+    // Same folder as before, so no explicit pick — and no
+    // category write for a retype of the same folder.
+    expect(vi.mocked(api.addDownload)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        folder: ZIPTEST,
+        filename: 'slow a test.mp4',
+        explicitFolder: null,
+      }),
+    )
+    expect(vi.mocked(api.updateCategory)).not.toHaveBeenCalled()
+  })
+
+  test('typing a path in a DIFFERENT folder is an outright pick and is remembered', async () => {
+    renderDialog({ initialUrl: 'https://example.com/movie.mp4', categories: withFolder })
+    await waitFor(() => expect(categorySelect().value).toBe('cat-video'), { timeout: 5000 })
+    const saveAs = screen.getByLabelText('Save As') as HTMLInputElement
+    await waitFor(() => expect(saveAs.value).toBe(`${ZIPTEST}\\movie.mp4`), { timeout: 5000 })
+
+    const typed = 'D:\\Picked\\movie.mp4'
+    typeCharByChar(saveAs, typed)
+    expect(saveAs.value).toBe(typed)
+    fireEvent.blur(saveAs)
+    expect(saveAs.value).toBe(typed)
+
+    fireEvent.click(screen.getByText('Start Download'))
+    await waitFor(
       () => expect(vi.mocked(api.updateCategory)).toHaveBeenCalledTimes(1),
       { timeout: 5000 },
     )
-    // The remember writes the real folder, not its parent — and
-    // the download goes to the real folder with the real name.
     expect(vi.mocked(api.updateCategory)).toHaveBeenCalledWith({
       id: 'cat-video',
-      folder: ZIPTEST,
+      folder: 'D:\\Picked',
     })
     expect(vi.mocked(api.addDownload)).toHaveBeenCalledWith(
-      expect.objectContaining({ folder: ZIPTEST, filename: 'slow a test.mp4' }),
+      expect.objectContaining({
+        folder: 'D:\\Picked',
+        filename: 'movie.mp4',
+        explicitFolder: 'D:\\Picked',
+      }),
+    )
+  })
+
+  test('a bare rename keeps the folder and remembers nothing', async () => {
+    renderDialog({ initialUrl: 'https://example.com/movie.mp4', categories: withFolder })
+    await waitFor(() => expect(categorySelect().value).toBe('cat-video'), { timeout: 5000 })
+    const saveAs = screen.getByLabelText('Save As') as HTMLInputElement
+    await waitFor(() => expect(saveAs.value).toBe(`${ZIPTEST}\\movie.mp4`), { timeout: 5000 })
+
+    typeCharByChar(saveAs, 'renamed clip.mp4')
+    expect(saveAs.value).toBe('renamed clip.mp4')
+    fireEvent.blur(saveAs)
+    expect(saveAs.value).toBe(`${ZIPTEST}\\renamed clip.mp4`)
+
+    fireEvent.click(screen.getByText('Start Download'))
+    await waitFor(
+      () => expect(vi.mocked(api.addDownload)).toHaveBeenCalledTimes(1),
+      { timeout: 5000 },
+    )
+    expect(vi.mocked(api.addDownload)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        folder: ZIPTEST,
+        filename: 'renamed clip.mp4',
+        explicitFolder: null,
+      }),
+    )
+    expect(vi.mocked(api.updateCategory)).not.toHaveBeenCalled()
+    expect(vi.mocked(api.setSettingField)).not.toHaveBeenCalled()
+  })
+
+  test('submit straight after typing commits the draft without a blur', async () => {
+    renderDialog({ initialUrl: 'https://example.com/movie.mp4', categories: withFolder })
+    await waitFor(() => expect(categorySelect().value).toBe('cat-video'), { timeout: 5000 })
+    const saveAs = screen.getByLabelText('Save As') as HTMLInputElement
+    await waitFor(() => expect(saveAs.value).toBe(`${ZIPTEST}\\movie.mp4`), { timeout: 5000 })
+
+    // No blur: type the new name and hit Start Download at once.
+    typeCharByChar(saveAs, 'D:\\Picked\\final name.mp4')
+    fireEvent.click(screen.getByText('Start Download'))
+    await waitFor(
+      () => expect(vi.mocked(api.addDownload)).toHaveBeenCalledTimes(1),
+      { timeout: 5000 },
+    )
+    expect(vi.mocked(api.addDownload)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        folder: 'D:\\Picked',
+        filename: 'final name.mp4',
+        explicitFolder: 'D:\\Picked',
+      }),
     )
   })
 })

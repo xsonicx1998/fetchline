@@ -59,6 +59,7 @@ async fn thread_watchdog_fires_when_tokio_runtime_is_wedged() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -123,6 +124,7 @@ async fn thread_watchdog_spares_a_slow_but_moving_download() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )

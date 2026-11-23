@@ -87,6 +87,7 @@ async fn stall_watchdog_fails_a_wedged_download() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -123,6 +124,7 @@ async fn checkpoint_reports_progress_within_the_first_second() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -166,6 +168,7 @@ async fn try_split_never_splits_an_open_ended_segment() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -272,6 +275,7 @@ async fn resume_recovers_a_stale_downloading_row() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -302,6 +306,7 @@ async fn resume_still_refuses_a_running_download() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )

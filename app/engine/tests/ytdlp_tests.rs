@@ -451,6 +451,7 @@ async fn round86_direct_ytdlp_failure_line_tail_is_single_line() {
             None,
             None,
             None,
+            None,
             false,
             None,
         )

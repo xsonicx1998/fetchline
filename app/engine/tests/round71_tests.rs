@@ -59,6 +59,7 @@ async fn download_completes_when_server_limits_concurrency_to_three() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();

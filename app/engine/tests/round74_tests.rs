@@ -87,6 +87,7 @@ async fn whole_download_stall_mid_file_recovers_and_completes() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -140,6 +141,7 @@ async fn persistently_stalled_download_keeps_retrying_then_gives_up_at_cap() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -257,6 +259,7 @@ async fn deleting_a_queue_moves_its_downloads_to_the_main_queue() {
             Some("one.bin".to_string()),
             Some(dir.to_string_lossy().to_string()),
             None,
+            None,
             Some(queue.id.clone()),
         )
         .await
@@ -266,6 +269,7 @@ async fn deleting_a_queue_moves_its_downloads_to_the_main_queue() {
             &server.url,
             Some("two.bin".to_string()),
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             Some(queue.id.clone()),
         )

@@ -66,6 +66,7 @@ async fn download_starts_with_one_segment_and_grows_by_splitting() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -133,6 +134,7 @@ async fn tail_keeps_retrying_until_the_server_recovers() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -192,6 +194,7 @@ async fn tail_never_waits_patiently_on_a_body_stall() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -240,6 +243,7 @@ async fn redownload_survives_a_failed_probe_and_restarts_from_scratch() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )

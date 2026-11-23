@@ -75,6 +75,7 @@ async fn tail_coalesces_unstarted_pending_segments_and_completes() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -190,6 +191,7 @@ async fn dead_server_fails_after_the_zero_progress_cap() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -248,6 +250,7 @@ async fn redownload_retries_transient_probe_and_restarts_failed_row() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -299,6 +302,7 @@ async fn redownload_refuses_on_404_probe() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -355,6 +359,7 @@ async fn resume_continues_from_stored_info_on_transient_probe_failure() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -409,6 +414,7 @@ async fn host_is_capped_at_two_connections_after_a_429() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )

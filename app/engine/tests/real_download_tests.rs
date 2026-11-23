@@ -89,6 +89,7 @@ async fn real_download_of_pinned_license_matches_sha256() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();

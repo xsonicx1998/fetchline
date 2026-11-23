@@ -60,4 +60,9 @@ webview2-com = "0.39"
 # documented, Unicode-safe way to show the dialog. The
 # ShellExecuteW link itself is gated on Win32_UI_WindowsAndMessaging
 # (SHOW_WINDOW_CMD lives there) — both features are needed.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_DataExchange", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+# Round 87.7 (1) — Win32_System_Registry: `SHELLEXECUTEINFOW`'s
+# `Default` impl (and the HKEY field) is gated on it; the primary
+# call is now `ShellExecuteExW` + SEE_MASK_INVOKEIDLIST, which
+# shows the dialog even for a file type with no association
+# (the 87.6 error 31 on a good path) instead of failing.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_DataExchange", "Win32_System_Threading", "Win32_System_Registry", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }

@@ -681,6 +681,7 @@ async fn ftp_probe_and_download_direct() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -719,6 +720,7 @@ async fn ftp_download_multi_segment_byte_exact() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -786,6 +788,7 @@ async fn ftp_pause_then_resume_completes_byte_exact() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -845,6 +848,7 @@ async fn ftp_server_requiring_login_accepts_right_credentials_and_refuses_wrong_
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap_err();
@@ -860,6 +864,7 @@ async fn ftp_server_requiring_login_accepts_right_credentials_and_refuses_wrong_
             &good_url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -885,6 +890,7 @@ async fn ftp_download_without_size_is_open_ended_and_byte_exact() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -920,6 +926,7 @@ async fn ftp_proxy_routes_and_authenticates_in_order() {
             &origin.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -964,6 +971,7 @@ async fn ftp_proxy_wrong_credentials_are_rejected() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap_err();
@@ -997,6 +1005,7 @@ async fn ftp_proxy_bypass_list_goes_direct() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1026,6 +1035,7 @@ async fn ftp_download_goes_direct_when_only_an_http_proxy_is_configured() {
             &ftp.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -1091,6 +1101,7 @@ async fn ntlm_proxy_authenticates_http_download() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1126,6 +1137,7 @@ async fn ntlm_proxy_wrong_password_is_rejected() {
             &origin.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -1173,6 +1185,7 @@ async fn kerberos_only_proxy_is_refused_clearly() {
             &origin.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )

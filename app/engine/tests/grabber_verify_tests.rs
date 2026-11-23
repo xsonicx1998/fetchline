@@ -574,7 +574,7 @@ async fn verify_dead_file_is_attempted_exactly_twice() {
     // Baseline: one direct add_download of the dead URL = 1 probe HEAD.
     site.clear_log();
     assert!(mgr
-        .add_download(&dead, None, None, None, None)
+        .add_download(&dead, None, None, None, None, None)
         .await
         .is_err());
     let baseline = site.count("main", "/dead.pdf");

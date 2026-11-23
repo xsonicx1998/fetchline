@@ -249,6 +249,7 @@ async fn clipboard_already_downloaded_url_offers_with_already_in_list_flag() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();

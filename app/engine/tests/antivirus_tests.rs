@@ -122,6 +122,7 @@ async fn complete_download(
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -340,6 +341,7 @@ async fn scan_does_not_block_completion_and_a_slow_scanner_times_out() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -446,6 +448,7 @@ async fn scan_is_refused_for_an_unfinished_download() {
             &server.url,
             Some("unfinished.bin".to_string()),
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -564,6 +567,7 @@ async fn queue_files_read_back_with_scan_columns() {
             &server.url,
             Some("queued.bin".to_string()),
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             Some("queue-main".to_string()),
         )

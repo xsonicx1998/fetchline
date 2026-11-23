@@ -875,6 +875,7 @@ async fn kerberos_only_proxy_fails_clearly_with_real_gssapi_and_never_sends_basi
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap_err();
@@ -913,6 +914,7 @@ async fn kerberos_falls_back_to_basic_when_no_ticket() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -948,6 +950,7 @@ async fn kerberos_falls_back_to_ntlm_when_no_ticket() {
             &origin.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -994,6 +997,7 @@ async fn kerberos_auth_setting_never_downgrades_to_basic() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap_err();
@@ -1026,6 +1030,7 @@ async fn ntlm_auth_setting_never_uses_kerberos() {
             &origin.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -1281,6 +1286,7 @@ async fn cookie_gated_download_behind_basic_proxy_still_works() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
             Some("session=abc".to_string()),
         )
         .await
@@ -1314,6 +1320,7 @@ async fn cookie_gated_download_behind_kerberos_only_proxy_fails_clearly() {
             &origin.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
             Some("session=abc".to_string()),

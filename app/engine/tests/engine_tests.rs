@@ -62,6 +62,7 @@ async fn full_download_multi_segment_matches_bytes() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -100,6 +101,7 @@ async fn list_downloads_carries_updated_at_and_grabber_project() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -155,6 +157,7 @@ async fn pause_then_resume_completes_with_correct_bytes() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -189,6 +192,7 @@ async fn resume_restarts_when_remote_file_changes() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -232,6 +236,7 @@ async fn paused_midway(
             url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -386,6 +391,7 @@ async fn refresh_address_refuses_running_and_complete_downloads() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -476,6 +482,7 @@ async fn add_queued(
             server_url,
             Some(name.to_string()),
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             Some(queue_id.to_string()),
         )
@@ -780,6 +787,7 @@ async fn category_auto_assign_uses_custom_category() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -810,6 +818,7 @@ async fn category_delete_blocked_with_downloads_then_allowed() {
             &server.url,
             Some("clip.xyz".to_string()),
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -1103,6 +1112,7 @@ async fn complete_one(
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1123,6 +1133,7 @@ async fn add_download_rejects_empty_url() {
             "",
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -1146,6 +1157,7 @@ async fn add_download_rejects_unsupported_scheme() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap_err();
@@ -1162,6 +1174,7 @@ async fn add_download_rejects_unparsable_url() {
             "not a url",
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -1186,6 +1199,7 @@ async fn add_download_rejects_404() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap_err();
@@ -1203,6 +1217,7 @@ async fn add_download_unreachable_host_errors() {
             &url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -1229,6 +1244,7 @@ async fn duplicate_add_gets_different_save_path() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1237,6 +1253,7 @@ async fn duplicate_add_gets_different_save_path() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -1272,6 +1289,7 @@ async fn second_add_after_first_completes_gets_suffixed_path() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -1329,6 +1347,7 @@ async fn pause_download_when_not_running_errors() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1358,6 +1377,7 @@ async fn resume_restarts_when_only_etag_changes() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -1399,6 +1419,7 @@ async fn start_download_on_paused_download_resumes() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1435,6 +1456,7 @@ async fn category_auto_assign_unknown_extension_falls_back_to_documents() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1460,6 +1482,7 @@ async fn category_auto_assign_is_case_insensitive() {
             &server.url,
             Some("TRAILER.MP4".to_string()),
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -1548,6 +1571,7 @@ async fn delete_category_allowed_when_downloads_deleted() {
             &server.url,
             Some("clip.xyz".to_string()),
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -2034,6 +2058,7 @@ async fn add_download_keeps_unicode_filename() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -2059,6 +2084,7 @@ async fn add_download_with_queue_files_it_in_main_queue() {
             &server.url,
             Some("later.bin".to_string()),
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             Some("queue-main".to_string()),
         )
@@ -2125,6 +2151,7 @@ async fn resume_fails_when_server_ignores_range() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -2295,6 +2322,7 @@ async fn fetch_page_links_flags_already_downloaded() {
         &video,
         None,
         Some(dir.to_string_lossy().to_string()),
+        None,
         None,
         None,
     )
@@ -2716,6 +2744,7 @@ async fn max_connections_from_settings_changes_segment_count() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -2735,6 +2764,7 @@ async fn max_connections_from_settings_changes_segment_count() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -2751,6 +2781,7 @@ async fn max_connections_from_settings_changes_segment_count() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -2788,6 +2819,7 @@ async fn max_connections_setting_is_a_cap_not_a_segment_count() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -2805,6 +2837,7 @@ async fn max_connections_setting_is_a_cap_not_a_segment_count() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -2843,7 +2876,14 @@ async fn save_to_folder_and_file_types_edit_change_downloads() {
     );
     // A .abc file is auto-assigned to Books and lands in its folder.
     let (id, _) = mgr
-        .add_download(&server.url, Some("book.abc".to_string()), None, None, None)
+        .add_download(
+            &server.url,
+            Some("book.abc".to_string()),
+            None,
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
     let row = mgr.get_download(&id).unwrap().unwrap();
@@ -2858,7 +2898,14 @@ async fn save_to_folder_and_file_types_edit_change_downloads() {
     mgr.update_category("cat-video", Some(&video_dir.to_string_lossy()), None)
         .unwrap();
     let (id2, _) = mgr
-        .add_download(&server.url, Some("clip.mp4".to_string()), None, None, None)
+        .add_download(
+            &server.url,
+            Some("clip.mp4".to_string()),
+            None,
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
     let row2 = mgr.get_download(&id2).unwrap().unwrap();
@@ -2887,7 +2934,14 @@ async fn default_folder_from_settings_is_used() {
     // No folder given, category Documents has no folder of its own:
     // the settings default wins.
     let (id, _) = mgr
-        .add_download(&server.url, Some("notes.txt".to_string()), None, None, None)
+        .add_download(
+            &server.url,
+            Some("notes.txt".to_string()),
+            None,
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
     let row = mgr.get_download(&id).unwrap().unwrap();
@@ -2909,11 +2963,11 @@ async fn duplicate_overwrite_reuses_path() {
     mgr.update_settings(&s).unwrap();
     let folder = dir.to_string_lossy().to_string();
     let (id1, _) = mgr
-        .add_download(&server.url, None, Some(folder.clone()), None, None)
+        .add_download(&server.url, None, Some(folder.clone()), None, None, None)
         .await
         .unwrap();
     let (id2, _) = mgr
-        .add_download(&server.url, None, Some(folder.clone()), None, None)
+        .add_download(&server.url, None, Some(folder.clone()), None, None, None)
         .await
         .unwrap();
     let p1 = mgr.get_download(&id1).unwrap().unwrap().save_path;
@@ -2923,7 +2977,7 @@ async fn duplicate_overwrite_reuses_path() {
     s.duplicate_action = "rename".to_string();
     mgr.update_settings(&s).unwrap();
     let (id3, _) = mgr
-        .add_download(&server.url, None, Some(folder), None, None)
+        .add_download(&server.url, None, Some(folder), None, None, None)
         .await
         .unwrap();
     let p3 = mgr.get_download(&id3).unwrap().unwrap().save_path;
@@ -3020,6 +3074,7 @@ async fn download_goes_through_http_proxy() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -3053,6 +3108,7 @@ async fn download_goes_through_http_proxy_with_auth() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -3090,6 +3146,7 @@ async fn basic_auth_setting_sends_credentials_preemptively() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -3116,6 +3173,7 @@ async fn proxy_disabled_download_goes_direct() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -3147,6 +3205,7 @@ async fn proxy_bypass_list_skips_proxy() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -3174,6 +3233,7 @@ async fn download_goes_through_socks5_proxy() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -3207,6 +3267,7 @@ async fn socks5_proxy_with_auth() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -3229,6 +3290,7 @@ async fn socks5_proxy_with_auth() {
             &server.url,
             None,
             Some(dir2.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -3277,6 +3339,7 @@ async fn ftp_proxy_is_stored_but_not_applied() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -3302,6 +3365,7 @@ async fn speed_limit_caps_download() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -3343,6 +3407,7 @@ async fn speed_limit_unlimited_is_fast() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -3372,6 +3437,7 @@ async fn speed_limit_change_mid_download_takes_effect() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -3491,6 +3557,7 @@ async fn max_connections_change_does_not_alter_running_download() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -3526,6 +3593,7 @@ async fn max_connections_change_does_not_alter_running_download() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -3549,6 +3617,7 @@ async fn max_retries_zero_means_single_attempt_and_fast_error() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -3633,6 +3702,7 @@ async fn speed_limit_is_global_across_concurrent_downloads() {
             Some(folder.clone()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -3641,6 +3711,7 @@ async fn speed_limit_is_global_across_concurrent_downloads() {
             &server.url,
             Some("two.bin".to_string()),
             Some(folder),
+            None,
             None,
             None,
         )
@@ -3684,6 +3755,7 @@ async fn speed_limit_chunk_larger_than_rate_completes() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -3721,6 +3793,7 @@ async fn http_proxy_wrong_credentials_are_rejected() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -3740,6 +3813,7 @@ async fn http_proxy_wrong_credentials_are_rejected() {
             &server.url,
             None,
             Some(dir2.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -3771,6 +3845,7 @@ async fn proxy_https_only_scope_skips_http_downloads() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -3799,6 +3874,7 @@ async fn proxy_http_only_scope_uses_proxy_for_http() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -3851,6 +3927,7 @@ async fn proxy_change_applies_to_next_download() {
             Some(folder.clone()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -3866,6 +3943,7 @@ async fn proxy_change_applies_to_next_download() {
             &server.url,
             Some("b.bin".to_string()),
             Some(folder),
+            None,
             None,
             None,
         )
@@ -4051,6 +4129,7 @@ async fn file_types_auto_limits_auto_assign() {
             Some(folder.clone()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -4069,6 +4148,7 @@ async fn file_types_auto_limits_auto_assign() {
             Some(folder.clone()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -4081,6 +4161,7 @@ async fn file_types_auto_limits_auto_assign() {
             &server.url,
             Some("pack2.zip".to_string()),
             Some(folder),
+            None,
             None,
             None,
         )
@@ -4108,7 +4189,7 @@ async fn add_download_refuses_an_html_page_on_a_plain_path() {
     let mgr = DownloadManager::new(Arc::clone(&store), 4);
     let folder = dir.to_string_lossy().to_string();
     let err = mgr
-        .add_download(&url, None, Some(folder), None, None)
+        .add_download(&url, None, Some(folder), None, None, None)
         .await
         .unwrap_err();
     assert!(
@@ -4142,6 +4223,7 @@ async fn category_auto_assign_falls_back_to_url_extension_and_content_type() {
             Some(folder.clone()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -4159,6 +4241,7 @@ async fn category_auto_assign_falls_back_to_url_extension_and_content_type() {
             Some(folder.clone()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -4169,7 +4252,14 @@ async fn category_auto_assign_falls_back_to_url_extension_and_content_type() {
     // Unknown type: no signal anywhere, Documents as before.
     let blob = serve_typed("/blob", "application/octet-stream", &payload(512));
     let (id, _) = mgr
-        .add_download(&blob, Some("My File".to_string()), Some(folder), None, None)
+        .add_download(
+            &blob,
+            Some("My File".to_string()),
+            Some(folder),
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -4197,6 +4287,9 @@ async fn explicit_folder_is_remembered_on_the_category() {
             &server.url,
             Some("clip.mp4".to_string()),
             Some(chosen.to_string_lossy().to_string()),
+            // Round 87.7 — the folder was picked outright, so it
+            // is the explicit pick that gets remembered.
+            Some(chosen.to_string_lossy().to_string()),
             None,
             None,
         )
@@ -4216,7 +4309,14 @@ async fn explicit_folder_is_remembered_on_the_category() {
     );
     // The next add with no folder lands in the remembered one.
     let (id2, _) = mgr
-        .add_download(&server.url, Some("clip2.mp4".to_string()), None, None, None)
+        .add_download(
+            &server.url,
+            Some("clip2.mp4".to_string()),
+            None,
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert!(
@@ -4228,7 +4328,14 @@ async fn explicit_folder_is_remembered_on_the_category() {
     // Adding with no folder to another category leaves that
     // category's folder untouched.
     let (id3, _) = mgr
-        .add_download(&server.url, Some("notes.txt".to_string()), None, None, None)
+        .add_download(
+            &server.url,
+            Some("notes.txt".to_string()),
+            None,
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -4267,6 +4374,8 @@ async fn explicit_folder_with_spaces_joins_with_separator_and_remembers_last_use
             &server.url,
             Some("slow a test.mp4".to_string()),
             Some(chosen.to_string_lossy().to_string()),
+            // Round 87.7 — picked outright, so explicit.
+            Some(chosen.to_string_lossy().to_string()),
             None,
             None,
         )
@@ -4302,6 +4411,59 @@ async fn explicit_folder_with_spaces_joins_with_separator_and_remembers_last_use
     v.as_object_mut().unwrap().remove("last_used_folder");
     let old: fetchline_engine::Settings = serde_json::from_value(v).unwrap();
     assert_eq!(old.last_used_folder, None);
+}
+
+/// Round 87.7 (3) — the 87.6 retest's category drift: Video
+/// became ZipTest and Compressed/Documents became the Downloads
+/// root, because EVERY add wrote its folder back onto the
+/// category — including folders the dialog had auto-filled from
+/// the category or the last-used folder. A folder that was not
+/// picked outright (explicit_folder = None) resolves the save
+/// path exactly as before but must NOT be remembered: the
+/// category folder and the last-used folder stay untouched.
+#[tokio::test]
+async fn derived_folder_is_not_remembered_on_the_category() {
+    let server = MockServer::start(MockConfig::default());
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let mgr = DownloadManager::new(Arc::clone(&store), 4);
+    let mut s = store.get_settings().unwrap();
+    s.default_download_folder = dir.join("default").to_string_lossy().to_string();
+    mgr.update_settings(&s).unwrap();
+    // Seed the Compressed folder the way Round 76 did.
+    let seeded = dir.join("default").join("Compressed");
+    store
+        .update_category("cat-compressed", Some(seeded.to_str().unwrap()), None)
+        .unwrap();
+    // The dialog auto-filled the Downloads root (the last-used
+    // folder); the user never touched the "..." picker, so the
+    // folder is derived, not explicit.
+    let root = dir.join("default");
+    let (id, _) = mgr
+        .add_download(
+            &server.url,
+            Some("small.zip".to_string()),
+            Some(root.to_string_lossy().to_string()),
+            None, // derived, not an outright pick
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let row = mgr.get_download(&id).unwrap().unwrap();
+    assert_eq!(row.category_id, "cat-compressed");
+    // The download itself still lands in the passed folder.
+    assert_eq!(row.save_path, root.join("small.zip").to_string_lossy());
+    // But the category folder and the last-used folder are untouched.
+    assert_eq!(
+        store
+            .get_category("cat-compressed")
+            .unwrap()
+            .unwrap()
+            .default_folder,
+        seeded.to_string_lossy()
+    );
+    assert_eq!(store.get_settings().unwrap().last_used_folder, None);
 }
 
 /// Round 87.6 (3) — Music and Programs still pointed at
@@ -4359,7 +4521,7 @@ async fn excluded_sites_blocks_add_download() {
     settings.excluded_sites = vec!["127.0.0.1".to_string()];
     mgr.update_settings(&settings).unwrap();
     let err = mgr
-        .add_download(&server.url, None, Some(folder.clone()), None, None)
+        .add_download(&server.url, None, Some(folder.clone()), None, None, None)
         .await
         .unwrap_err();
     assert!(
@@ -4377,6 +4539,7 @@ async fn excluded_sites_blocks_add_download() {
             Some(folder.clone()),
             None,
             None,
+            None,
         )
         .await
         .unwrap_err();
@@ -4386,7 +4549,7 @@ async fn excluded_sites_blocks_add_download() {
     );
     // A host that is not excluded still works.
     let (id, _) = mgr
-        .add_download(&server.url, None, Some(folder), None, None)
+        .add_download(&server.url, None, Some(folder), None, None, None)
         .await
         .unwrap();
     assert!(mgr.get_download(&id).unwrap().is_some());
@@ -4566,7 +4729,14 @@ async fn category_folder_edit_does_not_move_completed_files() {
         .create_category("Books", &old_dir.to_string_lossy(), &["xyz".to_string()])
         .unwrap();
     let (id, _) = mgr
-        .add_download(&server.url, Some("book.xyz".to_string()), None, None, None)
+        .add_download(
+            &server.url,
+            Some("book.xyz".to_string()),
+            None,
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
     mgr.start_download(&id).await.unwrap();
@@ -4591,7 +4761,14 @@ async fn category_folder_edit_does_not_move_completed_files() {
     );
     // A new download in the same category uses the new folder.
     let (id2, _) = mgr
-        .add_download(&server.url, Some("book2.xyz".to_string()), None, None, None)
+        .add_download(
+            &server.url,
+            Some("book2.xyz".to_string()),
+            None,
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
     let row2 = mgr.get_download(&id2).unwrap().unwrap();
@@ -4727,6 +4904,7 @@ async fn round85_segmented_download_still_sends_range() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -4888,4 +5066,27 @@ async fn round85_dash_child_403_fails_parent_with_child_message() {
     for child in [&video, &audio] {
         assert_eq!(mgr.get_download(child).unwrap().unwrap().status, "error");
     }
+}
+
+/// Round 87.7 (1) — the Open With rundll32 fallback: the 87.5
+/// fallback passed the path through `Command::args`, which
+/// quotes arguments containing spaces, so OpenAs_RunDLL (which
+/// parses its file out of rundll32's raw command line) looked
+/// for a literally-quoted file and showed nothing — the 87.6
+/// retest's fallback never appeared. The command line built
+/// here is passed verbatim via `CommandExt::raw_arg`, so the
+/// path must arrive UNQUOTED, with spaces intact.
+#[test]
+fn openas_rundll32_cmdline_keeps_a_spaced_path_unquoted() {
+    assert_eq!(
+        fetchline_engine::shell::openas_rundll32_cmdline(
+            r"C:\Users\Administrator\Downloads\ZipTest\slow a test.mp4"
+        ),
+        r"shell32.dll,OpenAs_RunDLL C:\Users\Administrator\Downloads\ZipTest\slow a test.mp4"
+    );
+    // A path without spaces is the same shape — no quotes added.
+    assert_eq!(
+        fetchline_engine::shell::openas_rundll32_cmdline(r"C:\Downloads\file.zip"),
+        r"shell32.dll,OpenAs_RunDLL C:\Downloads\file.zip"
+    );
 }

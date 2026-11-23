@@ -209,6 +209,7 @@ async fn add_completed(
             Some(name.to_string()),
             Some(dir.to_string_lossy().to_string()),
             None,
+            None,
             Some(queue_id.to_string()),
         )
         .await
@@ -502,6 +503,7 @@ async fn final_video_m3u8_downloaded_as_is_bytes_exact() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -724,6 +726,7 @@ async fn final_retry_countdown_on_dropped_connection_then_retry_now_recovers() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -762,6 +765,7 @@ async fn final_cancel_during_retry_wait_works() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -793,6 +797,7 @@ async fn final_open_folder_rejects_deleted_folder() {
             &server.url,
             None,
             Some(sub.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )

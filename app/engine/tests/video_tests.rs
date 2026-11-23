@@ -498,7 +498,7 @@ async fn video_found_end_to_end_drains_into_a_real_download() {
     );
     assert!(summary.rejected.is_empty());
     let (download_id, _) = mgr
-        .confirm_pending_link(&pending_id, None, None, None, None, None, true)
+        .confirm_pending_link(&pending_id, None, None, None, None, None, None, true)
         .await
         .unwrap();
     let dl = mgr.get_download(&download_id).unwrap().unwrap();
@@ -928,7 +928,7 @@ async fn video_found_m3u8_drains_into_a_real_playlist_download() {
         summary
     );
     let (download_id, _) = mgr
-        .confirm_pending_link(&pending_id, None, None, None, None, None, true)
+        .confirm_pending_link(&pending_id, None, None, None, None, None, None, true)
         .await
         .unwrap();
     assert!(wait_for_status(&mgr, &download_id, "complete", 15).await);
@@ -982,6 +982,7 @@ async fn resolved_video_download_uses_stream_url_not_page_url() {
                 "Rick Astley - Never Gonna Give You Up (Official Video) (4K Remaster).mp4"
                     .to_string(),
             ),
+            None,
             None,
             None,
             None,
@@ -1045,6 +1046,7 @@ async fn resolved_dash_pair_creates_audio_child_even_when_saved_for_later() {
             None,
             None,
             None,
+            None,
             false, // saved for later — the children must still exist
             None,
         )
@@ -1092,6 +1094,7 @@ async fn resolved_video_download_failure_creates_no_download() {
             None,
             None,
             None,
+            None,
             true,
             None,
         )
@@ -1128,6 +1131,7 @@ async fn resolved_video_download_tiktok_page_goes_direct_from_the_start() {
             page_url,
             &resolved_row(&server.url),
             Some("video.mp4".to_string()),
+            None,
             None,
             None,
             None,
@@ -1192,6 +1196,7 @@ async fn resolved_video_download_tiktok_dash_pair_goes_direct_merged() {
             None,
             None,
             None,
+            None,
             false,
             None,
         )
@@ -1226,6 +1231,7 @@ async fn resolved_video_download_probe_404_still_fails_with_no_row() {
             "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
             &resolved_row(&server.url),
             Some("video.mp4".to_string()),
+            None,
             None,
             None,
             None,
@@ -1267,6 +1273,7 @@ async fn resolved_video_download_probe_403_youtube_does_not_fall_back() {
             "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
             &resolved_row(&server.url),
             Some("video.mp4".to_string()),
+            None,
             None,
             None,
             None,
@@ -1374,6 +1381,7 @@ async fn direct_ytdlp_failure_surfaces_stderr_tail_and_logs_argv() {
             "https://www.tiktok.com/@user/video/123",
             &row,
             Some("video.mp4".to_string()),
+            None,
             None,
             None,
             None,
@@ -1493,7 +1501,7 @@ async fn round87_direct_ytdlp_first_attempt_sends_no_cookies() {
         )
         .unwrap();
     let (id, _) = mgr
-        .confirm_pending_link(&pending.id, None, None, None, None, None, false)
+        .confirm_pending_link(&pending.id, None, None, None, None, None, None, false)
         .await
         .unwrap();
     let dl = mgr.get_download(&id).unwrap().unwrap();
@@ -1625,7 +1633,7 @@ async fn round87_1_tiktok_cdn_refused_retries_with_scoped_cookies() {
         )
         .unwrap();
     let (id, _) = mgr
-        .confirm_pending_link(&pending.id, None, None, None, None, None, false)
+        .confirm_pending_link(&pending.id, None, None, None, None, None, None, false)
         .await
         .unwrap();
     let dl = mgr.get_download(&id).unwrap().unwrap();
@@ -1751,7 +1759,7 @@ async fn round85_tiktok_segmented_download_sends_row_cookies_and_referer() {
         )
         .unwrap();
     let (id, _) = mgr
-        .confirm_pending_link(&pending.id, None, None, None, None, None, false)
+        .confirm_pending_link(&pending.id, None, None, None, None, None, None, false)
         .await
         .unwrap();
     let dl = mgr.get_download(&id).unwrap().unwrap();
@@ -1851,6 +1859,7 @@ async fn round85_dash_merge_direct_fallback_succeeds_with_ext_template() {
             "https://www.tiktok.com/@user/video/123",
             &row,
             Some("video.mp4".to_string()),
+            None,
             None,
             None,
             None,
@@ -2001,7 +2010,7 @@ async fn round86_tiktok_quality_pick_routes_to_direct_ytdlp() {
         )
         .unwrap();
     let (id, _) = mgr
-        .confirm_pending_link(&pending.id, None, None, None, None, None, false)
+        .confirm_pending_link(&pending.id, None, None, None, None, None, None, false)
         .await
         .unwrap();
     let dl = mgr.get_download(&id).unwrap().unwrap();
@@ -2060,6 +2069,7 @@ async fn round86_direct_ytdlp_logs_start_and_success_lines() {
             "https://www.tiktok.com/@user/video/123",
             &resolved_row("https://example.com/video.mp4"),
             Some("video.mp4".to_string()),
+            None,
             None,
             None,
             None,
@@ -2162,6 +2172,7 @@ async fn round86_forced_ytdlp_format_env_var_replaces_selector() {
             "https://www.tiktok.com/@user/video/123",
             &resolved_row("https://example.com/video.mp4"),
             Some("video.mp4".to_string()),
+            None,
             None,
             None,
             None,
@@ -2678,7 +2689,7 @@ async fn round86_confirm_logs_cookie_count_not_values() {
         )
         .unwrap();
     let (id, _) = mgr
-        .confirm_pending_link(&pending.id, None, None, None, None, None, false)
+        .confirm_pending_link(&pending.id, None, None, None, None, None, None, false)
         .await
         .unwrap();
     let log = std::fs::read_to_string(&log_path).unwrap();
@@ -2866,7 +2877,7 @@ async fn round87_direct_ytdlp_retries_with_cookies_after_login_required() {
         )
         .unwrap();
     let (id, _) = mgr
-        .confirm_pending_link(&pending.id, None, None, None, None, None, false)
+        .confirm_pending_link(&pending.id, None, None, None, None, None, None, false)
         .await
         .unwrap();
     let argv_path = dir.join("fake-argv-retry.txt");
@@ -2982,6 +2993,7 @@ async fn round87_direct_ytdlp_progress_events_advance() {
             "https://www.tiktok.com/@user/video/123",
             &resolved_row("https://example.com/video.mp4"),
             Some("video.mp4".to_string()),
+            None,
             None,
             None,
             None,
@@ -3161,6 +3173,7 @@ async fn round87_facebook_long_arabic_title_downloads_without_os_error_123() {
         .add_resolved_stream_download(
             &server.url,
             Some(format!("{title}.mp4")),
+            None,
             None,
             None,
             None,
@@ -4119,6 +4132,7 @@ async fn round87_facebook_long_arabic_title_dash_children_complete() {
             None,
             None,
             None,
+            None,
             Some(512 * 1024),
         )
         .await
@@ -4321,6 +4335,7 @@ async fn round87_tiktok_standard_video_completes_without_cookies_live() {
             page_url,
             &row,
             Some("video.mp4".to_string()),
+            None,
             None,
             None,
             None,

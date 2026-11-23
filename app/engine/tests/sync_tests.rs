@@ -62,6 +62,7 @@ async fn add_completed(
             Some(name.to_string()),
             Some(dir.to_string_lossy().to_string()),
             None,
+            None,
             Some(queue_id.to_string()),
         )
         .await
@@ -378,6 +379,7 @@ async fn sync_skips_a_file_that_has_not_finished_downloading() {
             Some("file.bin".to_string()),
             Some(dir.to_string_lossy().to_string()),
             None,
+            None,
             Some(queue.clone()),
         )
         .await
@@ -429,6 +431,7 @@ async fn sync_refuses_a_one_time_queue_and_start_queue_refuses_a_periodic_queue(
             &server.url,
             Some("other.bin".to_string()),
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -559,6 +562,7 @@ async fn sync_tick_does_not_fight_a_one_time_drain() {
             &server.url,
             Some("drain.bin".to_string()),
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             Some(drain.id.clone()),
         )
@@ -835,6 +839,7 @@ async fn sync_skips_a_file_that_is_mid_download_and_leaves_it_byte_identical() {
             &server.url,
             Some("slow.bin".to_string()),
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             Some(queue.clone()),
         )

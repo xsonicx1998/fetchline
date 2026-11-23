@@ -321,6 +321,7 @@ async fn site_login_gated_download_succeeds_with_login_and_fails_without() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap_err();
@@ -341,6 +342,7 @@ async fn site_login_gated_download_succeeds_with_login_and_fails_without() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -367,6 +369,7 @@ async fn site_login_wrong_password_fails_and_is_not_sent_to_another_host() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap_err();
@@ -391,6 +394,7 @@ async fn site_login_wrong_password_fails_and_is_not_sent_to_another_host() {
             &server.url,
             None,
             Some(dir2.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -507,6 +511,7 @@ async fn dialup_hangup_arms_action_only_when_queue_has_no_action() {
             None,
             Some(dir.to_string_lossy().to_string()),
             None,
+            None,
             Some(queue.id.clone()),
         )
         .await
@@ -563,6 +568,7 @@ async fn dialup_hangup_loses_to_a_queue_action_and_needs_a_download() {
             None,
             Some(dir.to_string_lossy().to_string()),
             None,
+            None,
             Some(queue.id.clone()),
         )
         .await
@@ -590,6 +596,7 @@ async fn dialup_hangup_loses_to_a_queue_action_and_needs_a_download() {
             &failing.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             Some(queue2.id.clone()),
         )
@@ -682,6 +689,7 @@ async fn sound_events_fire_on_complete_and_failure_with_resolved_files() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -704,6 +712,7 @@ async fn sound_events_fire_on_complete_and_failure_with_resolved_files() {
             &server.url,
             Some("second.bin".to_string()),
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -730,6 +739,7 @@ async fn sound_queue_finished_fires_only_when_something_downloaded() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             Some(queue.id.clone()),
         )
@@ -768,6 +778,7 @@ async fn sound_disabled_event_records_nothing_and_playback_is_windows_only() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )

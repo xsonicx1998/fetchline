@@ -44,6 +44,7 @@ async fn complete_download(
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();

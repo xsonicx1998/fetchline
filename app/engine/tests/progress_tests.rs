@@ -73,6 +73,7 @@ async fn retry_countdown_appears_on_500_and_recovers() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -120,6 +121,7 @@ async fn retry_countdown_appears_when_connection_drops_mid_download() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -185,6 +187,7 @@ async fn retry_now_skips_the_backoff() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -231,6 +234,7 @@ async fn retry_now_errors_when_nothing_is_waiting() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -264,6 +268,7 @@ async fn cancel_during_retry_deletes_the_download() {
             Some(dir.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -295,6 +300,7 @@ async fn no_retry_state_while_downloading_normally() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
@@ -351,6 +357,7 @@ async fn open_folder_validation() {
             Some(downloads.to_string_lossy().to_string()),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -389,6 +396,7 @@ async fn last_progress_snapshot_matches_completion_event() {
             &server.url,
             None,
             Some(dir.to_string_lossy().to_string()),
+            None,
             None,
             None,
         )
