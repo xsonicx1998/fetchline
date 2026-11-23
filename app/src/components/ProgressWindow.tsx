@@ -141,11 +141,13 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
   const [shutdownCountdown, setShutdownCountdown] = useState<number | null>(null)
   const [shutdownBusy, setShutdownBusy] = useState(false)
   /** Completion bookkeeping: the previous polled status (the
-   *  completion actions fire only on a transition into
-   *  'complete' observed while this window is open — a
-   *  download that was already complete when the window opened
-   *  does not fire them), and whether this completion already
-   *  acted (so the 500 ms poll cannot fire it twice). */
+   *  shutdown / close-after actions fire only on a transition
+   *  into 'complete' observed while this window is open) and
+   *  whether this completion already acted (so the 500 ms poll
+   *  cannot fire it twice). The plain self-close (no option
+   *  checked) also fires for a FRESH completion seen at mount
+   *  (Round 76 (3)) — but never for a long-finished download
+   *  the user opened explicitly (Round 87.6). */
   const prevStatusRef = useRef<string | null>(null)
   const completionActedRef = useRef(false)
   /** Round 66 — the settings, mirrored so the completion
@@ -389,7 +391,17 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
    *  The shutdown / close-after options still need a flip: they
    *  were chosen for a run that already ended. The effect also
    *  re-runs when the settings load, so a complete status that
-   *  arrived before them still closes. */
+   *  arrived before them still closes.
+   *  Round 87.6 — the plain close is gated on a FRESH
+   *  completion (a flip, or finished within the last 30 s — the
+   *  same window the main window's completion effect uses): a
+   *  progress window the user opens EXPLICITLY for a
+   *  long-finished download (row menu, double-click, Enter)
+   *  must stay open — the old IS-complete rule closed it the
+   *  instant it mounted, so "Open progress window" looked dead
+   *  (the 87.5 retest, two attempts, no window appeared). A
+   *  just-finished download still closes, so the completion
+   *  dialog replaces it as in Round 76 (3). */
   useEffect(() => {
     const status = download?.status ?? null
     const prev = prevStatusRef.current
@@ -400,6 +412,9 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
     }
     if (completionActedRef.current) return
     const flipped = prev === 'downloading' || prev === 'paused'
+    const completedAt = download?.completed_at ? Date.parse(download.completed_at) : NaN
+    const fresh =
+      flipped || (!Number.isNaN(completedAt) && Date.now() - completedAt < 30_000)
     if (shutdownAfterRef.current && flipped) {
       completionActedRef.current = true
       setShutdownCountdown(30)
@@ -408,7 +423,7 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
       void exitApp().catch((e: unknown) =>
         setActionError(e instanceof Error ? e.message : String(e)),
       )
-    } else if (settingsRef.current?.show_download_complete_dialog) {
+    } else if (settingsRef.current?.show_download_complete_dialog && fresh) {
       completionActedRef.current = true
       void getCurrentWindow().close()
     }
@@ -925,7 +940,15 @@ export function ProgressWindow({ downloadId }: { downloadId: string }) {
         ) : null}
 
         {tab === 'options' ? (
-          <div className="text-sm">
+          // Round 87.6 — this content scrolls inside the window:
+          // at the default 660×480 the Speed Limiter + "When this
+          // download finishes" sections are taller than the tab
+          // area, and the container above is `overflow-hidden`
+          // with no scroll — the shutdown checkbox sat below the
+          // fold, unreachable (the 87.5 retest found NO shutdown
+          // option in the tab). The status tab is untouched: its
+          // parts table keeps its own internal scroll.
+          <div className="min-h-0 flex-1 overflow-y-auto text-sm">
             <p className="font-semibold">Speed Limiter</p>
             <p className="mt-1 text-text-muted">
               {download.speed_limit_kbps

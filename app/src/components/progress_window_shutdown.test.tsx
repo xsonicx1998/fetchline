@@ -195,3 +195,41 @@ describe('completion options on an already-finished download (Round 87.5)', () =
     expect(vi.mocked(api.shutdownComputer)).not.toHaveBeenCalled()
   })
 })
+
+describe('explicitly opening a finished download (Round 87.6, item 6)', () => {
+  test('a long-finished download stays open — the window does not close itself', async () => {
+    // The dialog is ON (the live case): the old IS-complete rule
+    // closed the window the instant it mounted, so "Open progress
+    // window" from the row menu looked dead (87.5 retest). The
+    // row finished days ago, so this is not a fresh completion.
+    vi.mocked(api.getSettings).mockResolvedValue({
+      show_download_complete_dialog: true,
+      speed_limit_kbps: null,
+    } as unknown as Settings)
+    render(<ProgressWindow downloadId="dl-1" />)
+    await waitFor(() => expect(screen.getByText('Download complete')).toBeTruthy(), {
+      timeout: 5000,
+    })
+    // Past the poll + settings load: the window must still be here.
+    await new Promise((r) => setTimeout(r, 1200))
+    expect(closeMock).not.toHaveBeenCalled()
+    expect(screen.getByText('Download complete')).toBeTruthy()
+  })
+
+  test('a just-finished download still closes so the completion dialog replaces it', async () => {
+    // Round 76 (3) preserved: a window opened for a download
+    // that finished within the last 30 s still closes itself —
+    // the completion dialog is opening for the same completion.
+    vi.mocked(api.getSettings).mockResolvedValue({
+      show_download_complete_dialog: true,
+      speed_limit_kbps: null,
+    } as unknown as Settings)
+    const freshRow: DownloadRow = {
+      ...row,
+      completed_at: new Date().toISOString(),
+    }
+    vi.mocked(api.listDownloads).mockResolvedValue([freshRow])
+    render(<ProgressWindow downloadId="dl-1" />)
+    await waitFor(() => expect(closeMock).toHaveBeenCalledTimes(1), { timeout: 5000 })
+  })
+})

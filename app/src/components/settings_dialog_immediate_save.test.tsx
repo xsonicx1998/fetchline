@@ -70,6 +70,7 @@ function baseSettings(): Settings {
     quota_enabled: false,
     quota_mb: null,
     quota_hours: null,
+    last_used_folder: null,
     antivirus_enabled: false,
     antivirus_command: null,
     antivirus_timeout_secs: 60,

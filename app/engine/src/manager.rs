@@ -1968,6 +1968,12 @@ impl DownloadManager {
         if current.trim() != chosen {
             let _ = self.store.update_category(category, Some(chosen), None);
         }
+        // Round 87.6 — the same pick is the Add URL dialog's next
+        // prefill, independent of any category: the category
+        // remember above only surfaces once a category is picked,
+        // and an empty dialog has none (the 87.5 E5 failure).
+        // Best-effort like the category write.
+        let _ = self.store.set_last_used_folder(chosen);
     }
 
     /// Round 84 — the shared tail of every add that starts from

@@ -4245,6 +4245,107 @@ async fn explicit_folder_is_remembered_on_the_category() {
     );
 }
 
+/// Round 87.6 (1)(2) — the 87.5 retest's malformed row: folder
+/// `...\ZipTest` + filename `slow a test.mp4` became
+/// `...\ZipTestslow a test.mp4` (the separator gone), which broke
+/// Open With (error 31 on the nonexistent path) and the row name.
+/// Both add tails join with `PathBuf::join`, so the row's
+/// save_path must be exactly folder + filename with the
+/// separator, the filename must carry no folder text — and the
+/// pick is remembered as the last-used folder too, not only on
+/// the category (the 87.5 fix), so a re-opened dialog with no
+/// category yet still prefills it.
+#[tokio::test]
+async fn explicit_folder_with_spaces_joins_with_separator_and_remembers_last_used() {
+    let server = MockServer::start(MockConfig::default());
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let mgr = DownloadManager::new(Arc::clone(&store), 4);
+    let chosen = dir.join("ZipTest");
+    let (id, _) = mgr
+        .add_download(
+            &server.url,
+            Some("slow a test.mp4".to_string()),
+            Some(chosen.to_string_lossy().to_string()),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let row = mgr.get_download(&id).unwrap().unwrap();
+    assert_eq!(row.filename, "slow a test.mp4");
+    assert_eq!(
+        row.save_path,
+        chosen.join("slow a test.mp4").to_string_lossy()
+    );
+    assert_eq!(row.category_id, "cat-video");
+    assert_eq!(
+        store
+            .get_category("cat-video")
+            .unwrap()
+            .unwrap()
+            .default_folder,
+        chosen.to_string_lossy()
+    );
+    assert_eq!(
+        store.get_settings().unwrap().last_used_folder,
+        Some(chosen.to_string_lossy().to_string())
+    );
+    // The value round-trips through a full settings save, and a
+    // payload from an older UI (no `last_used_folder` key) still
+    // deserialises to None instead of failing the save.
+    let mut s = store.get_settings().unwrap();
+    s.last_used_folder = Some(dir.join("elsewhere").to_string_lossy().to_string());
+    let back = store.update_settings(&s).unwrap();
+    assert_eq!(back.last_used_folder, s.last_used_folder);
+    let mut v = serde_json::to_value(store.get_settings().unwrap()).unwrap();
+    v.as_object_mut().unwrap().remove("last_used_folder");
+    let old: fetchline_engine::Settings = serde_json::from_value(v).unwrap();
+    assert_eq!(old.last_used_folder, None);
+}
+
+/// Round 87.6 (3) — Music and Programs still pointed at
+/// `C:\Users\you\Downloads\Video` live: the 87.5 placeholder-text
+/// fix never repaired the STORED values (`INSERT OR IGNORE`
+/// never overwrites them). Opening a database whose builtin
+/// categories hold that bogus path resets them to '' (the seed
+/// value — fall back to the global default, so Settings shows
+/// the "Leave empty…" text); a real folder the user chose is
+/// left alone.
+#[tokio::test]
+async fn builtin_category_placeholder_folder_is_repaired_on_open() {
+    let dir = tmpdir();
+    let db = dir.join("app.db");
+    {
+        let store = Store::open(&db).unwrap();
+        store
+            .update_category("cat-music", Some("C:\\Users\\you\\Downloads\\Video"), None)
+            .unwrap();
+        let real = dir.join("Music");
+        store
+            .update_category("cat-video", Some(&real.to_string_lossy()), None)
+            .unwrap();
+    }
+    // Reopen: migrate() runs and repairs the bogus row only.
+    let store = Store::open(&db).unwrap();
+    assert_eq!(
+        store
+            .get_category("cat-music")
+            .unwrap()
+            .unwrap()
+            .default_folder,
+        ""
+    );
+    assert_eq!(
+        store
+            .get_category("cat-video")
+            .unwrap()
+            .unwrap()
+            .default_folder,
+        dir.join("Music").to_string_lossy()
+    );
+}
+
 /// BUG-011: `excluded_sites` blocks downloads from the listed hosts
 /// (exact host and subdomains), before any network request is made.
 #[tokio::test]

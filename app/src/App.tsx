@@ -1373,6 +1373,7 @@ export default function App() {
         categories={categories}
         defaultAction={settings?.default_action ?? 'start_now'}
         defaultFolder={settings?.default_download_folder ?? ''}
+        lastUsedFolder={settings?.last_used_folder ?? ''}
         autoFileTypes={settings?.file_types_auto ?? []}
         initialUrl={clipboardCapture?.url ?? pickedVideoUrl}
         captureMode={clipboardCapture !== null}

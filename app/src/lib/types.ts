@@ -589,6 +589,12 @@ export interface Settings {
   quota_enabled: boolean
   quota_mb: number | null
   quota_hours: number | null
+  /** Round 87.6 — the last folder the user picked outright (the
+   *  "..." picker or a folder typed into Save As), across every
+   *  add path. Null means no folder has been picked yet. The Add
+   *  URL dialog prefills from it when no category is picked yet.
+   *  No Settings UI — it is a recent value, not a preference. */
+  last_used_folder: string | null
 }
 
 /** The download quota's live state (S12), as the status bar and

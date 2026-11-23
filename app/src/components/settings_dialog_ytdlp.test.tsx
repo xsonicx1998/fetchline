@@ -78,6 +78,7 @@ const settings = {
   quota_enabled: false,
   quota_mb: null,
   quota_hours: null,
+  last_used_folder: null,
   antivirus_timeout_secs: 60,
   dialup_redial_attempts: 0,
   default_action: 'start_now',

@@ -71,6 +71,7 @@ function renderDialog(props: {
   autoFileTypes?: string[]
   captureTitle?: string | null
   captureMode?: boolean
+  lastUsedFolder?: string
 }) {
   return render(
     <AddDownloadDialog
@@ -80,6 +81,7 @@ function renderDialog(props: {
       autoFileTypes={props.autoFileTypes ?? []}
       captureMode={props.captureMode ?? false}
       captureTitle={props.captureTitle ?? null}
+      lastUsedFolder={props.lastUsedFolder ?? ''}
       onClose={() => {}}
       onAdded={() => {}}
       onLateError={() => {}}
@@ -237,5 +239,76 @@ describe('remembering a picked folder (Round 87.5, E5)', () => {
     )
     expect(vi.mocked(api.updateCategory)).not.toHaveBeenCalled()
     expect(vi.mocked(api.setSettingField)).not.toHaveBeenCalled()
+  })
+})
+
+describe('last-used folder prefill + separator-loss guard (Round 87.6, items 1–2)', () => {
+  const ZIPTEST = 'C:\\Users\\Administrator\\Downloads\\ZipTest'
+
+  test('an empty dialog shows the last-used folder, not the global default', async () => {
+    renderDialog({ lastUsedFolder: ZIPTEST })
+    // The read-only folder field under Save As shows the picked
+    // folder at once — no URL pasted, no category picked yet.
+    // (Save As itself shows the same `folder\` while the filename
+    // is empty, so the folder field is read by its label.)
+    await waitFor(
+      () =>
+        expect(screen.getByLabelText('Save folder') as HTMLInputElement).toBeTruthy(),
+      { timeout: 5000 },
+    )
+    expect((screen.getByLabelText('Save folder') as HTMLInputElement).value).toBe(
+      `${ZIPTEST}\\`,
+    )
+    expect(categorySelect().value).toBe('')
+  })
+
+  test('the last-used folder survives a category pick whose own folder is empty', async () => {
+    renderDialog({
+      initialUrl: 'https://example.com/movie.mp4',
+      lastUsedFolder: ZIPTEST,
+    })
+    await waitFor(() => expect(categorySelect().value).toBe('cat-video'), { timeout: 5000 })
+    // Video's own folder is empty in BUILTINS, so the prefilled
+    // folder stands — Save As shows the full picked path.
+    await waitFor(
+      () =>
+        expect((screen.getByLabelText('Save As') as HTMLInputElement).value).toBe(
+          `${ZIPTEST}\\movie.mp4`,
+        ),
+      { timeout: 5000 },
+    )
+  })
+
+  test('deleting the separator in Save As keeps the folder and the filename apart', async () => {
+    const withFolder: CategoryRow[] = BUILTINS.map((c) =>
+      c.id === 'cat-video' ? { ...c, default_folder: ZIPTEST } : c,
+    )
+    renderDialog({ initialUrl: 'https://example.com/movie.mp4', categories: withFolder })
+    await waitFor(() => expect(categorySelect().value).toBe('cat-video'), { timeout: 5000 })
+    const saveAs = screen.getByLabelText('Save As') as HTMLInputElement
+    await waitFor(() => expect(saveAs.value).toBe(`${ZIPTEST}\\movie.mp4`), { timeout: 5000 })
+
+    // A rename edit that deletes the `\` between the folder and
+    // the filename: the 87.5 retest's malformed row.
+    fireEvent.change(saveAs, {
+      target: { value: 'C:\\Users\\Administrator\\Downloads\\ZipTestslow a test.mp4' },
+    })
+    expect(saveAs.value).toBe(`${ZIPTEST}\\slow a test.mp4`)
+
+    fireEvent.click(screen.getByText('Start Download'))
+
+    await waitFor(
+      () => expect(vi.mocked(api.updateCategory)).toHaveBeenCalledTimes(1),
+      { timeout: 5000 },
+    )
+    // The remember writes the real folder, not its parent — and
+    // the download goes to the real folder with the real name.
+    expect(vi.mocked(api.updateCategory)).toHaveBeenCalledWith({
+      id: 'cat-video',
+      folder: ZIPTEST,
+    })
+    expect(vi.mocked(api.addDownload)).toHaveBeenCalledWith(
+      expect.objectContaining({ folder: ZIPTEST, filename: 'slow a test.mp4' }),
+    )
   })
 })

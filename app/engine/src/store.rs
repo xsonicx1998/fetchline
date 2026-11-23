@@ -205,6 +205,20 @@ pub struct Settings {
     /// no Settings UI in v1.
     #[serde(default)]
     pub ytdlp_extractor_args: Option<String>,
+    /// Round 87.6 — the last folder the user picked outright (the
+    /// "..." picker or a folder typed into Save As), across every
+    /// add path. The Add URL dialog prefills from it when no
+    /// category is picked yet, so a re-opened dialog shows the
+    /// picked folder instead of the global default (the 87.5 E5
+    /// failure: the remember lived on the category only, and an
+    /// empty dialog has no category). `None` means no folder has
+    /// been picked yet. No Settings UI — it is a recent value,
+    /// not a preference; the global default folder stays
+    /// user-controlled. `#[serde(default)]` so a settings payload
+    /// from an older UI (which never sends the field) still
+    /// deserialises instead of failing the whole save.
+    #[serde(default)]
+    pub last_used_folder: Option<String>,
 }
 
 /// Round 73 — default for `Settings::tail_zero_progress_cap_minutes`.
@@ -260,6 +274,7 @@ impl Default for Settings {
             quota_hours: None,
             platform_downloads_enabled: true,
             ytdlp_extractor_args: None,
+            last_used_folder: None,
         }
     }
 }
@@ -990,6 +1005,11 @@ impl Store {
                 "INTEGER NOT NULL DEFAULT 1",
             ),
             ("settings", "ytdlp_extractor_args", "TEXT"),
+            // Round 87.6 — the last folder the user picked
+            // outright (see `Settings::last_used_folder`). Fresh
+            // databases get it from schema.sql; older databases
+            // gain it here.
+            ("settings", "last_used_folder", "TEXT"),
             ("settings", "dialup_connection_name", "TEXT"),
             ("settings", "dialup_auto_dial", "INTEGER NOT NULL DEFAULT 0"),
             (
@@ -1141,6 +1161,24 @@ impl Store {
         conn.execute(
             "INSERT OR IGNORE INTO quota_state (id, window_start_unix, bytes_used) \
              VALUES (1, NULL, 0)",
+            [],
+        )?;
+        // Round 87.6 — repair builtin category folders that still
+        // hold the old fake placeholder `C:\Users\you\...`: the
+        // 87.5 retest found Music and Programs pointing at
+        // `C:\Users\you\Downloads\Video` (a user that does not
+        // exist). The placeholder TEXT was fixed in 87.5, but the
+        // STORED values were never repaired — `INSERT OR IGNORE`
+        // never overwrites them, and the seed only writes empty
+        // folders. Reset only that known-bogus pattern to ''
+        // (empty = fall back to the global default, the seed
+        // value, so Settings shows the "Leave empty…" text
+        // instead of the bogus path); a real folder the user
+        // chose is never touched. Idempotent: after the first run
+        // no row matches any more.
+        conn.execute(
+            "UPDATE categories SET default_folder = '' \
+             WHERE is_builtin = 1 AND lower(default_folder) LIKE '%\\users\\you\\%'",
             [],
         )?;
         Ok(())
@@ -1764,7 +1802,7 @@ impl Store {
              antivirus_enabled, antivirus_timeout_secs, show_progress_window, \
              clipboard_monitoring, show_download_complete_dialog, sounds_enabled, \
              tail_zero_progress_cap_minutes, platform_downloads_enabled, \
-             ytdlp_extractor_args \
+             ytdlp_extractor_args, last_used_folder \
              FROM settings WHERE id = 1",
             [],
             |r| {
@@ -1823,6 +1861,10 @@ impl Store {
                         .unwrap_or(true),
                     ytdlp_extractor_args: r
                         .get::<_, Option<String>>(34)?
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty()),
+                    last_used_folder: r
+                        .get::<_, Option<String>>(35)?
                         .map(|s| s.trim().to_string())
                         .filter(|s| !s.is_empty()),
                 })
@@ -1972,7 +2014,7 @@ impl Store {
              show_progress_window = ?29, clipboard_monitoring = ?30, \
              show_download_complete_dialog = ?31, sounds_enabled = ?32, \
              tail_zero_progress_cap_minutes = ?33, platform_downloads_enabled = ?34, \
-             ytdlp_extractor_args = ?35, \
+             ytdlp_extractor_args = ?35, last_used_folder = ?36, \
              updated_at = datetime('now') WHERE id = 1",
             params![
                 s.default_download_folder.trim(),
@@ -2016,10 +2058,38 @@ impl Store {
                     .as_deref()
                     .map(str::trim)
                     .filter(|v| !v.is_empty()),
+                s.last_used_folder
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty()),
             ],
         )?;
         drop(conn);
         self.get_settings()
+    }
+
+    /// Round 87.6 — record the last folder the user picked
+    /// outright, without touching any other setting. The
+    /// manager's `remember_explicit_folder` calls this on every
+    /// add with an explicit folder, so the value tracks the real
+    /// last pick across the manual dialog, extension captures and
+    /// batch adds alike. An empty folder changes nothing. A
+    /// full-row `update_settings` from an older UI (which never
+    /// sends the field) would wipe it back to NULL — that is why
+    /// the write is a targeted UPDATE, and why the current UI
+    /// always round-trips the field (see `Settings` in
+    /// `app/src/lib/types.ts`).
+    pub fn set_last_used_folder(&self, folder: &str) -> Result<()> {
+        let folder = folder.trim();
+        if folder.is_empty() {
+            return Ok(());
+        }
+        let conn = self.lock_conn();
+        conn.execute(
+            "UPDATE settings SET last_used_folder = ?1, updated_at = datetime('now') WHERE id = 1",
+            params![folder],
+        )?;
+        Ok(())
     }
 
     /// Record that an update check ran at `at_iso` (UTC ISO-8601),

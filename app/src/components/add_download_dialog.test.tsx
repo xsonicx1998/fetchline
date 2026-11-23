@@ -13,7 +13,7 @@
 
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { AddDownloadDialog, bestQualityRow, isHttpUrl, isVideoPageUrl, normalizeUrlScheme } from './AddDownloadDialog'
+import { AddDownloadDialog, applySaveAsEdit, bestQualityRow, isHttpUrl, isVideoPageUrl, normalizeUrlScheme } from './AddDownloadDialog'
 import * as api from '../lib/api'
 import type { ProbeInfo, QualityRow, YtdlpResolveResult } from '../lib/types'
 
@@ -546,5 +546,49 @@ describe('resolved capture probe skip', () => {
     expect(vi.mocked(api.probeUrl)).not.toHaveBeenCalled()
     expect(vi.mocked(api.ytdlpResolve)).not.toHaveBeenCalled()
     expect(screen.queryByText(/403/)).toBeNull()
+  })
+})
+
+describe('Save As edits against the known folder (Round 87.6, item 1)', () => {
+  const FOLDER = 'C:\\Users\\Administrator\\Downloads\\ZipTest'
+
+  test('a deleted separator cannot fold the folder name into the filename', () => {
+    // The 87.5 retest's malformed row: the `\` after ZipTest was
+    // deleted during a rename edit, and the plain last-separator
+    // split read folder `...\Downloads` + filename
+    // `ZipTestslow a test.mp4` — which broke Open With (error 31)
+    // and the row name.
+    expect(
+      applySaveAsEdit(FOLDER, 'C:\\Users\\Administrator\\Downloads\\ZipTestslow a test.mp4'),
+    ).toEqual({ folder: FOLDER, filename: 'slow a test.mp4' })
+  })
+
+  test('a normal full path still splits on the last separator', () => {
+    expect(
+      applySaveAsEdit(FOLDER, 'C:\\Users\\Administrator\\Downloads\\ZipTest\\slow a test.mp4'),
+    ).toEqual({ folder: FOLDER, filename: 'slow a test.mp4' })
+  })
+
+  test('renaming the folder itself still works', () => {
+    expect(
+      applySaveAsEdit(FOLDER, 'C:\\Users\\Administrator\\Downloads\\ZipTest2\\slow a test.mp4'),
+    ).toEqual({
+      folder: 'C:\\Users\\Administrator\\Downloads\\ZipTest2',
+      filename: 'slow a test.mp4',
+    })
+  })
+
+  test('a bare name is a rename — the folder stays', () => {
+    expect(applySaveAsEdit(FOLDER, 'new name.mp4')).toEqual({
+      folder: '',
+      filename: 'new name.mp4',
+    })
+  })
+
+  test('with no known folder, a full path splits as before', () => {
+    expect(applySaveAsEdit('', 'C:\\Downloads\\file.zip')).toEqual({
+      folder: 'C:\\Downloads',
+      filename: 'file.zip',
+    })
   })
 })

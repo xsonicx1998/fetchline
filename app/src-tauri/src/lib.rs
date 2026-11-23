@@ -896,13 +896,23 @@ fn spawn_show_fallback(window: &tauri::WebviewWindow) {
 /// independent dialogs (capture Add URL, complete, error), pop
 /// it IN FRONT over whatever window the user has open — even
 /// when the main window is hidden/minimized to tray: show +
-/// focus + always-on-top for ~1 s, then clear the topmost flag
+/// focus + always-on-top for ~5 s, then clear the topmost flag
 /// so it behaves like a normal window afterwards. The
 /// always-on-top is the part that works even when Windows
 /// refuses the foreground steal from a background process
-/// (focus alone is best-effort there); the 1 s clear keeps the
-/// dialog from staying on top forever. Main and progress
-/// windows just show — they never take the topmost flag.
+/// (focus alone is best-effort there); the 5 s clear keeps the
+/// dialog from staying on top forever.
+/// Round 87.6 — the hold was 1 s, and a cold first paint after
+/// an app restart can take longer than that: the flag was
+/// cleared before the dialog painted, and it landed BEHIND the
+/// maximized main window (invisible until the main window was
+/// minimized — the 87.5 retest). 5 s covers a cold paint. The
+/// 3 s show fallback re-raises a window whose frontend never
+/// signalled ready, so that path stays topmost until ~8 s
+/// after it was built. Main and progress windows
+/// just show here — they never take the topmost flag (the tray
+/// restore in `restore_main_window` raises the main window
+/// itself, briefly, for the same foreground-steal reason).
 fn show_window_ready(window: &tauri::WebviewWindow) {
     let _ = window.show();
     let label = window.label();
@@ -914,7 +924,7 @@ fn show_window_ready(window: &tauri::WebviewWindow) {
         let _ = window.set_always_on_top(true);
         let w = window.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_secs(1));
+            std::thread::sleep(Duration::from_secs(5));
             let _ = w.set_always_on_top(false);
         });
     }
@@ -3596,6 +3606,22 @@ fn restore_main_window(app: &AppHandle) {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
+        // Round 87.6 — `set_focus` alone is best-effort when the
+        // app is a background process (every window hidden to the
+        // tray): Windows refuses the foreground steal, so a
+        // single-click restore showed the window BEHIND the
+        // foreground app and looked like nothing happened — the
+        // double-click's second event then focused it (the 87.5
+        // retest: double-click restored, single-click did not).
+        // Raise it with always-on-top, like `show_window_ready`
+        // does for the dialogs, and clear the flag after 1 s so
+        // it behaves like a normal window afterwards.
+        let _ = window.set_always_on_top(true);
+        let w = window.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(1));
+            let _ = w.set_always_on_top(false);
+        });
     }
 }
 

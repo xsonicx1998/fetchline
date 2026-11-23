@@ -28,6 +28,14 @@ interface AddDownloadDialogProps {
    *  configured — the placeholder then says so, and the engine
    *  falls back to the OS Downloads folder. */
   defaultFolder?: string
+  /** Round 87.6 — the last folder the user picked outright (the
+   *  "..." picker or a folder typed into Save As), across every
+   *  add path. The dialog prefills from it when no category is
+   *  picked yet, so a re-opened dialog shows the picked folder
+   *  instead of the global default (the 87.5 E5 failure: the
+   *  remember lived on the category only, and an empty dialog
+   *  has no category). Empty when nothing has been picked yet. */
+  lastUsedFolder?: string
   /** Round 87.5 (E4) — the Settings `file_types_auto`
    *  allow-list, for the category auto-pick: the engine's
    *  `category_for_extension_filtered` restricts auto-assign to
@@ -121,6 +129,34 @@ function joinSaveAs(folder: string, filename: string): string {
   return filename ? `${f}\\${filename}` : `${f}\\`
 }
 
+/** Round 87.6 — apply a Save As edit against the folder the
+ *  dialog already holds. Splitting on the last separator is
+ *  lossy when the edit deletes exactly that separator:
+ *  `C:\...\ZipTest\slow a test.mp4` with the `\` after ZipTest
+ *  deleted reads as folder `C:\...\Downloads` + filename
+ *  `ZipTestslow a test.mp4` — the 87.5 retest's malformed row
+ *  (and the Open With failure on the nonexistent path). When the
+ *  new value still starts with the known folder and the
+ *  remainder has no separator at all, the user edited the
+ *  filename tail, not the folder: keep the folder and take the
+ *  remainder as the name. Any other edit (a folder rename, a
+ *  pasted full path, a value that no longer starts with the
+ *  folder) splits on the last separator as before. Exported so
+ *  the rule is locked in by tests. */
+export function applySaveAsEdit(
+  prevFolder: string,
+  value: string,
+): { folder: string; filename: string } {
+  const prefix = prevFolder.replace(/[\\/]+$/, '')
+  if (prefix && value.startsWith(prefix)) {
+    const rest = value.slice(prefix.length)
+    if (rest && !rest.includes('\\') && !rest.includes('/')) {
+      return { folder: prevFolder, filename: rest }
+    }
+  }
+  return splitSaveAs(value)
+}
+
 /** Round 79 — a pasted link that is a platform video page
  *  (YouTube / TikTok / Instagram / Facebook): the dialog
  *  resolves it with yt-dlp instead of probing the page itself
@@ -211,6 +247,7 @@ export function AddDownloadDialog({
   categories,
   defaultAction = 'start_now',
   defaultFolder = '',
+  lastUsedFolder = '',
   autoFileTypes = [],
   initialUrl = '',
   onClose,
@@ -292,7 +329,17 @@ export function AddDownloadDialog({
       // video's sanitized title) is already the right name, so
       // prefill it at once instead of waiting for the probe.
       setFilename(captureTitle ?? '')
-      setFolder('')
+      // Round 87.6 — prefill the last folder the user picked
+      // (not blank): a re-opened dialog shows the picked folder
+      // at once, instead of the global default while no category
+      // is picked yet. The category autofill below still wins
+      // once a category is known. In the standalone window the
+      // settings can arrive after mount, so the autofill effect
+      // re-applies this when `lastUsedFolder` lands.
+      // `lastUsedFolder` is deliberately NOT in this effect's
+      // deps: a late arrival must not re-run the whole open
+      // reset (it would wipe a URL the user already typed).
+      setFolder(lastUsedFolder?.trim() ?? '')
       setCategory('')
       userPickedCategory.current = false
       setCap(0)
@@ -483,15 +530,21 @@ export function AddDownloadDialog({
   // folder with that category's default folder (the engine
   // resolves the same way when no folder is given), unless the
   // user already typed a folder of their own.
+  // Round 87.6 — with no category yet (an empty dialog, or a
+  // URL with no recognizable extension), fill the folder with
+  // the last folder the user picked instead of leaving it blank
+  // (blank showed the global default — the 87.5 E5 failure).
+  // The effect also re-runs when `lastUsedFolder` lands (the
+  // standalone window's settings can arrive after mount).
   useEffect(() => {
     if (folderEdited.current) return
     const cat = categories.find((c) => c.id === category)
     if (cat && cat.default_folder.trim()) {
       setFolder(cat.default_folder.trim())
     } else if (!cat) {
-      setFolder('')
+      setFolder(lastUsedFolder?.trim() ?? '')
     }
-  }, [category, categories])
+  }, [category, categories, lastUsedFolder])
 
   // Round 87.5 (E4) — auto-pick the category from the file
   // type: when the filename (or the URL's last segment) is
@@ -522,15 +575,20 @@ export function AddDownloadDialog({
   const bestRow = bestQualityRow(resolved)
 
   // Round 67 — the folder the file will land in: the typed one,
-  // else the global default, else the OS Downloads folder (what
-  // the engine falls back to). Shown read-only under the
-  // remember-path row, with a trailing separator.
-  const effectiveFolder = folder.trim() || defaultFolder?.trim() || 'Downloads'
+  // else the last folder the user picked, else the global
+  // default, else the OS Downloads folder (what the engine falls
+  // back to). Shown read-only under the remember-path row, with
+  // a trailing separator.
+  const effectiveFolder =
+    folder.trim() || lastUsedFolder?.trim() || defaultFolder?.trim() || 'Downloads'
   const folderDisplay = `${effectiveFolder.replace(/[\\/]+$/, '')}\\`
 
   // Round 67 — the Save As field shows the full path; editing it
   // splits on the last separator. A bare name is a rename — the
   // folder stays (the folder field below still shows it).
+  // Round 87.6 — the edit goes through `applySaveAsEdit`, so
+  // deleting the separator between the folder and the filename
+  // cannot silently fold the folder's name into the filename.
   const saveAsValue = joinSaveAs(folder, filename)
   const onSaveAsChange = (value: string) => {
     if (value === '') {
@@ -539,7 +597,7 @@ export function AddDownloadDialog({
       folderEdited.current = true
       return
     }
-    const { folder: f, filename: n } = splitSaveAs(value)
+    const { folder: f, filename: n } = applySaveAsEdit(folder, value)
     if (f) {
       setFolder(f)
       folderEdited.current = true

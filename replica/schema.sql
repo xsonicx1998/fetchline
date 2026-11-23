@@ -293,6 +293,10 @@ CREATE TABLE IF NOT EXISTS settings (
   -- Settings UI in v1.
   platform_downloads_enabled INTEGER NOT NULL DEFAULT 1,
   ytdlp_extractor_args TEXT,
+  -- Round 87.6 — the last folder the user picked outright
+  -- (NULL = none picked yet); the Add URL dialog prefills from
+  -- it when no category is picked yet.
+  last_used_folder TEXT,
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
