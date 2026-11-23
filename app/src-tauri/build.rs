@@ -1,4 +1,23 @@
+#[path = "host_sidecar.rs"]
+mod host_sidecar;
+
 fn main() {
+    // Round 88.2 — sync the host sidecar BEFORE the bundle
+    // step: `tauri build` bundles `binaries/fetchline-host` but
+    // never rebuilds the host crate, so a `cargo build
+    // --release -p fetchline-host` that is never copied here
+    // silently ships a STALE host. That is what broke the relay
+    // live in Rounds 88/88.1 (both VPS builds rebuilt the host
+    // but never copied it, so the installer bundled a pre-88
+    // host with no `RelayCapture` — every relay_capture failed
+    // its serde decode with no trace in either log). The copy
+    // is mtime-guarded, warns loudly when the host was never
+    // built, and never fails the build on its own.
+    if let Ok(target) = std::env::var("TARGET") {
+        let manifest_dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+        let outcome = host_sidecar::sync_host_sidecar(&manifest_dir, &target);
+        println!("cargo:warning={}", host_sidecar::outcome_line(&outcome));
+    }
     tauri_build::build();
     // Round 87.5 (item 11) — build identity, baked at build
     // time so startup.log can name the exact binary under test

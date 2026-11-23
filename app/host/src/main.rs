@@ -436,9 +436,24 @@ async fn main() {
     let db_path = resolve_db_path(parsed.db_path);
     // Round 70 — the host log lives next to the database.
     let log_path = db_path.with_file_name("host.log");
+    // Round 88.2 — host identity on the first line, so host.log
+    // proves WHICH host the browser spawned. The relay broke
+    // live in Rounds 88/88.1 with zero relay lines in this log
+    // and no way to tell the installed host was a stale pre-88
+    // build (rebuilt but never copied to the sidecar slot, so
+    // the installer bundled it). If this line's head is old or
+    // missing, the host is stale — rebuild + recopy +
+    // reinstall before trusting any retest. The env vars are
+    // baked by build.rs (git head + UTC time, "unknown" when
+    // this is not a checkout).
     log_line(
         &log_path,
-        &format!("fetchline-host: started (db {})", db_path.display()),
+        &format!(
+            "fetchline-host: started (head={} built={} db {})",
+            env!("FETCHLINE_HOST_BUILD_HEAD"),
+            env!("FETCHLINE_HOST_BUILD_TIME_UTC"),
+            db_path.display()
+        ),
     );
     // Round 78 — sweep stale yt-dlp cookie temp files left by a
     // crashed host (the cookie file is deleted on drop in the

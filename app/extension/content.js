@@ -864,26 +864,45 @@
   // quality pick (sendVariant): the dropdown closes on pick,
   // and a failure is re-rendered in the dropdown so it stays
   // visible instead of vanishing with the toast.
+  // Round 88.2 — a click send can throw SYNCHRONOUSLY when
+  // this page's extension context was invalidated (page left
+  // open across an extension reload — the normal VPS retest
+  // flow): the throw used to escape the click handler, leaving
+  // the row disabled with "Sending…" and the dropdown closed,
+  // with nothing on screen at all. A failed send must render
+  // its error in the dropdown instead, exactly like a failed
+  // reply, so a dead click is always visible.
   function sendRelayItem(video, item, row, label) {
     closeDropdown();
     const originalLabel = label.textContent;
     row.disabled = true;
     label.textContent = "Sending…";
-    chrome.runtime.sendMessage(
-      { type: "relay_send_buffered", url: item.url || item.finalUrl },
-      (reply) => {
-        if (reply && reply.ok !== false) {
-          showToast("Sent to Sonic Manager — it will appear in the download list.");
-        } else {
-          const error =
-            reply && reply.error ? reply.error : "the desktop app did not answer";
-          showToast(`Sonic Manager couldn't take this video: ${error}`);
-          renderResolveError(video, `Sonic Manager couldn't take this video: ${error}`);
-        }
-        row.disabled = false;
-        label.textContent = originalLabel;
-      },
-    );
+    const onFailure = (error) => {
+      showToast(`Sonic Manager couldn't take this video: ${error}`);
+      renderResolveError(video, `Sonic Manager couldn't take this video: ${error}`);
+      row.disabled = false;
+      label.textContent = originalLabel;
+    };
+    try {
+      chrome.runtime.sendMessage(
+        { type: "relay_send_buffered", url: item.url || item.finalUrl },
+        (reply) => {
+          if (reply && reply.ok !== false) {
+            showToast("Sent to Sonic Manager — it will appear in the download list.");
+            row.disabled = false;
+            label.textContent = originalLabel;
+          } else {
+            onFailure(reply && reply.error ? reply.error : "the desktop app did not answer");
+          }
+        },
+      );
+    } catch (e) {
+      onFailure(
+        e && e.message
+          ? e.message
+          : "the extension was reloaded — refresh this page and try again",
+      );
+    }
   }
 
   // -- Round 78 (yt-dlp) resolve flow ---------------------------------
@@ -1426,26 +1445,44 @@
     // the right video.
     const message = { type: "video_found", page_url: pageUrlForResolve(video), variants: [variant] };
     if (cookies !== undefined) message.cookies = cookies;
-    chrome.runtime.sendMessage(
-      message,
-      (reply) => {
-        if (reply && reply.ok !== false) {
-          showToast("Sent to Sonic Manager — it will appear in the download list.");
-        } else {
-          // Round 81 — a failed pick must not fail silently:
-          // the toast hides after 2.6 s and the Round 81
-          // reproduction saw nothing on screen at all, so the
-          // error is also re-rendered in the dropdown, where it
-          // stays until the user closes it or retries.
-          const error =
-            reply && reply.error ? reply.error : "the desktop app did not answer";
-          showToast(`Sonic Manager couldn't take this video: ${error}`);
-          renderResolveError(video, `Sonic Manager couldn't take this video: ${error}`);
-        }
-        row.disabled = false;
-        label.textContent = originalLabel;
-      },
-    );
+    // Round 88.2 — same synchronous-throw guard as
+    // sendRelayItem: a click send from a page whose extension
+    // context was invalidated (left open across an extension
+    // reload) throws out of chrome.runtime.sendMessage, and the
+    // throw used to escape the click handler with the dropdown
+    // closed and nothing on screen. Render the failure in the
+    // dropdown instead, exactly like a failed reply.
+    const onPickFailure = (error) => {
+      showToast(`Sonic Manager couldn't take this video: ${error}`);
+      renderResolveError(video, `Sonic Manager couldn't take this video: ${error}`);
+      row.disabled = false;
+      label.textContent = originalLabel;
+    };
+    try {
+      chrome.runtime.sendMessage(
+        message,
+        (reply) => {
+          if (reply && reply.ok !== false) {
+            showToast("Sent to Sonic Manager — it will appear in the download list.");
+            row.disabled = false;
+            label.textContent = originalLabel;
+          } else {
+            // Round 81 — a failed pick must not fail silently:
+            // the toast hides after 2.6 s and the Round 81
+            // reproduction saw nothing on screen at all, so the
+            // error is also re-rendered in the dropdown, where it
+            // stays until the user closes it or retries.
+            onPickFailure(reply && reply.error ? reply.error : "the desktop app did not answer");
+          }
+        },
+      );
+    } catch (e) {
+      onPickFailure(
+        e && e.message
+          ? e.message
+          : "the extension was reloaded — refresh this page and try again",
+      );
+    }
   }
 
   // Round 83 — the video that is actually visible and
