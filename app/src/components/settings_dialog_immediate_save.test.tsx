@@ -299,3 +299,30 @@ describe('immediate settings writes (Round 87.5)', () => {
     expect(screen.getByLabelText('Video')).toBeTruthy()
   })
 })
+
+describe('clipboard checkbox placement (Round 87.8)', () => {
+  test('the clipboard checkbox sits right under "Catch downloads from the browser"', async () => {
+    await openGeneralTab()
+    const clipboard = screen.getByLabelText(
+      'Watch the clipboard for download links',
+    ) as HTMLInputElement
+    expect(clipboard.checked).toBe(true)
+
+    // Round 87.8 — the checkbox was 7th down a long General
+    // tab, below the fold, and two VPS retests missed it. It
+    // now sits directly under the browser-catch section: the
+    // next checkbox label after it in document order is the
+    // clipboard one, with no other checkbox label between.
+    const checkboxLabels = Array.from(document.querySelectorAll('label')).filter((label) =>
+      label.querySelector('input[type="checkbox"]'),
+    )
+    const catchIdx = checkboxLabels.findIndex((label) =>
+      label.textContent?.includes('Catch downloads from the browser'),
+    )
+    const clipboardIdx = checkboxLabels.findIndex((label) =>
+      label.textContent?.includes('Watch the clipboard for download links'),
+    )
+    expect(catchIdx).toBeGreaterThanOrEqual(0)
+    expect(clipboardIdx).toBe(catchIdx + 1)
+  })
+})

@@ -738,6 +738,23 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                 Takes effect once the browser extension is installed. When it is off, the
                 extension catches nothing and drained links are rejected.
               </p>
+              {/* Round 87.8 — moved up from 7th in the tab: two VPS
+               *  retests missed this checkbox below the fold. Pure
+               *  reorder, no logic change. */}
+              <label className="flex items-center gap-2 text-base">
+                <input
+                  type="checkbox"
+                  checked={settings.clipboard_monitoring}
+                  onChange={(e) => void saveField('clipboard_monitoring', e.target.checked)}
+                  className="h-4 w-4 accent-accent"
+                />
+                Watch the clipboard for download links
+              </label>
+              <p className={hintCls}>
+                On (the default), copying a download link shows a small &ldquo;Download this
+                link?&rdquo; offer. One click adds it, dismiss ignores it — nothing is ever
+                downloaded without you, and a dismissed link is never offered again.
+              </p>
               <label className="flex items-center gap-2 text-base">
                 <input
                   type="checkbox"
@@ -802,20 +819,6 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                 On (the default), a link the browser hands over starts downloading as soon as
                 Sonic Manager picks it up. Off leaves it queued in the download list, to start by
                 hand. Only applies while catching downloads from the browser is on.
-              </p>
-              <label className="flex items-center gap-2 text-base">
-                <input
-                  type="checkbox"
-                  checked={settings.clipboard_monitoring}
-                  onChange={(e) => void saveField('clipboard_monitoring', e.target.checked)}
-                  className="h-4 w-4 accent-accent"
-                />
-                Watch the clipboard for download links
-              </label>
-              <p className={hintCls}>
-                On (the default), copying a download link shows a small &ldquo;Download this
-                link?&rdquo; offer. One click adds it, dismiss ignores it — nothing is ever
-                downloaded without you, and a dismissed link is never offered again.
               </p>
               <label className="flex items-center gap-2 text-base">
                 <input

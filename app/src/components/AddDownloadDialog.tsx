@@ -1013,6 +1013,24 @@ export function AddDownloadDialog({
               ? 'flex min-h-0 flex-1 flex-col gap-[11px] overflow-y-auto px-[22px] pb-1 pt-4'
               : 'flex min-h-0 flex-1 flex-col gap-[11px] overflow-y-auto px-[22px] pb-1 pt-4'
           }
+          // Round 87.8 — commit the Save As draft when the pointer
+          // goes down anywhere in the fields but the Save As input
+          // itself. The 87.7 blur-only commit failed live: a click
+          // through the RDP canvas can fail to move DOM focus, so
+          // the blur never fired and the merged draft stayed on
+          // screen after the backslash-deletion rename. A mousedown
+          // IS delivered even when focus is not, so this is the
+          // focus-independent commit path. Clicking inside the Save
+          // As field itself must not commit — the user is still
+          // editing the draft there. The commit is idempotent (a
+          // null draft is a no-op; committing the same draft twice
+          // re-parses to the same values), so a blur firing for
+          // the same move afterwards is harmless.
+          onMouseDownCapture={(e) => {
+            const target = e.target as HTMLElement | null
+            if (target?.closest?.('#add-save-as')) return
+            commitSaveAsDraft()
+          }}
         >
           <div>
             <label htmlFor="add-url" className="mb-1 block text-xs font-semibold text-text-muted">

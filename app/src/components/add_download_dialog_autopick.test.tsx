@@ -453,3 +453,53 @@ describe('Save As draft field (Round 87.7, items 1–2)', () => {
     )
   })
 })
+
+describe('Save As commit on mousedown (Round 87.8)', () => {
+  const ZIPTEST = 'C:\\Users\\Administrator\\Downloads\\ZipTest'
+  const withFolder: CategoryRow[] = BUILTINS.map((c) =>
+    c.id === 'cat-video' ? { ...c, default_folder: ZIPTEST } : c,
+  )
+
+  /** Open the dialog on a video in ZipTest, then make the
+   *  87.7-retest rename edit: delete the `\` between the folder
+   *  and the filename, so the field holds the merged draft. */
+  async function openDialogWithMergedDraft(): Promise<HTMLInputElement> {
+    renderDialog({ initialUrl: 'https://example.com/movie.mp4', categories: withFolder })
+    await waitFor(() => expect(categorySelect().value).toBe('cat-video'), { timeout: 5000 })
+    const saveAs = screen.getByLabelText('Save As') as HTMLInputElement
+    await waitFor(() => expect(saveAs.value).toBe(`${ZIPTEST}\\movie.mp4`), { timeout: 5000 })
+
+    fireEvent.change(saveAs, {
+      target: { value: 'C:\\Users\\Administrator\\Downloads\\ZipTestmovie.mp4' },
+    })
+    expect(saveAs.value).toBe(
+      'C:\\Users\\Administrator\\Downloads\\ZipTestmovie.mp4',
+    )
+    return saveAs
+  }
+
+  test('a mousedown on Description commits the draft — no blur needed', async () => {
+    const saveAs = await openDialogWithMergedDraft()
+
+    // Round 87.8 — the live failure: the click into
+    // Description never delivered a blur (RDP canvas), so the
+    // draft stayed merged. A mousedown on the Description
+    // field commits the draft even with no blur at all — the
+    // test fires mouseDown only, deliberately NOT blur.
+    fireEvent.mouseDown(screen.getByLabelText('Description'))
+    expect(saveAs.value).toBe(`${ZIPTEST}\\movie.mp4`)
+  })
+
+  test('a mousedown inside the Save As field itself does NOT commit', async () => {
+    const saveAs = await openDialogWithMergedDraft()
+
+    fireEvent.mouseDown(saveAs)
+    expect(saveAs.value).toBe(
+      'C:\\Users\\Administrator\\Downloads\\ZipTestmovie.mp4',
+    )
+
+    // The blur path still works afterwards, as before.
+    fireEvent.blur(saveAs)
+    expect(saveAs.value).toBe(`${ZIPTEST}\\movie.mp4`)
+  })
+})
