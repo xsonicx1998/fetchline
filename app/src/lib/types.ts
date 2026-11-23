@@ -179,7 +179,8 @@ export type RefreshAddressResult =
 
 /** Round 67 — one link the browser extension caught, waiting
  *  for the Add URL dialog. Mirrors the engine's `PendingLinkRow`:
- *  `source` is 'browser' | 'video' | 'download_all', `status`
+ *  `source` is 'browser' | 'video' | 'download_all' | 'relay'
+ *  (Round 88 — 'relay' is a network-observed capture), `status`
  *  is 'pending' while it waits. `cookies` is the browser's
  *  cookies for the URL as a JSON array (or null) — the dialog's
  *  probe and confirm send them, so a cookie-gated link works.
@@ -527,6 +528,14 @@ export interface Settings {
    *  and offer a copied download link (default true). Off means
    *  the poller still runs but the engine never offers a link. */
   clipboard_monitoring: boolean
+  /** Relay (Round 88): catch videos and files playing in the
+   *  browser via the extension's network observation (default
+   *  true — safe only because passive inline media is buffered
+   *  in the video button / popup instead of auto-popping a
+   *  dialog, plan §11.5). Off means no relay captures at all;
+   *  the `browser_integration` master switch still gates
+   *  everything. */
+  relay_enabled: boolean
   /** Dial-Up tab (S09 finish): legacy settings. The connection
    *  name may be null (none set); auto-dial and redial are
    *  honoured only where a dial-up connection exists (Windows

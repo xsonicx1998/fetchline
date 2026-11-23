@@ -1213,14 +1213,17 @@ fn extension_manifest_is_mv3_and_minimal() {
         .iter()
         .map(|v| v.as_str().unwrap())
         .collect();
-    // Minimal set only: no <all_urls>, no tabs, no
-    // webRequest. `scripting` is allowed since S08, and only for
-    // injecting the video detector into the active tab on a user
-    // gesture (see validate_manifest.py). `cookies` is allowed
-    // since the S13 finish, and only for reading the cookies of
-    // the exact URL being handed over (background.js `cookiesFor`).
-    // Firefox needs a stable add-on id so its host manifest can
-    // name it in allowed_extensions (BUG-023).
+    // Minimal set only: no <all_urls>, no tabs. `scripting` is
+    // allowed since S08, and only for injecting the video
+    // detector into the active tab on a user gesture (see
+    // validate_manifest.py). `cookies` is allowed since the S13
+    // finish, and only for reading the cookies of the exact URL
+    // being handed over (background.js `cookiesFor`). `webRequest`
+    // is allowed since Round 88 (relay, 2026-11-23,
+    // user-approved): observe-only network-traffic watching, no
+    // blocking (MV3 Chrome has no blocking webRequest). Firefox
+    // needs a stable add-on id so its host manifest can name it
+    // in allowed_extensions (BUG-023).
     for p in [
         "activeTab",
         "contextMenus",
@@ -1229,10 +1232,11 @@ fn extension_manifest_is_mv3_and_minimal() {
         "storage",
         "nativeMessaging",
         "scripting",
+        "webRequest",
     ] {
         assert!(permissions.contains(&p), "missing permission {p}");
     }
-    for forbidden in ["tabs", "webRequest", "history"] {
+    for forbidden in ["tabs", "history"] {
         assert!(
             !permissions.contains(&forbidden),
             "must not request {forbidden}"
@@ -1245,12 +1249,17 @@ fn extension_manifest_is_mv3_and_minimal() {
         !gecko_id.is_empty(),
         "browser_specific_settings.gecko.id must be set"
     );
-    // Round 86 — host_permissions is allowed ONLY for the two
-    // narrow TikTok patterns (`chrome.cookies.getAll` needs host
-    // permission for the queried CDN URL; `activeTab` covers only
-    // the active tab host). Anything broader — above all
-    // <all_urls> — still fails. (validate_manifest.py pins the
-    // same set.)
+    // Round 88 — relay (2026-11-23, user-approved):
+    // host_permissions is allowed ONLY for exactly
+    // `http://*/*` + `https://*/*` (the relay watches traffic
+    // on every http(s) site; `webRequest` only reports hosts
+    // the extension has access to). Anything broader — above
+    // all `<all_urls>`, which would also claim file:// and
+    // ftp:// access the relay never needs — still fails.
+    // (validate_manifest.py pins the same set.) The Round 86
+    // TikTok-only patterns are superseded by this: with these
+    // host permissions, `cookiesFor` works on every http(s)
+    // site, not just TikTok hosts.
     let hosts = m
         .get("host_permissions")
         .and_then(|h| h.as_array())
@@ -1262,11 +1271,12 @@ fn extension_manifest_is_mv3_and_minimal() {
         .unwrap_or_default();
     assert_eq!(
         hosts,
-        vec![
-            "https://*.tiktok.com/*".to_string(),
-            "https://*.tiktokcdn.com/*".to_string(),
-        ],
-        "host_permissions must be exactly the two narrow TikTok patterns (Round 86)"
+        vec!["http://*/*".to_string(), "https://*/*".to_string(),],
+        "host_permissions must be exactly http://*/* + https://*/* (Round 88 relay)"
+    );
+    assert!(
+        !hosts.iter().any(|h| h == "<all_urls>"),
+        "host_permissions must never contain <all_urls>"
     );
     for size in ["16", "32", "48", "128"] {
         assert!(

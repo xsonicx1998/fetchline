@@ -84,6 +84,15 @@ interface AddDownloadDialogProps {
    *  known (the clipboard offer carries one); the probe fills it
    *  in otherwise. */
   captureTitle?: string | null
+  /** Round 88 — the pending row's source ('browser' | 'video'
+   *  | 'relay'), passed through by the standalone Add URL
+   *  window. The dialog shows where the capture came from:
+   *  "Caught from the browser (relay)" for a relay capture,
+   *  "Caught from the extension" for a click/button capture
+   *  (plan §6). No source line existed before — the dialog
+   *  never knew the source, so both lines are new here. Null
+   *  (manual Add URL, clipboard) shows no line. */
+  captureSource?: string | null
   /** Round 75: a clipboard capture of a URL that is already in
    *  the download list — the dialog shows "This link is already
    *  in your list" and lets the user continue or cancel, instead
@@ -261,6 +270,7 @@ export function AddDownloadDialog({
   initialFileSize = null,
   captureMode = false,
   captureTitle = null,
+  captureSource = null,
   alreadyInList = false,
   standalone = false,
 }: AddDownloadDialogProps) {
@@ -1058,6 +1068,18 @@ export function AddDownloadDialog({
               aria-describedby={error ? 'add-error' : undefined}
               className="h-9 w-full rounded-md border border-border-input bg-surface px-3 text-[13px] focus:border-accent focus:outline-none"
             />
+            {/* Round 88 — where this capture came from, in
+                capture mode only. A relay capture says so
+                (plan §6); a click/button capture says it came
+                from the extension. Manual Add URL and clipboard
+                captures carry no source and show no line. */}
+            {captureMode && captureSource ? (
+              <p className="mt-1 text-xs text-text-muted">
+                {captureSource === 'relay'
+                  ? 'Caught from the browser (relay)'
+                  : 'Caught from the extension'}
+              </p>
+            ) : null}
           </div>
 
           <div>

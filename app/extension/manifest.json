@@ -29,11 +29,12 @@
     "downloads",
     "storage",
     "nativeMessaging",
-    "scripting"
+    "scripting",
+    "webRequest"
   ],
   "host_permissions": [
-    "https://*.tiktok.com/*",
-    "https://*.tiktokcdn.com/*"
+    "http://*/*",
+    "https://*/*"
   ],
   "content_scripts": [
     {

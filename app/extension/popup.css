@@ -127,3 +127,24 @@ main { display: flex; flex-direction: column; gap: 14px; }
   color: #6E7896;
   text-align: center;
 }
+
+/* Round 88 — the buffered relay list: one row per item the
+   relay caught on this page, with the Sonic gradient border. */
+.relay-list { margin: 8px 0 0; padding: 0; list-style: none; }
+.relay-list:empty { display: none; }
+.relay-list li { margin: 0 0 6px; }
+.relay-list button {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid #8B20FF;
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 12.5px;
+  color: #E8ECF8;
+  background: rgba(139, 32, 255, 0.12);
+  text-align: left;
+  cursor: pointer;
+}
+.relay-list button:hover { border-color: #00C8FF; }
+.relay-list button:disabled { opacity: 0.5; cursor: default; }

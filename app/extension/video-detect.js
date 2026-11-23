@@ -782,6 +782,38 @@ function videoPageUrlFromElement(video) {
   return tiktokVideoPageFromElement(video);
 }
 
+// Round 88 (relay) — the video button / popup surface the
+// background's buffered relay items. Only media + manifests
+// are ever offered (a "maybe" is recorded, never surfaced).
+// The label is the filename when the relay knew one, else the
+// kind; the size is the capture-time size, or "" when unknown
+// — sizes are never invented, and no HEAD/fetch is ever made
+// to find one.
+function filterRelayItems(items) {
+  return (items || []).filter(
+    (i) => i && (i.kind === "media" || i.kind === "manifest"),
+  );
+}
+
+function formatRelaySize(bytes) {
+  if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes <= 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KiB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function relayItemLabel(item) {
+  if (!item) return "Unknown";
+  const name =
+    (typeof item.filename === "string" && item.filename.trim()) ||
+    (item.finalUrl || item.url || "").split("/").pop() ||
+    "Unknown";
+  const kind = item.kind === "manifest" ? "Playlist" : "Video";
+  const size = formatRelaySize(item.content_length);
+  return size ? `${name} · ${kind} · ${size}` : `${name} · ${kind}`;
+}
+
 // Shared with the content script (same JS world when injected as
 // files in order) and with the Node tests. In a classic script
 // (the browser) the functions above are already globals; for the
@@ -822,6 +854,9 @@ if (typeof globalThis !== "undefined") {
     tiktokVideoIdFromUrl,
     tiktokVideoPageFromElement,
     isFeedPageUrl,
+    filterRelayItems,
+    formatRelaySize,
+    relayItemLabel,
   };
 }
 if (typeof module !== "undefined" && module.exports) {

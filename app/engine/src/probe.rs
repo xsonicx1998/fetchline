@@ -338,27 +338,121 @@ async fn probe_with_ranged_get_cookies(
 /// `Cookie` keys are never carried here: cookies ride the
 /// `cookies` parameter, validated at the host boundary, so a
 /// header map cannot smuggle a session cookie past it.
+///
+/// Round 88 (relay): the browser's own request headers for a
+/// relayed capture — `Accept-Language`, `Origin`, `Sec-Fetch-*`
+/// and `Sec-CH-UA*` in addition to `User-Agent` / `Referer`.
+/// `recorded_origin` is NOT a header: it is the origin the
+/// headers were recorded for (the relayed `finalUrl`'s origin),
+/// and `apply_headers` uses it for the `Sec-Fetch-Site` rule —
+/// a stale `same-origin` value forwarded to another origin 403s
+/// on a strict CDN. It is `None` for yt-dlp headers, which
+/// never carry a `Sec-Fetch-Site` to guard.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RequestHeaders {
     pub user_agent: Option<String>,
     pub referer: Option<String>,
+    /// Round 88 — the relay's extra kept headers (see
+    /// `headers_from_json`'s allow-list): only these names are
+    /// ever parsed in, and `Cookie` / `Host` / `Range` /
+    /// `Content-Length` / `Transfer-Encoding` are stripped there.
+    #[serde(default)]
+    pub accept_language: Option<String>,
+    #[serde(default)]
+    pub origin: Option<String>,
+    #[serde(default)]
+    pub sec_fetch_site: Option<String>,
+    #[serde(default)]
+    pub sec_fetch_mode: Option<String>,
+    #[serde(default)]
+    pub sec_fetch_dest: Option<String>,
+    #[serde(default)]
+    pub sec_fetch_user: Option<String>,
+    #[serde(default)]
+    pub sec_ch_ua: Option<String>,
+    #[serde(default)]
+    pub sec_ch_ua_mobile: Option<String>,
+    #[serde(default)]
+    pub sec_ch_ua_platform: Option<String>,
+    /// Round 88 — the origin the headers above were recorded
+    /// for (e.g. the relayed `finalUrl`'s origin), as
+    /// `scheme://host[:port]`. `None` when unknown.
+    #[serde(default)]
+    pub recorded_origin: Option<String>,
 }
 
 impl RequestHeaders {
     /// True when neither header is set — the common case for a
     /// plain download.
     pub fn is_empty(&self) -> bool {
-        self.user_agent
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .is_none()
-            && self
-                .referer
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .is_none()
+        [
+            self.user_agent.as_deref(),
+            self.referer.as_deref(),
+            self.accept_language.as_deref(),
+            self.origin.as_deref(),
+            self.sec_fetch_site.as_deref(),
+            self.sec_fetch_mode.as_deref(),
+            self.sec_fetch_dest.as_deref(),
+            self.sec_fetch_user.as_deref(),
+            self.sec_ch_ua.as_deref(),
+            self.sec_ch_ua_mobile.as_deref(),
+            self.sec_ch_ua_platform.as_deref(),
+        ]
+        .iter()
+        .all(|v| v.map(str::trim).filter(|s| !s.is_empty()).is_none())
+    }
+
+    /// Round 88 — the extra (non-UA/Referer) headers to send on
+    /// a request to `request_url`, as `(name, value)` pairs.
+    /// `Sec-Fetch-Site` is included ONLY when the request origin
+    /// matches `recorded_origin`: after a cross-origin redirect
+    /// the recorded `same-origin` value is stale, and forwarding
+    /// it to a strict CDN 403s. When the recorded origin is
+    /// unknown (`None`) the value is dropped too — an
+    /// unverifiable `Sec-Fetch-Site` is never forwarded. The
+    /// other `Sec-Fetch-*` values are forwarded as recorded.
+    pub fn extra_headers_for_url(&self, request_url: &str) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = Vec::new();
+        let mut push = |name: &str, value: &Option<String>| {
+            if let Some(v) = value.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                out.push((name.to_string(), v.to_string()));
+            }
+        };
+        push("Accept-Language", &self.accept_language);
+        push("Origin", &self.origin);
+        // Round 88 — `Sec-Fetch-Site` only on a same-origin
+        // request (see the doc above).
+        let same_origin = match (&self.recorded_origin, origin_of(request_url)) {
+            (Some(recorded), Some(request)) => recorded == &request,
+            _ => false,
+        };
+        if same_origin {
+            push("Sec-Fetch-Site", &self.sec_fetch_site);
+        }
+        push("Sec-Fetch-Mode", &self.sec_fetch_mode);
+        push("Sec-Fetch-Dest", &self.sec_fetch_dest);
+        push("Sec-Fetch-User", &self.sec_fetch_user);
+        push("Sec-CH-UA", &self.sec_ch_ua);
+        push("Sec-CH-UA-Mobile", &self.sec_ch_ua_mobile);
+        push("Sec-CH-UA-Platform", &self.sec_ch_ua_platform);
+        out
+    }
+}
+
+/// Round 88 — the origin of a URL as `scheme://host[:port]`
+/// (host lowercased), or `None` when it does not parse. The
+/// `Sec-Fetch-Site` same-origin comparison runs on this, not on
+/// raw strings, so `HTTP://Example.COM:80` and
+/// `http://example.com` compare equal.
+pub fn origin_of(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    match parsed.port() {
+        Some(port) => Some(format!("{}://{host}:{port}", parsed.scheme())),
+        None => Some(format!("{}://{host}", parsed.scheme())),
     }
 }
 
@@ -368,6 +462,7 @@ impl RequestHeaders {
 pub fn apply_headers(
     req: reqwest::RequestBuilder,
     headers: Option<&RequestHeaders>,
+    request_url: Option<&str>,
 ) -> reqwest::RequestBuilder {
     let Some(headers) = headers else {
         return req;
@@ -388,6 +483,25 @@ pub fn apply_headers(
         .filter(|s| !s.is_empty())
     {
         req = req.header(reqwest::header::REFERER, referer);
+    }
+    // Round 88 — the relay's extra kept headers. `Sec-Fetch-Site`
+    // needs the request URL to check the origin: with no URL the
+    // provenance cannot be verified, so it is dropped while the
+    // other extras still ride (`extra_headers_for_url` only
+    // keeps it on a same-origin match, and `""` never matches).
+    let extras = headers.extra_headers_for_url(request_url.unwrap_or(""));
+    for (name, value) in extras {
+        // `Cookie`, `Host`, `Range`, `Content-Length` and
+        // `Transfer-Encoding` can never appear here — the
+        // allow-list in `headers_from_json` strips them at
+        // parse time, and `extra_headers_for_url` only emits
+        // the names above — but a header value with a CR/LF
+        // would smuggle a second header, so values are still
+        // checked before they are sent.
+        if value.contains(['\r', '\n']) {
+            continue;
+        }
+        req = req.header(name, value);
     }
     req
 }
@@ -413,7 +527,7 @@ pub async fn probe_with_headers(
             "Only http:// and https:// addresses can carry cookies".to_string(),
         ));
     }
-    let head = match apply_headers(apply_cookies(client.head(url), cookies), headers)
+    let head = match apply_headers(apply_cookies(client.head(url), cookies), headers, Some(url))
         .send()
         .await
     {
@@ -449,7 +563,7 @@ async fn probe_with_ranged_get_headers(
     headers: Option<&RequestHeaders>,
     proxy: Option<&ProxyConfig>,
 ) -> Result<ProbeInfo> {
-    let resp = apply_headers(apply_cookies(client.get(url), cookies), headers)
+    let resp = apply_headers(apply_cookies(client.get(url), cookies), headers, Some(url))
         .header(RANGE, "bytes=0-0")
         .send()
         .await?;
@@ -1070,5 +1184,155 @@ mod tests {
             final_url: "http://127.0.0.1:55443/slow-a.mp4".to_string(),
         };
         assert!(info.refuse_html_page().is_ok());
+    }
+
+    // -- Round 88 (relay): extended request headers --------------------
+    // The relay's extra kept headers ride the probe and the
+    // segment requests; `Sec-Fetch-Site` only on a same-origin
+    // request, so a stale `same-origin` value never reaches a
+    // strict CDN after a cross-origin redirect.
+
+    fn relay_headers() -> RequestHeaders {
+        RequestHeaders {
+            user_agent: Some("Mozilla/5.0 Relay".to_string()),
+            referer: Some("https://example.com/watch/123".to_string()),
+            accept_language: Some("en-US,en;q=0.9".to_string()),
+            origin: Some("https://example.com".to_string()),
+            sec_fetch_site: Some("same-origin".to_string()),
+            sec_fetch_mode: Some("navigate".to_string()),
+            sec_fetch_dest: Some("video".to_string()),
+            sec_fetch_user: Some("?1".to_string()),
+            sec_ch_ua: Some("\"Chromium\";v=\"140\"".to_string()),
+            sec_ch_ua_mobile: Some("?0".to_string()),
+            sec_ch_ua_platform: Some("\"Windows\"".to_string()),
+            recorded_origin: Some("https://example.com".to_string()),
+        }
+    }
+
+    fn built_headers(req: reqwest::RequestBuilder) -> reqwest::header::HeaderMap {
+        req.build().unwrap().headers().clone()
+    }
+
+    #[test]
+    fn origin_of_normalises_scheme_host_and_port() {
+        assert_eq!(
+            origin_of("HTTP://Example.COM:8080/a/b?x=1").as_deref(),
+            Some("http://example.com:8080")
+        );
+        assert_eq!(
+            origin_of("https://example.com/watch").as_deref(),
+            Some("https://example.com")
+        );
+        assert_eq!(origin_of("not a url"), None);
+        assert_eq!(origin_of("ftp://example.com/x"), None);
+    }
+
+    #[test]
+    fn request_headers_empty_covers_the_relay_fields() {
+        assert!(RequestHeaders::default().is_empty());
+        let mut h = RequestHeaders::default();
+        h.accept_language = Some("en-US".to_string());
+        assert!(!h.is_empty());
+        let mut h = RequestHeaders::default();
+        h.sec_fetch_mode = Some("   ".to_string());
+        assert!(h.is_empty(), "a blank value is no header");
+        // The recorded origin alone is provenance, not a header.
+        let mut h = RequestHeaders::default();
+        h.recorded_origin = Some("https://example.com".to_string());
+        assert!(h.is_empty());
+    }
+
+    #[test]
+    fn apply_headers_keeps_the_relay_extras_on_a_same_origin_request() {
+        let headers = relay_headers();
+        let built = built_headers(apply_headers(
+            reqwest::Client::new().get("https://example.com/v/movie.mp4"),
+            Some(&headers),
+            Some("https://example.com/v/movie.mp4"),
+        ));
+        assert_eq!(built.get("user-agent").unwrap(), "Mozilla/5.0 Relay");
+        assert_eq!(
+            built.get("referer").unwrap(),
+            "https://example.com/watch/123"
+        );
+        assert_eq!(built.get("accept-language").unwrap(), "en-US,en;q=0.9");
+        assert_eq!(built.get("origin").unwrap(), "https://example.com");
+        assert_eq!(built.get("sec-fetch-site").unwrap(), "same-origin");
+        assert_eq!(built.get("sec-fetch-mode").unwrap(), "navigate");
+        assert_eq!(built.get("sec-fetch-dest").unwrap(), "video");
+        assert_eq!(built.get("sec-fetch-user").unwrap(), "?1");
+        assert_eq!(built.get("sec-ch-ua").unwrap(), "\"Chromium\";v=\"140\"");
+        assert_eq!(built.get("sec-ch-ua-mobile").unwrap(), "?0");
+        assert_eq!(built.get("sec-ch-ua-platform").unwrap(), "\"Windows\"");
+        // `apply_headers` never sets these — a header map cannot
+        // smuggle a session, a range or a length past it.
+        for forbidden in [
+            "cookie",
+            "host",
+            "range",
+            "content-length",
+            "transfer-encoding",
+        ] {
+            assert!(
+                built.get(forbidden).is_none(),
+                "{forbidden} must never be set by apply_headers"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_headers_drops_sec_fetch_site_on_a_cross_origin_request() {
+        // The probe URL is the relayed finalUrl; after a
+        // cross-origin redirect the request goes to another
+        // origin, and the recorded `same-origin` value must not
+        // follow it — a strict CDN 403s on it. The other
+        // `Sec-Fetch-*` values are forwarded as recorded.
+        let headers = relay_headers();
+        let built = built_headers(apply_headers(
+            reqwest::Client::new().get("https://cdn.example.net/v/movie.mp4"),
+            Some(&headers),
+            Some("https://cdn.example.net/v/movie.mp4"),
+        ));
+        assert!(
+            built.get("sec-fetch-site").is_none(),
+            "a stale same-origin value must not reach another origin"
+        );
+        assert_eq!(built.get("sec-fetch-mode").unwrap(), "navigate");
+        assert_eq!(built.get("sec-fetch-dest").unwrap(), "video");
+        assert_eq!(built.get("user-agent").unwrap(), "Mozilla/5.0 Relay");
+        // With no recorded origin at all the value is dropped
+        // too — an unverifiable `Sec-Fetch-Site` is never sent.
+        let mut unknown = relay_headers();
+        unknown.recorded_origin = None;
+        let built = built_headers(apply_headers(
+            reqwest::Client::new().get("https://example.com/v/movie.mp4"),
+            Some(&unknown),
+            Some("https://example.com/v/movie.mp4"),
+        ));
+        assert!(built.get("sec-fetch-site").is_none());
+        // And with no request URL the provenance cannot be
+        // checked, so it is dropped while the rest still ride.
+        let built = built_headers(apply_headers(
+            reqwest::Client::new().get("https://example.com/v/movie.mp4"),
+            Some(&headers),
+            None,
+        ));
+        assert!(built.get("sec-fetch-site").is_none());
+        assert_eq!(built.get("sec-fetch-mode").unwrap(), "navigate");
+    }
+
+    #[test]
+    fn apply_headers_skips_cr_lf_header_values() {
+        let mut headers = relay_headers();
+        headers.accept_language = Some("en-US\r\nCookie: x=1".to_string());
+        let built = built_headers(apply_headers(
+            reqwest::Client::new().get("https://example.com/v/movie.mp4"),
+            Some(&headers),
+            Some("https://example.com/v/movie.mp4"),
+        ));
+        assert!(
+            built.get("accept-language").is_none(),
+            "a CR/LF value would smuggle a second header"
+        );
     }
 }

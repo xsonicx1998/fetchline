@@ -658,7 +658,18 @@ export async function updateCategory(args: {
 /** Settings (S09). The whole row is sent on save; the engine
  *  validates it and applies it live. */
 export async function getSettings(): Promise<Settings> {
-  return invoke<Settings>('get_settings')
+  const settings = await invoke<Settings>('get_settings')
+  // Round 88 — `relay_enabled` lands in the engine's Settings
+  // struct in parallel with this UI (plan §8 Phase 3). A reply
+  // from an engine built before that field existed omits it,
+  // and the plan's default is ON (§11.5) — so fill it in here
+  // rather than letting the Settings checkbox read `undefined`.
+  // The reply is JSON, so a missing key reads as `undefined`
+  // even though the type says the field is always present.
+  return {
+    ...settings,
+    relay_enabled: (settings as Partial<Settings>).relay_enabled ?? true,
+  }
 }
 
 export async function updateSettings(settings: Settings): Promise<Settings> {

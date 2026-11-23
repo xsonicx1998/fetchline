@@ -65,6 +65,7 @@ const STORE_KEYS = {
   desktopExcluded: "desktopExcluded", // last known desktop excluded-sites list
   pendingCount: "pendingCount",       // links waiting in pending_links (Milestone 2)
   lastHandoff: "lastHandoff",         // {at, ok, message} of the last hand-off (Milestone 2)
+  relayEnabled: "relayEnabled",       // Round 88 — relay master switch, cached from get_settings (default ON)
 };
 
 function hostOf(url) {
@@ -163,7 +164,628 @@ function tabVideoAggregate(tabId) {
 if (chrome.tabs && chrome.tabs.onRemoved && chrome.tabs.onRemoved.addListener) {
   chrome.tabs.onRemoved.addListener((tabId) => {
     tabVideoScans.delete(tabId);
+    // Round 88 — a closed tab's relay state goes with it, so a
+    // later tab reusing the id never inherits its videos.
+    relayClearTab(tabId);
+    relayPageContext.delete(tabId);
   });
+}
+
+// -- Round 88 — relay (browser capture, relay-plan.md §4) ------------
+//
+// Observe-only webRequest capture of inline media, manifests and
+// files the other four capture paths miss. Passive media /
+// manifests are BUFFERED per tab and only reach the host when the
+// user clicks one in the video button or the popup — never an
+// auto-popping dialog. Only an explicit file capture (kind
+// "file") goes to the host immediately. Nothing here is ever
+// logged with a URL, a message body or a cookie value.
+
+const RELAY_MEDIA_MIN_BYTES = 256 * 1024; // media under this is an ad / UI sound, not a download
+const RELAY_MAYBE_MAX_BYTES = 64 * 1024; // a "maybe" manifest answer is small and text-ish
+const RELAY_SENT_HEADERS_TTL_MS = 2 * 60 * 1000;
+const RELAY_SENT_HEADERS_CAP = 512;
+const RELAY_SEEN_TTL_MS = 2 * 60 * 1000;
+
+// The only request headers ever remembered or forwarded —
+// `Cookie` is NEVER in this set (Revision 1: cookies ride the
+// validated `cookies` array only, read live via cookiesFor).
+const RELAY_HEADER_CANONICAL = {
+  "user-agent": "User-Agent",
+  referer: "Referer",
+  origin: "Origin",
+  "accept-language": "Accept-Language",
+  "sec-fetch-site": "Sec-Fetch-Site",
+  "sec-fetch-mode": "Sec-Fetch-Mode",
+  "sec-fetch-dest": "Sec-Fetch-Dest",
+  "sec-fetch-user": "Sec-Fetch-User",
+  "sec-ch-ua": "Sec-CH-UA",
+  "sec-ch-ua-mobile": "Sec-CH-UA-Mobile",
+  "sec-ch-ua-platform": "Sec-CH-UA-Platform",
+};
+
+const RELAY_MEDIA_EXTENSIONS = [
+  "mp4", "mkv", "webm", "mov", "avi",
+  "mp3", "flac", "wav", "aac", "ogg", "m4v", "m4a",
+];
+// Segment pieces, never files: a .ts / .m4s is one fragment of a
+// stream the player already fetched, not a download.
+const RELAY_SEGMENT_EXTENSIONS = new Set(["ts", "m4s", "m4v", "m2ts"]);
+// Passive media/manifests are suppressed on these page hosts —
+// the video button + yt-dlp resolver owns those videos (§4.3).
+// Matched on the TAB's host / initiator, never the media URL's
+// host (a tiktokcdn.com stream on a TikTok page is suppressed;
+// the same CDN on another page is not).
+const RELAY_YTDLP_HOSTS = [
+  "youtube.com", "youtu.be", "tiktok.com",
+  "instagram.com", "facebook.com", "fb.watch",
+];
+
+const RELAY_WEBREQUEST_TYPES = [
+  "main_frame", "sub_frame", "media", "xmlhttprequest", "other", "object",
+];
+const RELAY_WEBREQUEST_URLS = ["http://*/*", "https://*/*"];
+
+// requestId -> { headers, at }: the browser's exact request
+// headers, keyed by requestId (Mister's keying — URL-keying
+// breaks when the same URL is fetched twice with different
+// headers). No Cookie is ever stored here.
+const relaySentHeaders = new Map();
+// requestId -> first URL before any redirect (Mister's map):
+// the relay message carries url (first, for renewal) and
+// finalUrl (where the bytes are).
+const relayRedirectFirst = new Map();
+// url -> at: every URL handed over by ANY path, 2-minute TTL.
+const relaySeen = new Map();
+// tabId -> Set(folder): folders of manifests captured in this
+// tab — a URL under one is a piece of that stream, not a file.
+// Scoped by tabId: the same CDN folder in two tabs must not
+// block each other.
+const relayManifestFolders = new Map();
+// tabId -> Map(url -> relay_capture item): passive inline
+// media/manifests waiting for the user to click one.
+const relayBuffer = new Map();
+// tabId -> { pageUrl, title }: the content.js page mirror
+// (Chrome webRequest gives initiator only — no documentUrl /
+// originUrl — so the page URL and title come from here).
+const relayPageContext = new Map();
+
+function relaySessionApi() {
+  try {
+    return chrome.storage && chrome.storage.session ? chrome.storage.session : null;
+  } catch {
+    return null;
+  }
+}
+
+function relayBufferKey(tabId) {
+  return `relayBuffer:${tabId}`;
+}
+
+function relayPageKey(tabId) {
+  return `relayPage:${tabId}`;
+}
+
+function relayMirrorBuffer(tabId) {
+  const api = relaySessionApi();
+  if (!api) return;
+  const items = [...(relayBuffer.get(tabId) || new Map()).values()];
+  // Fire-and-forget: the in-memory buffer is the source of
+  // truth; the session mirror only survives a worker eviction
+  // (and is what the popup reads).
+  try {
+    const p = api.set({ [relayBufferKey(tabId)]: items });
+    if (p && typeof p.catch === "function") p.catch(() => {});
+  } catch {
+    // Session storage unavailable: the in-memory buffer stands.
+  }
+}
+
+function relayMirrorPage(tabId, pageUrl, title) {
+  relayPageContext.set(tabId, { pageUrl, title: title || "" });
+  const api = relaySessionApi();
+  if (!api) return;
+  try {
+    const p = api.set({ [relayPageKey(tabId)]: { pageUrl, title: title || "" } });
+    if (p && typeof p.catch === "function") p.catch(() => {});
+  } catch {
+    // Session storage unavailable: the in-memory mirror stands.
+  }
+}
+
+function relayNotePageUrl(tabId, url) {
+  const prev = relayPageContext.get(tabId);
+  relayMirrorPage(tabId, url, prev ? prev.title : "");
+}
+
+function relayFolderOf(url) {
+  try {
+    const u = new URL(url);
+    const path = u.pathname;
+    const slash = path.lastIndexOf("/");
+    return `${u.origin}${slash > 0 ? path.slice(0, slash) : ""}`;
+  } catch {
+    return "";
+  }
+}
+
+function relayNoteManifestFolder(tabId, url) {
+  const folder = relayFolderOf(url);
+  if (!folder) return;
+  let set = relayManifestFolders.get(tabId);
+  if (!set) {
+    set = new Set();
+    relayManifestFolders.set(tabId, set);
+  }
+  set.add(folder);
+}
+
+function relayUnderManifestFolder(tabId, url) {
+  const set = relayManifestFolders.get(tabId);
+  if (!set || set.size === 0) return false;
+  const folder = relayFolderOf(url);
+  if (!folder) return false;
+  for (const known of set) {
+    if (folder === known || folder.startsWith(`${known}/`)) return true;
+  }
+  return false;
+}
+
+function relayNoteSeen(url) {
+  if (url) relaySeen.set(url, Date.now());
+}
+
+function relayWasSeen(url) {
+  if (!url) return false;
+  const at = relaySeen.get(url);
+  if (!at) return false;
+  if (Date.now() - at > RELAY_SEEN_TTL_MS) {
+    relaySeen.delete(url);
+    return false;
+  }
+  return true;
+}
+
+// One entry per (tabId, URL); a later response for the same URL
+// only fills in a missing size — it never creates a second row.
+function relayBufferAdd(tabId, item) {
+  let tab = relayBuffer.get(tabId);
+  if (!tab) {
+    tab = new Map();
+    relayBuffer.set(tabId, tab);
+  }
+  const prev = tab.get(item.finalUrl || item.url);
+  if (prev && (prev.content_length == null || prev.content_length === 0) && item.content_length) {
+    prev.content_length = item.content_length;
+  }
+  if (!prev) tab.set(item.finalUrl || item.url, item);
+  relayMirrorBuffer(tabId);
+}
+
+function relayBufferItems(tabId, surfacedOnly) {
+  const tab = relayBuffer.get(tabId);
+  if (!tab) return [];
+  const items = [...tab.values()];
+  // The video button / popup surface media + manifests only: a
+  // "maybe" is recorded, never auto-offered (§4.2).
+  if (surfacedOnly) return items.filter((i) => i.kind === "media" || i.kind === "manifest");
+  return items;
+}
+
+function relayBufferRemove(tabId, url) {
+  const tab = relayBuffer.get(tabId);
+  if (!tab) return;
+  tab.delete(url);
+  relayMirrorBuffer(tabId);
+}
+
+function relayClearTab(tabId) {
+  relayBuffer.delete(tabId);
+  relayManifestFolders.delete(tabId);
+  const api = relaySessionApi();
+  if (!api) return;
+  try {
+    const p = api.set({ [relayBufferKey(tabId)]: [] });
+    if (p && typeof p.catch === "function") p.catch(() => {});
+  } catch {
+    // Session storage unavailable: the in-memory clear stands.
+  }
+}
+
+function relayRememberSentHeaders(details) {
+  if (!details || details.requestId == null) return;
+  const headers = {};
+  for (const h of details.requestHeaders || []) {
+    const canonical = RELAY_HEADER_CANONICAL[String(h.name || "").toLowerCase()];
+    if (canonical) headers[canonical] = h.value;
+  }
+  // 2-minute TTL + 512 cap: sweep the expired, then drop the
+  // oldest while over the cap (Map order is insertion order).
+  const now = Date.now();
+  for (const [id, entry] of relaySentHeaders) {
+    if (now - entry.at > RELAY_SENT_HEADERS_TTL_MS) relaySentHeaders.delete(id);
+  }
+  relaySentHeaders.delete(details.requestId);
+  relaySentHeaders.set(details.requestId, { headers, at: now });
+  while (relaySentHeaders.size > RELAY_SENT_HEADERS_CAP) {
+    const oldest = relaySentHeaders.keys().next().value;
+    relaySentHeaders.delete(oldest);
+  }
+}
+
+function relayRememberRedirect(details) {
+  if (!details || details.requestId == null || !details.url) return;
+  // The FIRST hop wins: a later hop must not overwrite it.
+  if (!relayRedirectFirst.has(details.requestId)) {
+    relayRedirectFirst.set(details.requestId, details.url);
+  }
+}
+
+// Both maps are keyed by requestId, so one forget covers both
+// (Jumani note: the redirect map needs the same keying and the
+// same cleanup as SENT_HEADERS).
+function relayForgetRequest(requestId) {
+  if (requestId == null) return;
+  relaySentHeaders.delete(requestId);
+  relayRedirectFirst.delete(requestId);
+}
+
+function relayUserAgentFallback() {
+  try {
+    if (typeof navigator !== "undefined" && navigator.userAgent) return navigator.userAgent;
+  } catch {
+    // No navigator in this context (a Node test without one).
+  }
+  return "";
+}
+
+function relayTopLevelSiteOf(pageUrl) {
+  try {
+    return new URL(pageUrl).origin;
+  } catch {
+    return null;
+  }
+}
+
+function relayResponseHeaders(details) {
+  const out = {};
+  for (const h of details.responseHeaders || []) {
+    out[String(h.name || "").toLowerCase()] = h.value;
+  }
+  return out;
+}
+
+// "bytes 0-1023/238000000" -> { start, end, total }; "bytes
+// */123" and "bytes 0-99/*" have no full total (total null).
+function relayParseContentRange(value) {
+  const m = /^bytes (\d+)-(\d+)\/(\d+|\*)$/.exec(String(value || "").trim());
+  if (!m) return null;
+  return { start: Number(m[1]), end: Number(m[2]), total: m[3] === "*" ? null : Number(m[3]) };
+}
+
+const RELAY_CONTENT_TYPE_EXT = {
+  "video/mp4": "mp4",
+  "video/webm": "webm",
+  "video/x-matroska": "mkv",
+  "video/quicktime": "mov",
+  "video/x-msvideo": "avi",
+  "audio/mpeg": "mp3",
+  "audio/flac": "flac",
+  "audio/wav": "wav",
+  "audio/ogg": "ogg",
+  "application/ogg": "ogg",
+  "application/vnd.apple.mpegurl": "m3u8",
+  "application/x-mpegurl": "m3u8",
+  "application/dash+xml": "mpd",
+  "application/zip": "zip",
+  "application/pdf": "pdf",
+};
+
+function relayFilename(disposition, url, pageTitle, contentType) {
+  // filename*= (UTF-8, RFC 5987) first, then filename=.
+  const starred = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(disposition || "");
+  if (starred) {
+    try {
+      return decodeURIComponent(starred[1].trim());
+    } catch {
+      return starred[1].trim();
+    }
+  }
+  const plain = /filename\s*=\s*"([^"]+)"|filename\s*=\s*([^;]+)/i.exec(disposition || "");
+  if (plain) {
+    const name = (plain[1] || plain[2] || "").trim();
+    if (name) return name;
+  }
+  try {
+    const base = decodeURIComponent(new URL(url).pathname.split("/").pop() || "");
+    if (base) return base;
+  } catch {
+    // A URL that will not parse has no filename in it.
+  }
+  const ext = RELAY_CONTENT_TYPE_EXT[contentType] || "";
+  const title = String(pageTitle || "").trim();
+  if (title) return ext ? `${title}.${ext}` : title;
+  return ext ? `download.${ext}` : "download";
+}
+
+function relayIsYtdlpPageHost(host) {
+  if (!host) return false;
+  return RELAY_YTDLP_HOSTS.some((d) => host === d || host.endsWith(`.${d}`));
+}
+
+// The capture decision point (§4.2–4.3), in the plan's exact
+// early-bail order. Returns a relay_capture item, or null when
+// the response is not a capture. Pure except for the seen-set,
+// the tab-scoped manifest folders and the page mirror.
+function relayClassify(details, page) {
+  const url = details.url || "";
+  const tabId = details.tabId;
+  const type = details.type || "";
+  const headers = relayResponseHeaders(details);
+  const contentType = (headers["content-type"] || "").split(";")[0].trim().toLowerCase();
+  const ext = extensionOf(url);
+  const disposition = headers["content-disposition"] || "";
+  const isAttachment = /^\s*attachment/i.test(disposition);
+
+  // 1. No page to attribute it to (service-worker fetches).
+  if (typeof tabId !== "number" || tabId < 0) return null;
+  // 2. blob: / data: / ws: are not replayable.
+  if (!/^https?:\/\//i.test(url)) return null;
+  // 3. Only a successful response can be a download.
+  const status = details.statusCode || 0;
+  if (status < 200 || status >= 300) return null;
+  // 4. An attachment on a navigation is the download watcher's
+  // job (chrome.downloads.onCreated) — never double-capture it.
+  if ((type === "main_frame" || type === "sub_frame") && isAttachment) return null;
+  // PDF exclusion (user decision, 2026-11-23 — supersedes the
+  // plan as written for PDFs): an INLINE PDF opened in a tab
+  // to read must NOT pop the Add URL dialog — the most common
+  // IDM annoyance. A PDF with attachment is already skipped
+  // by step 4 (the watcher owns it); an explicit PDF download
+  // (Chrome's PDF button, right-click) still goes through the
+  // watcher / context menu, untouched by this rule.
+  const isPdf = contentType === "application/pdf" || ext === "pdf";
+  if (type === "main_frame" && isPdf && !isAttachment) return null;
+  // 5. Range pieces: ?range= / ?bytestart= / ?byteend= URL
+  // patterns are chunk fetches, never whole files.
+  if (/[?&](range|bytestart|byteend)=/i.test(url)) return null;
+  // googlevideo outright (YouTube's own handler).
+  const host = hostOf(url);
+  if (host === "googlevideo.com" || (host && host.endsWith(".googlevideo.com"))) return null;
+
+  // The capture-time size: the Content-Range total when there
+  // is one (including the accepted first 206), else
+  // Content-Length.
+  const rangeInfo = headers["content-range"]
+    ? relayParseContentRange(headers["content-range"])
+    : null;
+  let contentLength = null;
+  if (rangeInfo && rangeInfo.total != null) contentLength = rangeInfo.total;
+  else if (headers["content-length"]) {
+    const n = Number(headers["content-length"]);
+    if (Number.isFinite(n)) contentLength = n;
+  }
+  // 5 (continued). A 206 is a whole file ONLY on its first
+  // fetch: a full Content-Range total >= 256 KiB, especially
+  // start === 0 (an HTML5 <video> player's Range: bytes=0-
+  // gets a 206 back — skipping every 206 would drop 90%+ of
+  // direct MP4/WebM streams). A 206 with no full total, a
+  // total under 256 KiB, or a later seek (start > 0) for an
+  // already-seen URL is a chunk, not a file.
+  if (status === 206) {
+    if (!rangeInfo || rangeInfo.total == null) return null;
+    if (rangeInfo.total < RELAY_MEDIA_MIN_BYTES) return null;
+    if (rangeInfo.start > 0 && relayWasSeen(url)) return null;
+    contentLength = rangeInfo.total;
+  }
+
+  // 6. Segments: a segment extension / type, or a URL inside
+  // an already-captured manifest's folder IN THE SAME TAB.
+  // A .m3u8/.mpd URL itself is never suppressed this way — a
+  // master and its child variant live in the same folder.
+  const isManifestUrl = ext === "m3u8" || ext === "mpd";
+  if (!isManifestUrl) {
+    if (RELAY_SEGMENT_EXTENSIONS.has(ext) || contentType === "video/mp2t") return null;
+    if (relayUnderManifestFolder(tabId, url)) return null;
+  }
+
+  // 7. Classify by content-type first, extension second.
+  let kind = null;
+  if (
+    contentType === "application/vnd.apple.mpegurl" ||
+    contentType === "application/x-mpegurl" ||
+    ext === "m3u8"
+  ) {
+    kind = "manifest";
+  } else if (contentType === "application/dash+xml" || ext === "mpd") {
+    kind = "manifest";
+  } else if (isAttachment && type !== "main_frame" && type !== "sub_frame") {
+    // An attachment on a non-navigation type is an explicit
+    // file capture — the only kind that auto-opens the dialog.
+    kind = "file";
+  } else if (
+    contentType.startsWith("video/") ||
+    contentType.startsWith("audio/") ||
+    contentType === "application/ogg" ||
+    (RELAY_MEDIA_EXTENSIONS.includes(ext) &&
+      (!contentType || contentType === "application/octet-stream"))
+  ) {
+    kind = "media";
+  } else if (DEFAULT_CATCH_EXTENSIONS.includes(ext)) {
+    kind = "file";
+  } else if (
+    (type === "xmlhttprequest" || type === "other") &&
+    (!contentType || contentType === "text/plain") &&
+    (contentLength == null || contentLength < RELAY_MAYBE_MAX_BYTES)
+  ) {
+    // "Maybe" manifest (Mister's class): a small text/untyped
+    // answer that might name a manifest — recorded, never
+    // auto-offered.
+    kind = "maybe";
+  } else {
+    return null;
+  }
+
+  // Media under 256 KiB is an ad, a UI sound or a page chime.
+  // Files (attachment / catch-list) have no size minimum, and
+  // manifests are always captured.
+  if (kind === "media" && contentLength != null && contentLength < RELAY_MEDIA_MIN_BYTES) {
+    return null;
+  }
+
+  // yt-dlp hosts: passive media/manifests are suppressed
+  // entirely (the video button + resolver owns those videos).
+  // An explicit file capture on such a page still works.
+  const pageHost = hostOf((page && page.pageUrl) || details.initiator || "");
+  if ((kind === "media" || kind === "manifest") && relayIsYtdlpPageHost(pageHost)) {
+    return null;
+  }
+
+  const firstUrl = relayRedirectFirst.get(details.requestId) || url;
+  const sent = relaySentHeaders.get(details.requestId);
+  const headersOut = sent ? { ...sent.headers } : {};
+  // Cold service worker: onSendHeaders ran before the eviction
+  // and the map is empty — fall back to navigator.userAgent
+  // for UA and the page URL for Referer (cookies still come
+  // live from cookiesFor below; only the exact request headers
+  // are lost).
+  if (!headersOut["User-Agent"]) {
+    const ua = relayUserAgentFallback();
+    if (ua) headersOut["User-Agent"] = ua;
+  }
+  const pageUrl = (page && page.pageUrl) || details.initiator || "";
+  if (!headersOut["Referer"] && pageUrl) headersOut["Referer"] = pageUrl;
+
+  return {
+    type: "relay_capture",
+    url: firstUrl,
+    finalUrl: url,
+    page_url: pageUrl,
+    referrer: headersOut["Referer"] || pageUrl || "",
+    content_type: contentType,
+    content_length: contentLength,
+    filename: relayFilename(disposition, url, page && page.title, contentType),
+    kind,
+    headers: headersOut,
+    cookies: [],
+  };
+}
+
+// The onHeadersReceived handler: gate, classify, dedupe, then
+// hand over (file) or buffer (media / manifest / maybe).
+async function handleRelayHeaders(details) {
+  try {
+    if (!details || typeof details.tabId !== "number" || details.tabId < 0) return;
+    const state = await loadState();
+    // Relay gating (§6): the relay switch AND the desktop
+    // master switch must both be on, and the site must not be
+    // excluded. The browser_integration master switch still
+    // gates everything — integration off means no relay at all.
+    if (state[STORE_KEYS.relayEnabled] === false) return;
+    if (state[STORE_KEYS.desktopIntegration] === false) return;
+    const page = relayPageContext.get(details.tabId) || null;
+    const pageUrl = (page && page.pageUrl) || details.initiator || "";
+    if (isExcluded(hostOf(pageUrl) || hostOf(details.url || ""), state)) return;
+    // A fresh HTML page load retires the old page's buffered
+    // items — old-page videos must not linger in the video
+    // button / popup after navigation.
+    const respHeaders = relayResponseHeaders(details);
+    if (
+      details.type === "main_frame" &&
+      (respHeaders["content-type"] || "").startsWith("text/html")
+    ) {
+      relayClearTab(details.tabId);
+      relayNotePageUrl(details.tabId, details.url || "");
+      return;
+    }
+    const item = relayClassify(details, page);
+    if (!item) return;
+    // Dedupe: a URL already handed over by ANY path is never
+    // re-captured. A later response for a buffered URL only
+    // fills in a missing size.
+    if (relayWasSeen(item.finalUrl)) {
+      const tab = relayBuffer.get(details.tabId);
+      const prev = tab && tab.get(item.finalUrl);
+      if (prev && (prev.content_length == null || prev.content_length === 0) && item.content_length) {
+        prev.content_length = item.content_length;
+        relayMirrorBuffer(details.tabId);
+      }
+      return;
+    }
+    // Cookies are read live against finalUrl (after a redirect
+    // the cookies that matter are the destination's), with the
+    // top-level site so partitioned (CHIPS) cookies are not
+    // missed. Counts only in logs — never values.
+    const topLevelSite = pageUrl ? relayTopLevelSiteOf(pageUrl) : null;
+    item.cookies = await cookiesFor(item.finalUrl, topLevelSite);
+    relayNoteSeen(item.finalUrl);
+    relayNoteSeen(item.url);
+    if (item.kind === "manifest") relayNoteManifestFolder(details.tabId, item.finalUrl);
+    if (item.kind === "file") {
+      // The ONLY path that auto-opens the Add URL dialog.
+      await handToFetchline(item);
+      return;
+    }
+    // Passive inline media / manifest / maybe: buffered per
+    // tab, surfaced in the video button + popup. No message
+    // goes to the host and no dialog opens here.
+    relayBufferAdd(details.tabId, item);
+  } catch {
+    // A relay failure must never break the page: observe-only
+    // means a missed capture, not a broken browse.
+  }
+}
+
+// Send a buffered item to the host when the user clicks it in
+// the video button or the popup. Cookies are re-read live at
+// click time — the buffered copy may be stale by now.
+async function relaySendBuffered(tabId, url) {
+  const tab = relayBuffer.get(tabId);
+  const item =
+    tab &&
+    [...tab.values()].find((i) => i.url === url || i.finalUrl === url);
+  if (!item) {
+    throw new Error("That video is no longer available on this page.");
+  }
+  const message = { ...item, headers: { ...item.headers } };
+  const topLevelSite = message.page_url ? relayTopLevelSiteOf(message.page_url) : null;
+  message.cookies = await cookiesFor(message.finalUrl, topLevelSite);
+  const reply = await handToFetchline(message);
+  relayBufferRemove(tabId, item.finalUrl || item.url);
+  return reply;
+}
+
+// Observe-only listeners, registered synchronously at the top
+// level (a service worker must register them before it can be
+// evicted). Guarded: contexts without webRequest (older test
+// fakes) simply run without the relay.
+if (chrome.webRequest && chrome.webRequest.onSendHeaders) {
+  chrome.webRequest.onSendHeaders.addListener(
+    (details) => relayRememberSentHeaders(details),
+    { urls: RELAY_WEBREQUEST_URLS, types: RELAY_WEBREQUEST_TYPES },
+    ["requestHeaders", "extraHeaders"],
+  );
+}
+if (chrome.webRequest && chrome.webRequest.onBeforeRedirect) {
+  chrome.webRequest.onBeforeRedirect.addListener(
+    (details) => relayRememberRedirect(details),
+    { urls: RELAY_WEBREQUEST_URLS, types: RELAY_WEBREQUEST_TYPES },
+  );
+}
+if (chrome.webRequest && chrome.webRequest.onHeadersReceived) {
+  chrome.webRequest.onHeadersReceived.addListener(
+    (details) => {
+      void handleRelayHeaders(details);
+    },
+    { urls: RELAY_WEBREQUEST_URLS, types: RELAY_WEBREQUEST_TYPES },
+    ["responseHeaders"],
+  );
+}
+if (chrome.webRequest && chrome.webRequest.onCompleted) {
+  chrome.webRequest.onCompleted.addListener((details) => relayForgetRequest(details.requestId));
+}
+if (chrome.webRequest && chrome.webRequest.onErrorOccurred) {
+  chrome.webRequest.onErrorOccurred.addListener((details) => relayForgetRequest(details.requestId));
 }
 
 async function loadState() {
@@ -174,6 +796,7 @@ async function loadState() {
     STORE_KEYS.desktopExcluded,
     STORE_KEYS.pendingCount,
     STORE_KEYS.lastHandoff,
+    STORE_KEYS.relayEnabled,
   ]);
   return {
     [STORE_KEYS.catchEnabled]: stored[STORE_KEYS.catchEnabled] !== false, // default ON
@@ -182,6 +805,9 @@ async function loadState() {
     [STORE_KEYS.desktopExcluded]: stored[STORE_KEYS.desktopExcluded] || [],
     [STORE_KEYS.pendingCount]: stored[STORE_KEYS.pendingCount] ?? null,
     [STORE_KEYS.lastHandoff]: stored[STORE_KEYS.lastHandoff] || null,
+    // Round 88 — the relay master switch, default ON (the
+    // desktop default is ON; the engine side adds the setting).
+    [STORE_KEYS.relayEnabled]: stored[STORE_KEYS.relayEnabled] !== false,
   };
 }
 
@@ -306,21 +932,41 @@ function logCookieCount(url, count) {
   }
 }
 
-async function cookiesFor(url) {
+async function cookiesFor(url, topLevelSite) {
   try {
     if (!chrome.cookies || typeof chrome.cookies.getAll !== "function") return [];
-    const all = await chrome.cookies.getAll({ url });
-    // Round 87 — keep each cookie's own domain and path
-    // (see the block comment above): the host writes them
-    // into the Netscape file verbatim, and dropping them
-    // here is what lost the CDN scope. Name/value/domain/
-    // path only — no expiry, no flags, no values in logs.
-    return (all || []).map((c) => ({
-      name: c.name,
-      value: c.value,
-      domain: c.domain,
-      path: c.path,
-    }));
+    // Round 88 — query BOTH the unpartitioned jar AND (when
+    // the top-level site is known) the partitioned one.
+    // Passing partitionKey alone returns ONLY partitioned
+    // (CHIPS) cookies and omits the unpartitioned ones, so a
+    // single partitioned query would LOSE the normal session
+    // cookie. The two lists are merged and deduped by
+    // name+domain+path.
+    const unpartitioned = await chrome.cookies.getAll({ url });
+    let partitioned = [];
+    if (topLevelSite) {
+      try {
+        partitioned = await chrome.cookies.getAll({ url, partitionKey: { topLevelSite } });
+      } catch {
+        // Partitioned read unsupported or refused: the
+        // unpartitioned list above still stands.
+        partitioned = [];
+      }
+    }
+    const seen = new Set();
+    const out = [];
+    for (const c of [...(unpartitioned || []), ...(partitioned || [])]) {
+      const key = `${c.name}\0${c.domain}\0${c.path}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      // Round 87 — keep each cookie's own domain and path
+      // (the host writes them into the Netscape file verbatim;
+      // dropping them here is what lost the CDN scope).
+      // Name/value/domain/path only — no expiry, no flags, no
+      // values in logs.
+      out.push({ name: c.name, value: c.value, domain: c.domain, path: c.path });
+    }
+    return out;
   } catch (err) {
     // Round 86 — the old bare `catch` swallowed the failure
     // and returned [], so a refill blocked by missing host
@@ -352,6 +998,9 @@ async function refreshDesktopSettings() {
       const update = {
         [STORE_KEYS.desktopIntegration]: reply.browser_integration !== false,
         [STORE_KEYS.desktopExcluded]: reply.excluded_sites || [],
+        // Round 88 — the relay switch rides the same reply
+        // (the engine side adds the setting; absent means ON).
+        [STORE_KEYS.relayEnabled]: reply.relay_enabled !== false,
       };
       if (typeof reply.pending_count === "number") {
         update[STORE_KEYS.pendingCount] = reply.pending_count;
@@ -397,8 +1046,21 @@ async function handToFetchline(message) {
   ) {
     cookieUrl = message.variants[0].url;
   }
+  // Round 88 — a relay_capture is refilled from its finalUrl
+  // (where the bytes are), with the page's top-level site so
+  // partitioned (CHIPS) cookies are included. A non-empty
+  // cookies array passes through untouched, as for video_found.
+  let relayTopLevelSite = null;
+  if (
+    message.type === "relay_capture" &&
+    (message.finalUrl || message.url) &&
+    !hasCookies
+  ) {
+    cookieUrl = message.finalUrl || message.url;
+    if (message.page_url) relayTopLevelSite = relayTopLevelSiteOf(message.page_url);
+  }
   if (cookieUrl) {
-    const cookies = await cookiesFor(cookieUrl);
+    const cookies = await cookiesFor(cookieUrl, relayTopLevelSite);
     if (cookies.length > 0) message.cookies = cookies;
     // Round 86 — checkpoint the refill (count + host only).
     logCookieCount(cookieUrl, cookies.length);
@@ -428,6 +1090,15 @@ async function handToFetchline(message) {
     (reply && reply.message) || "Sent to Sonic Manager",
     reply && typeof reply.pending_count === "number" ? reply.pending_count : undefined,
   );
+  // Round 88 — every URL handed over by ANY path joins the
+  // relay seen-set, so the relay never re-captures it (a
+  // video-button pick, a link click and a watcher hand-off
+  // all suppress a later relay response for the same URL).
+  relayNoteSeen(message.url);
+  if (message.finalUrl) relayNoteSeen(message.finalUrl);
+  if (Array.isArray(message.variants)) {
+    for (const v of message.variants) if (v && v.url) relayNoteSeen(v.url);
+  }
   return reply;
 }
 
@@ -998,6 +1669,50 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message && message.type === "scan_page_for_videos") {
     scanActiveTab()
       .then((result) => sendResponse({ ok: true, ...(result || {}) }))
+      .catch((err) => sendResponse({ ok: false, error: String(err) }));
+    return true;
+  }
+  // Round 88 — the page-context mirror (Jumani note):
+  // content.js CANNOT read its own tabId and has no default
+  // access to chrome.storage.session, so it sends { pageUrl,
+  // title } here and the worker files it under sender.tab.id.
+  // A changed page URL is a top-level navigation: the old
+  // page's buffered relay items and manifest folders are
+  // cleared, so old-page videos don't linger.
+  if (message && message.type === "page_context") {
+    const tabId = _sender && _sender.tab && _sender.tab.id;
+    if (tabId != null && message.pageUrl) {
+      const prev = relayPageContext.get(tabId);
+      if (prev && prev.pageUrl && prev.pageUrl !== message.pageUrl) {
+        relayClearTab(tabId);
+      }
+      relayMirrorPage(tabId, message.pageUrl, message.title || "");
+    }
+    return false;
+  }
+  // Round 88 — the video button / popup ask for this tab's
+  // buffered relay items. Only media + manifests are
+  // surfaced; a "maybe" is recorded, never offered.
+  if (message && message.type === "relay_get_buffered") {
+    const tabId =
+      message.tabId != null
+        ? message.tabId
+        : _sender && _sender.tab && _sender.tab.id;
+    const items = tabId != null ? relayBufferItems(tabId, true) : [];
+    sendResponse({ ok: true, items });
+    return true;
+  }
+  // Round 88 — the user clicked a buffered relay item: send
+  // its relay_capture to the host (cookies re-read live at
+  // click time) and drop it from the buffer. The background
+  // worker is the only path to the host.
+  if (message && message.type === "relay_send_buffered") {
+    const tabId =
+      message.tabId != null
+        ? message.tabId
+        : _sender && _sender.tab && _sender.tab.id;
+    relaySendBuffered(tabId, message.url || message.finalUrl || "")
+      .then((reply) => sendResponse({ ok: true, reply }))
       .catch((err) => sendResponse({ ok: false, error: String(err) }));
     return true;
   }

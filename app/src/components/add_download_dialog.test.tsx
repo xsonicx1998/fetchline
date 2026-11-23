@@ -592,3 +592,51 @@ describe('Save As edits against the known folder (Round 87.6, item 1)', () => {
     })
   })
 })
+
+// -- Round 88 — the relay source line ------------------------------------
+// The Add URL dialog says where a capture came from (plan §6):
+// "Caught from the browser (relay)" for a relayed row, "Caught from
+// the extension" for a click/button capture. Manual Add URL and
+// clipboard captures carry no source and show no line.
+describe('capture source line (Round 88)', () => {
+  const RELAY_URL = 'https://cdn.example.com/v/movie.mp4'
+
+  function renderCapture(source: string | null) {
+    return render(
+      <AddDownloadDialog
+        open
+        standalone
+        captureMode
+        categories={[]}
+        initialUrl={RELAY_URL}
+        pendingLinkId="pl-1"
+        captureTitle="movie.mp4"
+        captureSource={source}
+        onClose={() => {}}
+        onAdded={() => {}}
+        onLateError={() => {}}
+      />,
+    )
+  }
+
+  test('a relay capture shows the relay source line', () => {
+    renderCapture('relay')
+    expect(screen.getByText('Caught from the browser (relay)')).toBeTruthy()
+  })
+
+  test('a browser capture shows the extension source line', () => {
+    renderCapture('browser')
+    expect(screen.getByText('Caught from the extension')).toBeTruthy()
+    expect(screen.queryByText('Caught from the browser (relay)')).toBeNull()
+  })
+
+  test('a video-button capture shows the extension source line', () => {
+    renderCapture('video')
+    expect(screen.getByText('Caught from the extension')).toBeTruthy()
+  })
+
+  test('no source means no source line (manual / clipboard)', () => {
+    renderCapture(null)
+    expect(screen.queryByText(/Caught from/)).toBeNull()
+  })
+})

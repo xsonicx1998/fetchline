@@ -77,6 +77,18 @@ import { ToolsStrip } from './components/ToolsStrip'
 import { UpdateDialog } from './components/UpdateDialog'
 import { VideoGrabberDialog } from './components/VideoGrabberDialog'
 
+/** Round 88 — the pending-capture poll's filter (plan §5 step 4):
+ *  a row is offered in the Add URL dialog when its source is an
+ *  extension capture ('browser' | 'video') or a relay capture
+ *  ('relay'), and it has not been offered before. 'download_all'
+ *  rows auto-add via the drain and never reach the dialog. */
+export function isDialogCapture(row: PendingLinkRow, seen: Set<string>): boolean {
+  return (
+    (row.source === 'browser' || row.source === 'video' || row.source === 'relay') &&
+    !seen.has(row.id)
+  )
+}
+
 /** S01 — main window (Round 62): the approved clean design. The
  *  window is frameless (`decorations: false` in tauri.conf.json)
  *  with its own dark title bar (new logo + "Sonic Manager"),
@@ -421,15 +433,15 @@ export default function App() {
    *  'download_all' rows auto-add), so this is the only path
    *  that surfaces them. A failed list is silent — the poll
    *  retries next second, and a failure must not clear the
-   *  queue or surface a banner. */
+   *  queue or surface a banner. Round 88 — the filter is
+   *  `isDialogCapture` (module level): it also accepts
+   *  'relay' rows, which open the same dialog pre-filled. */
   const refreshPendingCaptures = useCallback(async () => {
     if (refreshCapturesInFlight.current) return
     refreshCapturesInFlight.current = true
     try {
       const rows = await listPendingLinks()
-      const fresh = rows.filter(
-        (r) => (r.source === 'browser' || r.source === 'video') && !seenCaptureIds.current.has(r.id),
-      )
+      const fresh = rows.filter((r) => isDialogCapture(r, seenCaptureIds.current))
       if (fresh.length > 0) {
         for (const r of fresh) seenCaptureIds.current.add(r.id)
         setCaptureQueue((current) => [...current, ...fresh])

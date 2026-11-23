@@ -219,6 +219,25 @@ pub struct Settings {
     /// deserialises instead of failing the whole save.
     #[serde(default)]
     pub last_used_folder: Option<String>,
+    /// Round 88 — the relay master switch: when on, the
+    /// extension's network-traffic capture (`relay_capture`)
+    /// is accepted; when off, nothing is relayed. Default ON
+    /// (plan §11.5 — safe only because passive media is
+    /// buffered in the video button / popup instead of
+    /// auto-popping dialogs). `browser_integration` still
+    /// gates everything: integration off means no relay and no
+    /// capture of any kind. The serde default is the `true`
+    /// helper, not plain `#[serde(default)]` (which would
+    /// default a bool to false) — a settings payload from an
+    /// older UI (which never sends the field) must still load
+    /// as ON, like `platform_downloads_enabled`.
+    #[serde(default = "default_relay_enabled")]
+    pub relay_enabled: bool,
+}
+
+/// Round 88 — default for `Settings::relay_enabled`.
+fn default_relay_enabled() -> bool {
+    true
 }
 
 /// Round 73 — default for `Settings::tail_zero_progress_cap_minutes`.
@@ -275,6 +294,7 @@ impl Default for Settings {
             platform_downloads_enabled: true,
             ytdlp_extractor_args: None,
             last_used_folder: None,
+            relay_enabled: true,
         }
     }
 }
@@ -285,6 +305,24 @@ impl Default for Settings {
 /// and `confirm_pending_link` can use them without a second
 /// resolve.
 #[derive(Debug, Clone, Default)]
+/// Round 88 — what a relay capture stores on its pending row
+/// (see `enqueue_pending_link_relay`): the filename the
+/// extension derived (Content-Disposition, URL path or page
+/// title), the relayed headers as a JSON map (Cookie keys
+/// stripped by the caller), the first URL before redirects
+/// (`source_url` — renewal only, never the download target)
+/// and the capture-time size in bytes (`None` when the capture
+/// did not know it — the probe re-confirms it).
+pub struct RelayLink {
+    pub filename: Option<String>,
+    /// JSON map of User-Agent / Referer / Accept-Language /
+    /// Origin / Sec-Fetch-* / Sec-CH-UA* from the browser's
+    /// request (Cookie keys stripped).
+    pub headers: Option<String>,
+    pub source_url: Option<String>,
+    pub filesize: Option<u64>,
+}
+
 pub struct ResolvedLink {
     pub filename: Option<String>,
     /// JSON map of User-Agent/Referer from yt-dlp (Cookie keys
@@ -712,7 +750,7 @@ impl Store {
             "CREATE TABLE IF NOT EXISTS pending_links (
                id TEXT PRIMARY KEY, url TEXT NOT NULL, referrer TEXT,
                source TEXT NOT NULL DEFAULT 'browser'
-                 CHECK (source IN ('browser', 'download_all', 'video')),
+                 CHECK (source IN ('browser', 'download_all', 'video', 'relay')),
                status TEXT NOT NULL DEFAULT 'pending'
                  CHECK (status IN ('pending', 'accepted', 'rejected')),
                download_id TEXT REFERENCES downloads(id) ON DELETE SET NULL,
@@ -841,6 +879,65 @@ impl Store {
             drop(stmt);
             if !cols.iter().any(|c| c == "filesize") {
                 conn.execute("ALTER TABLE pending_links ADD COLUMN filesize INTEGER", [])?;
+            }
+        }
+        // Round 88 — the relay source: a database made before
+        // this round keeps the old pending_links CHECK
+        // ('browser' / 'download_all' / 'video'), so widen it
+        // by rebuilding the table in place — rows are copied
+        // across, nothing is lost. Same pattern as the S08
+        // rebuild above. This runs AFTER the Round 78 / Round
+        // 84 column adds above, so the rebuild's new table
+        // carries every current column (cookies, filename,
+        // headers, source_url, format_id, audio_url,
+        // fragmented, filesize) and the copy lists them all —
+        // a rebuild that dropped them would lose resolved
+        // captures. Fresh databases get the new CHECK from
+        // schema.sql directly (and, until schema.sql is
+        // updated, from this rebuild on the same open —
+        // `Store::open` runs the schema first, then this
+        // migration). The status index is recreated: dropping
+        // the table drops its indexes.
+        let pending_sql: Option<String> = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'pending_links'",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        if let Some(sql) = pending_sql {
+            if !sql.contains("'relay'") {
+                conn.execute_batch(
+                    "CREATE TABLE pending_links_new (
+                       id TEXT PRIMARY KEY, url TEXT NOT NULL, referrer TEXT,
+                       source TEXT NOT NULL DEFAULT 'browser'
+                         CHECK (source IN ('browser', 'download_all', 'video', 'relay')),
+                       status TEXT NOT NULL DEFAULT 'pending'
+                         CHECK (status IN ('pending', 'accepted', 'rejected')),
+                       download_id TEXT REFERENCES downloads(id) ON DELETE SET NULL,
+                       error TEXT,
+                       cookies TEXT,
+                       filename TEXT,
+                       headers TEXT,
+                       source_url TEXT,
+                       format_id TEXT,
+                       audio_url TEXT,
+                       fragmented INTEGER NOT NULL DEFAULT 0,
+                       filesize INTEGER,
+                       created_at TEXT NOT NULL DEFAULT (datetime('now')));
+                     INSERT INTO pending_links_new
+                       (id, url, referrer, source, status, download_id, error, cookies,
+                        filename, headers, source_url, format_id, audio_url, fragmented,
+                        filesize, created_at)
+                       SELECT id, url, referrer, source, status, download_id, error, cookies,
+                        filename, headers, source_url, format_id, audio_url, fragmented,
+                        filesize, created_at
+                       FROM pending_links;
+                     DROP TABLE pending_links;
+                     ALTER TABLE pending_links_new RENAME TO pending_links;
+                     CREATE INDEX idx_pending_links_status_created
+                       ON pending_links(status, created_at);",
+                )?;
             }
         }
         // Added in the site-grabber milestone (S06): the
@@ -1005,6 +1102,11 @@ impl Store {
                 "INTEGER NOT NULL DEFAULT 1",
             ),
             ("settings", "ytdlp_extractor_args", "TEXT"),
+            // Round 88 — the relay master switch, default on
+            // (see `Settings::relay_enabled`). Fresh databases
+            // get it from schema.sql; older databases gain it
+            // here.
+            ("settings", "relay_enabled", "INTEGER NOT NULL DEFAULT 1"),
             // Round 87.6 — the last folder the user picked
             // outright (see `Settings::last_used_folder`). Fresh
             // databases get it from schema.sql; older databases
@@ -1250,7 +1352,7 @@ impl Store {
                 "This site is excluded in Settings (excluded sites): {host}"
             )));
         }
-        if !matches!(source, "browser" | "download_all" | "video") {
+        if !matches!(source, "browser" | "download_all" | "video" | "relay") {
             return Err(EngineError::InvalidState(format!(
                 "Unknown pending-link source: {source}"
             )));
@@ -1307,6 +1409,51 @@ impl Store {
             .ok_or_else(|| EngineError::NotFound(row.id.clone()))?)
     }
 
+    /// Enqueue a relay capture (Round 88): the browser's network
+    /// traffic handed over a URL the user never clicked. The row
+    /// is `source = 'relay'` and carries the relayed
+    /// `finalUrl` as `url` (the engine probes and downloads
+    /// that), the page URL as the referrer, the first URL
+    /// (before redirects) as `source_url` — for future renewal
+    /// of an expired signed link, never as the download target
+    /// — the filename, the relayed headers (Cookie keys
+    /// stripped by the caller) and the capture-time size.
+    /// `kind` ("media" | "manifest" | "file") is NOT stored:
+    /// the pending row has no kind column, and the confirm
+    /// path distinguishes a relayed manifest by its `.m3u8` /
+    /// `.mpd` URL instead (the extension classifies a manifest
+    /// by content-type or extension — plan §4.2.7 — so a
+    /// manifest served from an extensionless URL is the one
+    /// case that takes the probe path instead of yt-dlp).
+    /// `cookies` (browser cookies for the stream host) ride
+    /// along like any other hand-off and are wiped on decision,
+    /// like every other pending row.
+    pub fn enqueue_pending_link_relay(
+        &self,
+        url: &str,
+        referrer: Option<&str>,
+        cookies: Option<&str>,
+        relay: &RelayLink,
+    ) -> Result<PendingLinkRow> {
+        let row = self.enqueue_pending_link_with_cookies(url, referrer, "relay", cookies)?;
+        let conn = self.lock_conn();
+        conn.execute(
+            "UPDATE pending_links SET filename = ?1, headers = ?2, source_url = ?3, \
+             filesize = ?4 WHERE id = ?5",
+            params![
+                relay.filename,
+                relay.headers,
+                relay.source_url,
+                relay.filesize.map(|s| s as i64),
+                row.id,
+            ],
+        )?;
+        drop(conn);
+        Ok(self
+            .get_pending_link(&row.id)?
+            .ok_or_else(|| EngineError::NotFound(row.id.clone()))?)
+    }
+
     /// Pending links, oldest first (the drain works in arrival
     /// order). `status` filters, or `None` for every row.
     pub fn list_pending_links(&self, status: Option<&str>) -> Result<Vec<PendingLinkRow>> {
@@ -1349,6 +1496,9 @@ impl Store {
     /// expired row is marked `rejected` with the reason, so it
     /// never reaches the dialog again. `download_all` rows are
     /// NOT expired here — the drain decides those itself.
+    /// Round 88 — a relay capture is interactive too (it waits
+    /// for the dialog like a browser/video capture), so it
+    /// expires the same way.
     /// `created_at` is `datetime('now')` text, so the comparison
     /// is lexicographic and correct for that format.
     pub fn expire_stale_pending_links(&self) -> Result<usize> {
@@ -1356,7 +1506,7 @@ impl Store {
         let changed = conn.execute(
             "UPDATE pending_links SET status = 'rejected', \
              error = 'Expired — the link was captured more than a day ago and was never confirmed', cookies = NULL \
-             WHERE status = 'pending' AND source IN ('browser', 'video') \
+             WHERE status = 'pending' AND source IN ('browser', 'video', 'relay') \
              AND created_at < datetime('now', '-24 hours')",
             [],
         )?;
@@ -1802,7 +1952,7 @@ impl Store {
              antivirus_enabled, antivirus_timeout_secs, show_progress_window, \
              clipboard_monitoring, show_download_complete_dialog, sounds_enabled, \
              tail_zero_progress_cap_minutes, platform_downloads_enabled, \
-             ytdlp_extractor_args, last_used_folder \
+             ytdlp_extractor_args, last_used_folder, relay_enabled \
              FROM settings WHERE id = 1",
             [],
             |r| {
@@ -1867,6 +2017,7 @@ impl Store {
                         .get::<_, Option<String>>(35)?
                         .map(|s| s.trim().to_string())
                         .filter(|s| !s.is_empty()),
+                    relay_enabled: r.get::<_, Option<i64>>(36)?.map(|v| v != 0).unwrap_or(true),
                 })
             },
         );
@@ -2014,7 +2165,7 @@ impl Store {
              show_progress_window = ?29, clipboard_monitoring = ?30, \
              show_download_complete_dialog = ?31, sounds_enabled = ?32, \
              tail_zero_progress_cap_minutes = ?33, platform_downloads_enabled = ?34, \
-             ytdlp_extractor_args = ?35, last_used_folder = ?36, \
+             ytdlp_extractor_args = ?35, last_used_folder = ?36, relay_enabled = ?37, \
              updated_at = datetime('now') WHERE id = 1",
             params![
                 s.default_download_folder.trim(),
@@ -2062,6 +2213,7 @@ impl Store {
                     .as_deref()
                     .map(str::trim)
                     .filter(|v| !v.is_empty()),
+                if s.relay_enabled { 1 } else { 0 },
             ],
         )?;
         drop(conn);

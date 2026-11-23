@@ -255,3 +255,24 @@ test("live DOM scan reports a DASH manifest as-is", () => {
   assert.equal(found[0].format, "MPD");
   assert.ok(found[0].note.includes("DASH manifest"), found[0].note);
 });
+
+// Round 88 (relay) — the dropdown / popup label helpers: only
+// media + manifests are ever offered, and a size is shown only
+// when the capture knew one (never invented).
+test("relay helpers surface media + manifests only, with honest sizes", () => {
+  const { filterRelayItems, formatRelaySize, relayItemLabel } = globalThis.FetchlineVideoDetect;
+  const items = [
+    { kind: "media", filename: "movie.mp4", content_length: 238000000 },
+    { kind: "manifest", filename: "master.m3u8", content_length: 1200 },
+    { kind: "maybe", filename: "stream-info", content_length: 100 },
+    { kind: "file", filename: "file.zip", content_length: 12345 },
+  ];
+  assert.equal(filterRelayItems(items).length, 2, "a maybe and a file are never offered");
+  assert.equal(formatRelaySize(238000000), "227.0 MB");
+  assert.equal(formatRelaySize(1200), "1 KiB");
+  assert.equal(formatRelaySize(null), "");
+  assert.equal(formatRelaySize(0), "");
+  assert.equal(relayItemLabel(items[0]), "movie.mp4 · Video · 227.0 MB");
+  assert.equal(relayItemLabel(items[1]), "master.m3u8 · Playlist · 1 KiB");
+  assert.equal(relayItemLabel({ kind: "media", content_length: null }), "Unknown · Video");
+});

@@ -14,7 +14,11 @@
 //! architecture does not name: `ping` (the extension's connection
 //! check) and `get_settings` (the extension reads the desktop
 //! `browser_integration` flag and `excluded_sites` list, so the
-//! desktop setting is the direction of truth).
+//! desktop setting is the direction of truth). Round 88 adds
+//! `relay_capture` (the extension's network-traffic handover:
+//! `{url, finalUrl, page_url, referrer, content_type,
+//! content_length, filename, kind, headers, cookies}` — see
+//! `HostMessage::RelayCapture`).
 //!
 //! Privacy: the host never logs a message body. Cookies travel
 //! only as name/value pairs for the handed-over URL (S13 finish),
@@ -209,6 +213,48 @@ pub enum HostMessage {
         cookies: Vec<CookiePair>,
         #[serde(default)]
         extractor_args: Option<String>,
+    },
+    /// Round 88 — the relay: the extension watched the
+    /// browser's network traffic and hands over a request the
+    /// user never clicked (an inline video, an HLS/DASH
+    /// manifest, a file served inline). The shape is plan
+    /// §4.4: `url` is the FIRST url, before redirects — stored
+    /// as `source_url` for future renewal of an expired signed
+    /// link, NEVER as the download target; `final_url` is what
+    /// the engine probes and downloads. `headers` is the
+    /// browser's sent-headers map (UA / Referer /
+    /// Accept-Language / Origin / Sec-Fetch-* / Sec-CH-UA*) —
+    /// `Cookie` is NEVER in it (cookies ride the validated
+    /// `cookies` array only). `kind` is "media" | "manifest" |
+    /// "file" — parsed but not persisted (the pending row has
+    /// no kind column); the confirm path distinguishes a
+    /// relayed manifest by its `.m3u8` / `.mpd` URL instead.
+    RelayCapture {
+        url: String,
+        #[serde(default, rename = "finalUrl")]
+        final_url: Option<String>,
+        #[serde(default)]
+        page_url: Option<String>,
+        #[serde(default)]
+        referrer: Option<String>,
+        #[serde(default)]
+        content_type: Option<String>,
+        #[serde(default)]
+        content_length: Option<i64>,
+        #[serde(default)]
+        filename: Option<String>,
+        #[serde(default)]
+        kind: Option<String>,
+        /// The browser's sent headers for this request, as a
+        /// string map. `Cookie` keys are stripped at the
+        /// boundary before anything is stored (defence in
+        /// depth — the extension already strips them).
+        #[serde(default)]
+        headers: std::collections::HashMap<String, String>,
+        /// The browser's cookies for the destination URL, if
+        /// any — same rules as `DownloadLink`.
+        #[serde(default)]
+        cookies: Vec<CookiePair>,
     },
 }
 
@@ -509,6 +555,36 @@ pub fn handle_host_message(store: &Store, msg: &HostMessage) -> HostReply {
             }
             Err(e) => HostReply::err("error", e.to_string()),
         },
+        HostMessage::RelayCapture {
+            url,
+            final_url,
+            page_url,
+            referrer,
+            content_type: _,
+            content_length,
+            filename,
+            kind,
+            headers,
+            cookies,
+        } => match enqueue_relay(
+            store,
+            url,
+            final_url.as_deref(),
+            page_url.as_deref().or(referrer.as_deref()),
+            kind.as_deref(),
+            *content_length,
+            filename.as_deref(),
+            headers,
+            cookies,
+        ) {
+            Ok(row) => {
+                let mut reply = HostReply::ok("queued");
+                reply.pending_link_id = Some(row.id);
+                reply.message = Some("Link queued — Fetchline will pick it up".to_string());
+                reply.with_pending_count(store)
+            }
+            Err(e) => HostReply::err("error", e.to_string()),
+        },
         HostMessage::DownloadAll { page_url, links } => {
             if links.is_empty() {
                 return HostReply::err(
@@ -646,6 +722,102 @@ fn enqueue_one(
         Some(cookies_to_json(cookies)?)
     };
     store.enqueue_pending_link_with_cookies(url, referrer, source, cookies_json.as_deref())
+}
+
+/// Round 88 — enqueue one relay capture, after the same
+/// host-boundary checks as `DownloadLink` (integration flag,
+/// excluded site, cookie validation) plus the relay master
+/// switch (`relay_enabled`). The engine downloads `final_url`;
+/// `url` (the first URL, before redirects) is stored strictly
+/// as `source_url` for future renewal of an expired signed
+/// link — never as the download target. `kind`, when present,
+/// must be one of the three the extension sends ("media" |
+/// "manifest" | "file"); it is validated here but not stored
+/// (the pending row has no kind column — the confirm path
+/// distinguishes a relayed manifest by its `.m3u8` / `.mpd`
+/// URL). `Cookie` keys are stripped from the headers map
+/// before anything is stored (defence in depth — the extension
+/// already strips them; the engine must not trust that).
+/// Headers are stored on the row's existing `headers` column
+/// as a JSON map, the same column
+/// `enqueue_pending_link_resolved` writes.
+fn enqueue_relay(
+    store: &Store,
+    url: &str,
+    final_url: Option<&str>,
+    referrer: Option<&str>,
+    kind: Option<&str>,
+    content_length: Option<i64>,
+    filename: Option<&str>,
+    headers: &std::collections::HashMap<String, String>,
+    cookies: &[CookiePair],
+) -> Result<PendingLinkRow> {
+    let settings = store.get_settings().unwrap_or_default();
+    if !settings.browser_integration {
+        return Err(EngineError::InvalidState(
+            "Browser integration is turned off in Fetchline settings".to_string(),
+        ));
+    }
+    if !settings.relay_enabled {
+        return Err(EngineError::InvalidState(
+            "Relay capture is turned off in Fetchline settings".to_string(),
+        ));
+    }
+    if let Some(kind) = kind.map(str::trim).filter(|k| !k.is_empty()) {
+        if !matches!(kind, "media" | "manifest" | "file") {
+            return Err(EngineError::InvalidState(format!(
+                "Unknown relay capture kind: {kind}"
+            )));
+        }
+    }
+    // The engine probes and downloads `final_url`; with no
+    // redirect the first URL IS the final one.
+    let target = final_url
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .unwrap_or(url);
+    if let Some(host) = host_of_url(target) {
+        if site_is_excluded(&host, &settings.excluded_sites) {
+            return Err(EngineError::InvalidState(format!(
+                "This site is excluded in Settings (excluded sites): {host}"
+            )));
+        }
+    }
+    let cookies_json = if cookies.is_empty() {
+        None
+    } else {
+        Some(cookies_to_json(cookies)?)
+    };
+    let mut map = serde_json::Map::new();
+    for (k, v) in headers {
+        if k.eq_ignore_ascii_case("cookie") {
+            continue;
+        }
+        let v = v.trim();
+        if v.is_empty() {
+            continue;
+        }
+        map.insert(k.clone(), serde_json::Value::String(v.to_string()));
+    }
+    let headers_json = if map.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&map).map_err(EngineError::Json)?)
+    };
+    store.enqueue_pending_link_relay(
+        target,
+        referrer,
+        cookies_json.as_deref(),
+        &crate::store::RelayLink {
+            filename: filename
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            headers: headers_json,
+            source_url: Some(url.trim().to_string()),
+            filesize: content_length.filter(|s| *s > 0).map(|s| s as u64),
+        },
+    )
 }
 
 /// Round 87.5 (E4) — the filename a resolved video variant is

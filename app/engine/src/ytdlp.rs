@@ -1666,6 +1666,14 @@ pub struct DirectYtDlpArgs {
     pub user_agent: Option<String>,
     /// `--add-header Referer: ...` (the page URL).
     pub referer: Option<String>,
+    /// Round 88 — the relay's extra kept headers, as
+    /// `(name, value)` pairs (Accept-Language, Origin,
+    /// Sec-Fetch-*, Sec-CH-UA* — see
+    /// `RequestHeaders::extra_headers_for_url`). Each rides as
+    /// its own `--add-header "Name: value"`, before `--` like
+    /// every other flag. Empty: the resolved-video path, which
+    /// only ever forwards User-Agent / Referer.
+    pub extra_headers: Vec<(String, String)>,
     /// Directory holding ffmpeg + ffprobe (the caller checks
     /// BOTH are present) — passed as `--ffmpeg-location`.
     pub ffmpeg_dir: Option<PathBuf>,
@@ -1732,6 +1740,25 @@ pub fn build_direct_ytdlp_args(a: &DirectYtDlpArgs) -> Vec<String> {
     if let Some(referer) = a.referer.as_deref().filter(|s| !s.contains(['\r', '\n'])) {
         args.push("--add-header".to_string());
         args.push(format!("Referer: {referer}"));
+    }
+    // Round 88 — the relay's extra kept headers ride as
+    // `--add-header` too, each before `--` like every other
+    // flag (the Round 85 rule: nothing is ever added after
+    // `--` + URL). A CR/LF in a name or value would smuggle a
+    // second header into yt-dlp's request, so such a pair is
+    // dropped, never sent.
+    for (name, value) in &a.extra_headers {
+        let name = name.trim();
+        let value = value.trim();
+        if name.is_empty()
+            || value.is_empty()
+            || name.contains(['\r', '\n', ':'])
+            || value.contains(['\r', '\n'])
+        {
+            continue;
+        }
+        args.push("--add-header".to_string());
+        args.push(format!("{name}: {value}"));
     }
     if let Some(dir) = &a.ffmpeg_dir {
         args.push("--ffmpeg-location".to_string());
@@ -3567,6 +3594,7 @@ mod tests {
             cookies_file: None,
             user_agent: None,
             referer: None,
+            extra_headers: Vec::new(),
             ffmpeg_dir: None,
             qjs: None,
             source_url: url.to_string(),
@@ -3593,6 +3621,14 @@ mod tests {
                     .to_string(),
             ),
             referer: Some(url.to_string()),
+            // Round 88 — the relay's extra kept headers ride
+            // as `--add-header` too, before `--`, with the
+            // cookies file on the same first attempt.
+            extra_headers: vec![
+                ("Accept-Language".to_string(), "en-US,en;q=0.9".to_string()),
+                ("Origin".to_string(), "https://www.tiktok.com".to_string()),
+                ("Sec-Fetch-Mode".to_string(), "navigate".to_string()),
+            ],
             ffmpeg_dir: Some(PathBuf::from(r"C:\Sonic Manager\bin")),
             qjs: Some(PathBuf::from(r"C:\Sonic Manager\qjs.exe")),
             source_url: url.to_string(),
@@ -3614,6 +3650,43 @@ mod tests {
             .any(|w| w[0] == "--js-runtimes" && w[1].starts_with("quickjs:")));
         assert!(before.contains(&"--cookies".to_string()));
         assert!(before.contains(&"--add-header".to_string()));
+        // Round 88 — the relay extras ride as `--add-header`
+        // before `--`, and a CR/LF value never reaches the argv.
+        assert!(before
+            .windows(2)
+            .any(|w| w[0] == "--add-header" && w[1] == "Accept-Language: en-US,en;q=0.9"));
+        assert!(before
+            .windows(2)
+            .any(|w| w[0] == "--add-header" && w[1] == "Origin: https://www.tiktok.com"));
+        assert!(before
+            .windows(2)
+            .any(|w| w[0] == "--add-header" && w[1] == "Sec-Fetch-Mode: navigate"));
+        // Round 88 — a CR/LF pair is dropped, never sent.
+        let dirty = DirectYtDlpArgs {
+            format_selector: "b[ext=mp4]/b".to_string(),
+            out_dir: None,
+            out_template: "clip.%(ext)s".to_string(),
+            cookies_file: None,
+            user_agent: None,
+            referer: None,
+            extra_headers: vec![
+                (
+                    "Accept-Language".to_string(),
+                    "en-US\r\nCookie: x=1".to_string(),
+                ),
+                ("Sec-Fetch-Mode".to_string(), "navigate".to_string()),
+            ],
+            ffmpeg_dir: None,
+            qjs: None,
+            source_url: url.to_string(),
+        };
+        let args = build_direct_ytdlp_args(&dirty);
+        let sep = args.iter().position(|a| a == "--").unwrap();
+        let before: &[String] = &args[..sep];
+        assert!(!before.iter().any(|a| a.contains("Cookie: x=1")));
+        assert!(before
+            .windows(2)
+            .any(|w| w[0] == "--add-header" && w[1] == "Sec-Fetch-Mode: navigate"));
         // Round 85 (Jumani) — the merge is forced to mp4,
         // also before "--".
         assert!(before.contains(&"--merge-output-format".to_string()));

@@ -225,6 +225,11 @@ export function StandaloneAddUrlWindow({
               // prefills the dialog, and its headers ride the
               // size probe.
               captureTitle={link?.filename ?? null}
+              // Round 88 — the row's source rides along so the
+              // dialog can say where the capture came from
+              // ("Caught from the browser (relay)" vs "from the
+              // extension", plan §6).
+              captureSource={link?.source ?? null}
               initialHeaders={link?.headers ?? null}
               // Round 84 — the resolved format's size: the dialog
               // renders it without probing the stream URL.

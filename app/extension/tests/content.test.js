@@ -1242,3 +1242,82 @@ test("the auto-shown button picks the visible playing video, not the first scann
   // corner (top + 12), not the neighbour's (900 + 12).
   assert.equal(button.style.top, "212px");
 });
+
+// -- Round 88 (relay) -------------------------------------------------------
+// Passive media the player fetched without a DOM source is
+// buffered by the background; the video button surfaces it in
+// the dropdown with a relay mark, and a click sends
+// relay_capture for it (the background is the only path to the
+// host). The page URL + title are mirrored to the background
+// on load and on SPA navigation (the page_context mirror).
+
+const RELAY_ITEM = {
+  type: "relay_capture",
+  url: "https://cdn.example.com/v/movie.mp4",
+  finalUrl: "https://cdn.example.com/v/movie.mp4",
+  page_url: PAGE,
+  referrer: PAGE,
+  content_type: "video/mp4",
+  content_length: 238000000,
+  filename: "movie.mp4",
+  kind: "media",
+  headers: { "User-Agent": "FakeBrowser/1.0" },
+  cookies: [],
+};
+
+function relaySendMessageImpl(msg, cb) {
+  if (msg && msg.type === "relay_get_buffered") {
+    if (typeof cb === "function") cb({ ok: true, items: [RELAY_ITEM] });
+    return;
+  }
+  if (msg && msg.type === "relay_send_buffered") {
+    if (typeof cb === "function") cb({ ok: true, reply: { ok: true } });
+    return;
+  }
+  if (typeof cb === "function") cb({ ok: true });
+}
+
+test("a blob: video with buffered relay items gets a button and the dropdown offers them (Round 88)", async () => {
+  // Off-platform, blob: src, no direct variants: without the
+  // relay this video gets no button at all.
+  const env = loadContent({
+    sendMessageImpl: relaySendMessageImpl,
+    initialVideoSpec: { url: "blob:https://example.com/abc" },
+  });
+  await tick(50);
+  assert.equal(env.buttonVisible(), true, "the relay items earn the video a button");
+  env.click(env.findButton());
+  const dropdown = env.findDropdown();
+  assert.ok(dropdown, "dropdown opens on button click");
+  assert.equal(dropdown.style.display, "block");
+  // The relay section is fetched fresh on open (async).
+  await tick(50);
+  const rows = dropdown.children.filter((c) => c.tagName === "BUTTON");
+  const relayRow = rows.find(
+    (r) => r.children[1] && r.children[1].textContent === "Relay",
+  );
+  assert.ok(relayRow, "a relay row with the Relay mark is listed");
+  assert.match(relayRow.children[0].textContent, /movie\.mp4/);
+  // Clicking it sends relay_capture for that item — and only
+  // then (nothing went to the host while it was playing).
+  assert.equal(env.sentOfType("relay_send_buffered").length, 0);
+  env.click(relayRow);
+  assert.equal(env.sentOfType("relay_send_buffered").length, 1);
+  assert.equal(env.sentOfType("relay_send_buffered")[0].url, RELAY_ITEM.url);
+});
+
+test("the content script mirrors the page context on load and on SPA navigation (Round 88)", async () => {
+  const env = loadContent({ sendMessageImpl: relaySendMessageImpl });
+  await tick(20);
+  const mirrored = env.sentOfType("page_context");
+  assert.equal(mirrored.length, 1, "one mirror message on injection");
+  assert.equal(mirrored[0].pageUrl, PAGE);
+  // SPA navigation (history.pushState, no reload): the mirror
+  // is re-sent for the new page.
+  env.location.href = "https://example.com/watch/456";
+  env.window.history.pushState({}, "", "/watch/456");
+  await tick(20);
+  const after = env.sentOfType("page_context");
+  assert.equal(after.length, 2, "a navigation re-mirrors the page");
+  assert.equal(after[1].pageUrl, "https://example.com/watch/456");
+});

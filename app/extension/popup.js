@@ -91,6 +91,7 @@ async function refreshStatus() {
 document.addEventListener("DOMContentLoaded", () => {
   void refreshStatus();
   void refreshScanLine();
+  void refreshRelayLine();
 });
 
 // Round 69 — show the last video-scan outcome, so "Find videos on
@@ -222,4 +223,93 @@ function hostOf(url) {
   } catch {
     return url;
   }
+}
+
+// Round 88 — the per-tab buffered relay list: items the relay
+// caught while they played on this page, waiting for a click.
+// Read from chrome.storage.session (the background mirrors the
+// buffer there — this popup is an extension page, so it can
+// read session storage directly), with a runtime-message
+// fallback when the mirror is empty. Clicking a row sends
+// relay_capture for it through the background worker, which
+// is the only path to the host. Media + manifests only — a
+// "maybe" is recorded, never offered.
+async function refreshRelayLine() {
+  const lineEl = $("relayLine");
+  const listEl = $("relayList");
+  if (!lineEl && !listEl) return; // older popup HTML
+  let tabId = null;
+  try {
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    tabId = tabs && tabs[0] && tabs[0].id != null ? tabs[0].id : null;
+  } catch {
+    tabId = null;
+  }
+  if (tabId == null) return;
+  let items = [];
+  try {
+    if (chrome.storage && chrome.storage.session && typeof chrome.storage.session.get === "function") {
+      const stored = await chrome.storage.session.get(`relayBuffer:${tabId}`);
+      const key = `relayBuffer:${tabId}`;
+      if (stored && Array.isArray(stored[key])) items = stored[key];
+    }
+  } catch {
+    items = [];
+  }
+  if (items.length === 0) {
+    // The session mirror is empty (or unavailable): ask the
+    // background, whose in-memory buffer is the source of
+    // truth. The reply is already surfaced-only.
+    try {
+      const reply = await chrome.runtime.sendMessage({ type: "relay_get_buffered", tabId });
+      if (reply && Array.isArray(reply.items)) items = reply.items;
+    } catch {
+      // No buffered items to show.
+    }
+  }
+  const VD = (typeof globalThis !== "undefined" && globalThis.FetchlineVideoDetect) || {};
+  if (typeof VD.filterRelayItems === "function") items = VD.filterRelayItems(items);
+  else items = (items || []).filter((i) => i && (i.kind === "media" || i.kind === "manifest"));
+  renderRelayList(lineEl, listEl, items, tabId);
+}
+
+function renderRelayList(lineEl, listEl, items, tabId) {
+  const VD = (typeof globalThis !== "undefined" && globalThis.FetchlineVideoDetect) || {};
+  if (lineEl) {
+    lineEl.textContent =
+      items.length === 0
+        ? ""
+        : `Relay: ${items.length} video${items.length === 1 ? "" : "s"} caught on this page — click one to download it.`;
+  }
+  if (!listEl) return;
+  listEl.innerHTML = "";
+  items.forEach((item) => {
+    const row = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent =
+      typeof VD.relayItemLabel === "function"
+        ? VD.relayItemLabel(item)
+        : (item && item.filename) || "Unknown";
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try {
+        const reply = await chrome.runtime.sendMessage({
+          type: "relay_send_buffered",
+          url: (item && (item.url || item.finalUrl)) || "",
+          tabId,
+        });
+        if (reply && reply.ok !== false) {
+          // The item left the buffer: re-read the list.
+          await refreshRelayLine();
+          return;
+        }
+      } catch {
+        // The send failed: leave the row for a retry.
+      }
+      button.disabled = false;
+    });
+    row.appendChild(button);
+    listEl.appendChild(row);
+  });
 }

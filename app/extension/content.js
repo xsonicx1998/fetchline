@@ -204,6 +204,16 @@
       : VD.videoPageUrlFromElement || null;
   const isFeedPageUrlFn =
     typeof isFeedPageUrl === "function" ? isFeedPageUrl : VD.isFeedPageUrl || (() => false);
+  // Round 88 — relay helpers (video-detect.js): which buffered
+  // items are offered, and how one reads in the dropdown.
+  const filterRelayItemsFn =
+    typeof filterRelayItems === "function"
+      ? filterRelayItems
+      : VD.filterRelayItems || ((items) => items || []);
+  const relayItemLabelFn =
+    typeof relayItemLabel === "function"
+      ? relayItemLabel
+      : VD.relayItemLabel || ((item) => (item && item.filename) || "Unknown");
   const createResolveCacheFn =
     typeof createResolveCache === "function" ? createResolveCache : VD.createResolveCache || null;
 
@@ -230,12 +240,76 @@
   // qualities belong to the OLD video and must never be offered
   // for the new one. Called from the history wrappers, popstate,
   // and every rescan (the MutationObserver backstop).
+  // Round 88 — the page-context mirror (Jumani note):
+  // content.js cannot read its own tabId and has no default
+  // access to chrome.storage.session, so it sends the page URL
+  // + title to the background, which files them under
+  // sender.tab.id. Sent on injection and on every SPA
+  // navigation. Best-effort: without it the relay falls back
+  // to the initiator origin and the URL path.
+  function sendPageContext() {
+    try {
+      chrome.runtime.sendMessage({
+        type: "page_context",
+        pageUrl: location.href,
+        title: (typeof document !== "undefined" && document.title) || "",
+      });
+    } catch {
+      // The mirror is best-effort (see above).
+    }
+  }
+
+  // Round 88 — ask the background for this tab's buffered
+  // relay items (media/manifest only). The background owns the
+  // buffer; this script only asks for it, never the host.
+  function requestRelayBuffered() {
+    return new Promise((resolve) => {
+      try {
+        chrome.runtime.sendMessage({ type: "relay_get_buffered" }, (reply) => {
+          const items = reply && Array.isArray(reply.items) ? reply.items : [];
+          resolve(filterRelayItemsFn(items));
+        });
+      } catch {
+        resolve([]);
+      }
+    });
+  }
+
+  // Round 88 — refresh the cached relay items and attach the
+  // button to a video that has no direct variants when items
+  // exist for the tab (a player fetching its stream without a
+  // DOM source still gets a Download button).
+  async function refreshRelayItems() {
+    relayItems = await requestRelayBuffered();
+    if (relayItems.length === 0) return;
+    document.querySelectorAll("video").forEach((el) => {
+      if (byElement.has(el) || resolveOnly.has(el) || relayOnly.has(el)) return;
+      relayOnly.add(el);
+      if (!attached.has(el)) {
+        attached.add(el);
+        el.addEventListener("mouseenter", () => {
+          clearTimeout(hideTimer);
+          showButton(el);
+        });
+        el.addEventListener("mouseleave", scheduleHide);
+      }
+    });
+    maybeShowFirst();
+  }
+
   function notePageUrlChanged() {
     const now = normalizePageUrlFn(location.href);
     if (now === lastPageUrl) return false;
     lastPageUrl = now;
     resolveCache.clear();
     closeDropdown();
+    // Round 88 — a navigation retires this page's relay items
+    // (the background clears its buffer on the page_context
+    // change too); mirror the new page and re-fetch its items.
+    relayItems = [];
+    relayOnly.clear();
+    sendPageContext();
+    void refreshRelayItems();
     return true;
   }
 
@@ -256,6 +330,12 @@
   // source (blob: src): they still get a button, and clicking
   // it resolves qualities instead of listing direct variants.
   const resolveOnly = new Set();
+  // Round 88 — videos with no direct variants that still get
+  // a button because the background buffered relay items for
+  // this tab (passive media the player fetched without a DOM
+  // source). The dropdown offers the relay items for them.
+  const relayOnly = new Set();
+  let relayItems = []; // this tab's buffered relay items (media/manifest only)
 
   // (Re-)scan the live DOM for <video> / <audio> elements and
   // their <source> children (video-detect.js, loaded first in
@@ -289,6 +369,12 @@
         attached.delete(video);
       }
     }
+    for (const video of relayOnly) {
+      if (!document.contains(video)) {
+        relayOnly.delete(video);
+        attached.delete(video);
+      }
+    }
     document.querySelectorAll("video").forEach((el) => {
       const variants = [];
       const collect = (url) => {
@@ -312,17 +398,27 @@
       if (deduped.length > 0) {
         byElement.set(el, deduped);
         resolveOnly.delete(el);
+        relayOnly.delete(el);
       } else if (isSupportedPlatformFn(location.href)) {
         // Round 78 — no direct source (blob: / empty src on a
         // platform player): the button still attaches, and the
         // click resolves qualities through yt-dlp instead.
         byElement.delete(el);
+        relayOnly.delete(el);
         resolveOnly.add(el);
+      } else if (relayItems.length > 0) {
+        // Round 88 — no direct source, but the background
+        // buffered relay items for this tab: the button still
+        // attaches, and the dropdown offers those items.
+        byElement.delete(el);
+        resolveOnly.delete(el);
+        relayOnly.add(el);
       } else {
         byElement.delete(el);
         resolveOnly.delete(el);
+        relayOnly.delete(el);
       }
-      if ((byElement.has(el) || resolveOnly.has(el)) && !attached.has(el)) {
+      if ((byElement.has(el) || resolveOnly.has(el) || relayOnly.has(el)) && !attached.has(el)) {
         attached.add(el);
         el.addEventListener("mouseenter", () => {
           clearTimeout(hideTimer);
@@ -421,7 +517,7 @@
 
   function showButton(video) {
     if (allowedResolved && !allowed) return;
-    if (!byElement.has(video) && !resolveOnly.has(video)) return;
+    if (!byElement.has(video) && !resolveOnly.has(video) && !relayOnly.has(video)) return;
     if (!button) {
       button = makeButton();
       document.body.appendChild(button);
@@ -679,8 +775,9 @@
     });
 
     const anyDownloadable = variants.some((v) => !v.drm);
-    if (!anyDownloadable) {
+    if (!anyDownloadable && relayItems.length === 0) {
       const note = document.createElement("p");
+      note._relayNoDownload = true;
       note.style.cssText = "margin: 0; padding: 11px 14px; font-size: 13px; color: #F02DCD;";
       note.textContent =
         "This video can't be downloaded by Sonic Manager — it is protected, or it has no downloadable stream.";
@@ -699,7 +796,94 @@
       dropdown.appendChild(note);
     }
 
+    // Round 88 — the relay section is fetched fresh on every
+    // dropdown open (see appendRelayRows below).
+    appendRelayRows(video);
+
     dropdown.style.display = "block";
+  }
+
+  // Round 88 — buffered relay items for this tab, below the
+  // direct qualities with a relay mark. The section appears
+  // only when the background actually buffered something;
+  // clicking a row sends relay_capture for it — nothing was
+  // sent to the host while the video was merely playing. If
+  // relay rows arrive, the "can't be downloaded" note above
+  // is hidden: the video CAN be downloaded, via the relay.
+  function appendRelayRows(video) {
+    requestRelayBuffered().then((items) => {
+      relayItems = items;
+      if (!dropdown || dropdown.style.display === "none" || dropdown._video !== video) return;
+      if (items.length === 0) return;
+      for (const child of dropdown.children || []) {
+        if (child._relayNoDownload) child.style.display = "none";
+      }
+      const header = document.createElement("p");
+      header.textContent = "Caught from the browser (relay)";
+      header.style.cssText = "margin: 0; padding: 8px 14px 4px; font-size: 11.5px; color: #00C8FF;";
+      dropdown.appendChild(header);
+      items.forEach((item) => {
+        const row = document.createElement("button");
+        row.type = "button";
+        Object.assign(row.style, {
+          display: "flex",
+          width: "100%",
+          justifyContent: "space-between",
+          alignItems: "center",
+          padding: "11px 14px",
+          border: "0",
+          background: "none",
+          fontFamily: "inherit",
+          fontSize: "13.5px",
+          color: "#ffffff",
+          textAlign: "left",
+          cursor: "pointer",
+        });
+        const label = document.createElement("span");
+        label.textContent = relayItemLabelFn(item);
+        row.appendChild(label);
+        const mark = document.createElement("span");
+        mark.textContent = "Relay";
+        mark.style.cssText = "font-size: 12px; color: #00C8FF;";
+        row.appendChild(mark);
+        row._label = label;
+        row.addEventListener("mouseenter", () => {
+          if (!row.disabled) row.style.background = ROW_HOVER_BG;
+        });
+        row.addEventListener("mouseleave", () => {
+          row.style.background = "none";
+        });
+        row.addEventListener("click", () => sendRelayItem(video, item, row, label));
+        dropdown.appendChild(row);
+      });
+    });
+  }
+
+  // Round 88 — send one buffered relay item to the host when
+  // the user clicks it. Same toast / error pattern as a
+  // quality pick (sendVariant): the dropdown closes on pick,
+  // and a failure is re-rendered in the dropdown so it stays
+  // visible instead of vanishing with the toast.
+  function sendRelayItem(video, item, row, label) {
+    closeDropdown();
+    const originalLabel = label.textContent;
+    row.disabled = true;
+    label.textContent = "Sending…";
+    chrome.runtime.sendMessage(
+      { type: "relay_send_buffered", url: item.url || item.finalUrl },
+      (reply) => {
+        if (reply && reply.ok !== false) {
+          showToast("Sent to Sonic Manager — it will appear in the download list.");
+        } else {
+          const error =
+            reply && reply.error ? reply.error : "the desktop app did not answer";
+          showToast(`Sonic Manager couldn't take this video: ${error}`);
+          renderResolveError(video, `Sonic Manager couldn't take this video: ${error}`);
+        }
+        row.disabled = false;
+        label.textContent = originalLabel;
+      },
+    );
   }
 
   // -- Round 78 (yt-dlp) resolve flow ---------------------------------
@@ -1296,6 +1480,7 @@
     };
     for (const [video] of byElement) consider(video);
     for (const video of resolveOnly) consider(video);
+    for (const video of relayOnly) consider(video);
     return best;
   }
 
@@ -1323,6 +1508,13 @@
     // Round 78 — a platform video with no direct source shows
     // the button too, even though it has no variants yet.
     for (const video of resolveOnly) {
+      showButton(video);
+      break;
+    }
+    if (button && button.style.display !== "none") return;
+    // Round 88 — a video with no direct source but buffered
+    // relay items for the tab shows the button too.
+    for (const video of relayOnly) {
       showButton(video);
       break;
     }
@@ -1427,6 +1619,11 @@
     initialized = true;
     // Fire-and-forget: must not delay the scan/show below.
     void checkAllowed();
+    // Round 88 — mirror this page for the relay and fetch the
+    // tab's buffered relay items (fire-and-forget, like the
+    // storage read above).
+    void sendPageContext();
+    void refreshRelayItems();
     const summary = scanAndAttach();
     // Round 71 (A4) — the button must appear even when the mouse
     // is ALREADY over the video when this script is injected (the
@@ -1515,6 +1712,14 @@
     // platform video with no direct source, too.
     if (!button || button.style.display === "none") {
       for (const video of resolveOnly) {
+        showButton(video);
+        break;
+      }
+    }
+    // Round 88 — same for the first video with buffered relay
+    // items and no direct source.
+    if (!button || button.style.display === "none") {
+      for (const video of relayOnly) {
         showButton(video);
         break;
       }

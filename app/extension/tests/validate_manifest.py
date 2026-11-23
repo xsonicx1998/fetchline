@@ -7,6 +7,10 @@ TikTok patterns (Round 86 — see below). `scripting` is allowed
 since S08, and only for one thing — injecting the video detector
 into the ACTIVE tab when the user clicks "Find videos on this page"
 in the popup (activeTab grants that one tab, on that one gesture).
+Round 88 (2026-11-23, user-approved) lifts two Round 86 guards
+for the relay: `webRequest` (observe-only) joins the allowed
+permissions, and host_permissions becomes exactly http://*/* +
+https://*/* (NOT <all_urls>) — see the check below.
 Round 72 (2026-11-18, user-approved): the detector is ALSO
 auto-injected on every http(s) page (`content_scripts`,
 `document_idle`) so the floating Download button appears next to
@@ -45,8 +49,8 @@ import json
 import sys
 from pathlib import Path
 
-ALLOWED_PERMISSIONS = {"activeTab", "contextMenus", "cookies", "downloads", "storage", "nativeMessaging", "scripting"}
-FORBIDDEN_PERMISSIONS = {"tabs", "webRequest", "history", "webNavigation"}
+ALLOWED_PERMISSIONS = {"activeTab", "contextMenus", "cookies", "downloads", "storage", "nativeMessaging", "scripting", "webRequest"}
+FORBIDDEN_PERMISSIONS = {"tabs", "history", "webNavigation"}
 
 REQUIRED_ICON_SIZES = {"16", "32", "48", "128"}
 
@@ -82,18 +86,22 @@ def main() -> int:
             problems.append(f"permission must not be requested: {p}")
         if p not in ALLOWED_PERMISSIONS:
             problems.append(f"unexpected permission (justify it or remove it): {p}")
-    # Round 86 — host_permissions is allowed ONLY for the two
-    # narrow TikTok patterns: `chrome.cookies.getAll` needs host
-    # permission for the queried URL, and `activeTab` covers only
-    # the active tab host (www.tiktok.com), NOT the v16 CDN host
-    # — so the R85 cookie refill threw and was swallowed. Anything
-    # else — above all <all_urls> — still fails the validation.
-    allowed_hosts = {"https://*.tiktok.com/*", "https://*.tiktokcdn.com/*"}
+    # Round 88 — relay (2026-11-23, user-approved): `webRequest`
+    # (observe-only) + exactly http://*/* + https://*/* are now
+    # allowed, and ONLY those two host patterns. The relay watches
+    # network traffic on every http(s) site (see relay-plan.md
+    # §7); <all_urls> is still forbidden — it would also claim
+    # file:// and ftp:// access the relay never needs. The
+    # narrow TikTok patterns from Round 86 are subsumed by the
+    # http(s) patterns, so they are no longer listed separately.
+    allowed_hosts = {"http://*/*", "https://*/*"}
     host_permissions = manifest.get("host_permissions", [])
     if not isinstance(host_permissions, list) or set(host_permissions) != allowed_hosts:
         problems.append(
-            "host_permissions must be exactly the two narrow TikTok patterns (Round 86), nothing broader"
+            "host_permissions must be exactly http://*/* and https://*/* (Round 88 relay), nothing broader — <all_urls> stays forbidden"
         )
+    if "<all_urls>" in (host_permissions or []):
+        problems.append("host_permissions must never contain <all_urls>")
     # Round 72 (A) — the auto-injection entry, pinned exactly: one
     # entry, http(s) matches only, document_idle, video-detect.js
     # + content.js. Anything else (another match pattern, another
@@ -173,7 +181,7 @@ def main() -> int:
         for p in problems:
             print(f"  - {p}")
         return 1
-    print("OK: manifest.json is MV3 with the minimal permission set")
+    print("OK: manifest.json is MV3 with the approved permission set (relay, Round 88)")
     return 0
 
 

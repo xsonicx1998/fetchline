@@ -22,21 +22,43 @@ const popupSrc = fs.readFileSync(path.join(__dirname, "..", "popup.js"), "utf8")
 const tick = (ms = 10) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function fakeElement() {
-  return {
+  const el = {
     textContent: "",
     className: "",
     listeners: {},
+    children: [],
+    disabled: false,
     addEventListener(type, fn) {
       this.listeners[type] = fn;
     },
+    appendChild(child) {
+      this.children.push(child);
+      return child;
+    },
   };
+  // Setting innerHTML to "" clears the element (the relay list
+  // re-renders this way); a plain property would leave stale
+  // rows behind on a second render.
+  let inner = "";
+  Object.defineProperty(el, "innerHTML", {
+    get() {
+      return inner;
+    },
+    set(v) {
+      inner = String(v);
+      if (v === "") el.children = [];
+    },
+    configurable: true,
+  });
+  return el;
 }
 
-function loadPopup({ nativeReply = { ok: true }, lastVideoScan = null, scanReply = null, tabUrl = "http://127.0.0.1/page.html" } = {}) {
+function loadPopup({ nativeReply = { ok: true }, lastVideoScan = null, scanReply = null, tabUrl = "http://127.0.0.1/page.html", tabId = null, sessionRelay = null, relayReply = null } = {}) {
   const elements = {};
-  for (const id of ["status", "statusText", "statusDetail", "scanLine"]) elements[id] = fakeElement();
+  for (const id of ["status", "statusText", "statusDetail", "scanLine", "relayLine", "relayList"]) elements[id] = fakeElement();
   let nativeHandler = () => nativeReply;
   let lastError = null;
+  const sentMessages = [];
   const chrome = {
     runtime: {
       get lastError() {
@@ -56,20 +78,41 @@ function loadPopup({ nativeReply = { ok: true }, lastVideoScan = null, scanReply
       // Default (null): no background answers, so the popup falls
       // back to the stored scan — the old behaviour. Tests pass an
       // explicit reply (or an Error to throw) to cover the fresh
-      // paths.
+      // paths. Round 88 — relay messages are answered from
+      // relayReply instead (or an empty list by default).
       sendMessage(_message) {
+        sentMessages.push(_message);
+        if (_message && _message.type === "relay_get_buffered") {
+          if (relayReply instanceof Error) return Promise.reject(relayReply);
+          return Promise.resolve(relayReply || { ok: true, items: [] });
+        }
+        if (_message && _message.type === "relay_send_buffered") {
+          return Promise.resolve({ ok: true, reply: { ok: true } });
+        }
         if (scanReply instanceof Error) return Promise.reject(scanReply);
         if (scanReply === null) return Promise.reject(new Error("Could not establish connection"));
         return Promise.resolve(scanReply);
       },
     },
     tabs: {
-      query: async () => (tabUrl ? [{ url: tabUrl }] : []),
+      query: async () => (tabUrl ? [{ ...(tabId != null ? { id: tabId } : {}), url: tabUrl }] : []),
     },
     storage: {
       local: {
         async get(_key) {
           return lastVideoScan ? { lastVideoScan } : {};
+        },
+      },
+      // Round 88 — the session mirror of the relay buffer.
+      session: {
+        async get(key) {
+          if (!sessionRelay) return {};
+          const keys = Array.isArray(key) ? key : [key];
+          const out = {};
+          for (const k of keys) {
+            if (k === `relayBuffer:${tabId}`) out[k] = sessionRelay;
+          }
+          return out;
         },
       },
     },
@@ -78,6 +121,9 @@ function loadPopup({ nativeReply = { ok: true }, lastVideoScan = null, scanReply
   const document = {
     getElementById(id) {
       return elements[id] || null;
+    },
+    createElement(_tag) {
+      return fakeElement();
     },
     addEventListener(type, fn) {
       if (type === "DOMContentLoaded") domContentLoaded = fn;
@@ -99,6 +145,7 @@ function loadPopup({ nativeReply = { ok: true }, lastVideoScan = null, scanReply
   return {
     elements,
     domContentLoaded,
+    sentMessages,
     setNativeHandler(fn) {
       nativeHandler = fn;
     },
@@ -281,4 +328,89 @@ test("popup still says 'no videos found' off-platform (Round 78)", async () => {
   await env.domContentLoaded();
   await tick();
   assert.match(env.elements.scanLine.textContent, /This page: no videos found\./);
+});
+
+// -- Round 88 (relay) -------------------------------------------------------
+// The popup shows this tab's buffered relay items (from the
+// session mirror, with a background-message fallback) with a
+// badge count, and clicking a row sends relay_capture for it.
+
+const RELAY_POPUP_ITEMS = [
+  {
+    type: "relay_capture",
+    url: "https://cdn.example.com/v/movie.mp4",
+    finalUrl: "https://cdn.example.com/v/movie.mp4",
+    page_url: "http://127.0.0.1/page.html",
+    content_type: "video/mp4",
+    content_length: 238000000,
+    filename: "movie.mp4",
+    kind: "media",
+    headers: {},
+    cookies: [],
+  },
+  {
+    type: "relay_capture",
+    url: "https://cdn.example.com/hls/master.m3u8",
+    finalUrl: "https://cdn.example.com/hls/master.m3u8",
+    page_url: "http://127.0.0.1/page.html",
+    content_type: "application/vnd.apple.mpegurl",
+    content_length: 1200,
+    filename: "master.m3u8",
+    kind: "manifest",
+    headers: {},
+    cookies: [],
+  },
+  {
+    type: "relay_capture",
+    url: "https://cdn.example.com/api/stream-info",
+    finalUrl: "https://cdn.example.com/api/stream-info",
+    page_url: "http://127.0.0.1/page.html",
+    content_type: "text/plain",
+    content_length: 100,
+    filename: "stream-info",
+    kind: "maybe",
+    headers: {},
+    cookies: [],
+  },
+];
+
+test("popup shows the buffered relay list for the active tab, maybe items excluded (Round 88)", async () => {
+  const env = loadPopup({ tabId: 5, sessionRelay: RELAY_POPUP_ITEMS });
+  await env.domContentLoaded();
+  await tick();
+  // The badge counts surfaced items only: media + manifest.
+  // The "maybe" is recorded, never offered.
+  assert.match(env.elements.relayLine.textContent, /Relay: 2 videos caught on this page/);
+  const rows = env.elements.relayList.children;
+  assert.equal(rows.length, 2, "one row per surfaced relay item");
+  const labels = rows.map((li) => li.children[0].textContent).join(" | ");
+  assert.match(labels, /movie\.mp4/);
+  assert.match(labels, /master\.m3u8/);
+  // Clicking a row sends relay_capture for that item through
+  // the background worker.
+  await rows[0].children[0].listeners.click();
+  await tick();
+  const sent = env.sentMessages.filter((m) => m && m.type === "relay_send_buffered");
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].url, "https://cdn.example.com/v/movie.mp4");
+  assert.equal(sent[0].tabId, 5);
+});
+
+test("popup falls back to the background message when the session mirror is empty (Round 88)", async () => {
+  const env = loadPopup({
+    tabId: 5,
+    relayReply: { ok: true, items: [RELAY_POPUP_ITEMS[0]] },
+  });
+  await env.domContentLoaded();
+  await tick();
+  assert.match(env.elements.relayLine.textContent, /Relay: 1 video caught on this page/);
+  assert.equal(env.elements.relayList.children.length, 1);
+});
+
+test("popup shows no relay line when the tab has no buffered items (Round 88)", async () => {
+  const env = loadPopup({ tabId: 5, sessionRelay: [] });
+  await env.domContentLoaded();
+  await tick();
+  assert.equal(env.elements.relayLine.textContent, "");
+  assert.equal(env.elements.relayList.children.length, 0);
 });

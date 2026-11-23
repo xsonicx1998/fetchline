@@ -755,6 +755,36 @@ export function SettingsDialog({ open, categories, onClose, onSaved, onCheckUpda
                 link?&rdquo; offer. One click adds it, dismiss ignores it — nothing is ever
                 downloaded without you, and a dismissed link is never offered again.
               </p>
+              {/* Round 88 — the relay master switch (plan §6,
+               *  §11.5): the extension's network observation that
+               *  catches videos and files playing in the browser.
+               *  Same immediate-write binding as the clipboard
+               *  checkbox above. It sits in the same browser-catch
+               *  cluster, directly under the clipboard checkbox
+               *  (the 87.8 position test pins the clipboard
+               *  checkbox as the one right after "Catch downloads
+               *  from the browser", so the relay switch goes
+               *  after it, not between). Disabled while catching
+               *  from the browser is off — the master switch
+               *  gates everything, like the platform-videos
+               *  toggle below. */}
+              <label className="flex items-center gap-2 text-base">
+                <input
+                  type="checkbox"
+                  checked={settings.relay_enabled}
+                  onChange={(e) => void saveField('relay_enabled', e.target.checked)}
+                  disabled={!settings.browser_integration}
+                  className="h-4 w-4 accent-accent"
+                />
+                Catch videos and files playing in the browser (relay)
+              </label>
+              <p className={hintCls}>
+                On (the default), the extension also catches a video or file playing in the
+                browser — even one no link or button pointed at. A file it catches opens this
+                Add URL dialog for you to confirm; a video playing inline waits in the video
+                button until you pick it. Only applies while catching downloads from the
+                browser is on.
+              </p>
               <label className="flex items-center gap-2 text-base">
                 <input
                   type="checkbox"

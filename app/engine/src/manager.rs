@@ -1384,8 +1384,35 @@ impl DownloadManager {
     /// that somehow survived is dropped here too (defence in
     /// depth — headers must never carry a session past the cookie
     /// validation).
+    ///
+    /// Round 88 — the allow-list is exactly the relay's kept
+    /// set (plan §5.5): User-Agent, Referer, Accept-Language,
+    /// Origin, Sec-Fetch-* and Sec-CH-UA* are carried; Cookie,
+    /// Host, Range, Content-Length and Transfer-Encoding are
+    /// stripped, and anything else is dropped — the engine must
+    /// not trust the extension to have stripped them. Use
+    /// `headers_from_json_with_origin` when the URL the headers
+    /// were recorded for is known: it records the origin, so
+    /// `apply_headers` can drop a stale `Sec-Fetch-Site` after
+    /// a cross-origin redirect.
     pub fn headers_from_json(json: Option<&str>) -> crate::probe::RequestHeaders {
+        Self::headers_from_json_with_origin(json, None)
+    }
+
+    /// Round 88 — `headers_from_json` with the origin the
+    /// headers were recorded for (`Some(url)` — the relayed
+    /// `finalUrl`, or the URL being probed): the origin is
+    /// stored on the `RequestHeaders` as `recorded_origin`,
+    /// and `apply_headers` drops `Sec-Fetch-Site` when a later
+    /// request goes to another origin. `None` keeps the old
+    /// behaviour (no recorded origin — `Sec-Fetch-Site` is
+    /// then never forwarded).
+    pub fn headers_from_json_with_origin(
+        json: Option<&str>,
+        url: Option<&str>,
+    ) -> crate::probe::RequestHeaders {
         let mut out = crate::probe::RequestHeaders::default();
+        out.recorded_origin = url.and_then(crate::probe::origin_of);
         let Some(json) = json else {
             return out;
         };
@@ -1397,9 +1424,25 @@ impl DownloadManager {
             let Some(s) = v.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
                 continue;
             };
+            // Allow-list ONLY (plan §5.5): the six relay-kept
+            // names. Cookie / Host / Range / Content-Length /
+            // Transfer-Encoding — and anything unlisted — are
+            // stripped here, at the second layer after the host
+            // boundary, so a header map that smuggles a session
+            // or a range past the extension still cannot reach
+            // a request.
             match k.to_ascii_lowercase().as_str() {
                 "user-agent" => out.user_agent = Some(s.to_string()),
                 "referer" => out.referer = Some(s.to_string()),
+                "accept-language" => out.accept_language = Some(s.to_string()),
+                "origin" => out.origin = Some(s.to_string()),
+                "sec-fetch-site" => out.sec_fetch_site = Some(s.to_string()),
+                "sec-fetch-mode" => out.sec_fetch_mode = Some(s.to_string()),
+                "sec-fetch-dest" => out.sec_fetch_dest = Some(s.to_string()),
+                "sec-fetch-user" => out.sec_fetch_user = Some(s.to_string()),
+                "sec-ch-ua" => out.sec_ch_ua = Some(s.to_string()),
+                "sec-ch-ua-mobile" => out.sec_ch_ua_mobile = Some(s.to_string()),
+                "sec-ch-ua-platform" => out.sec_ch_ua_platform = Some(s.to_string()),
                 _ => {}
             }
         }
@@ -2297,7 +2340,11 @@ impl DownloadManager {
             // dialog for them (like IDM) instead of auto-adding,
             // so the drain leaves them pending for the dialog.
             // Only 'download_all' rows are drained here.
-            if row.source == "browser" || row.source == "video" {
+            // Round 88 — a 'relay' capture is interactive too:
+            // the user answers it in the dialog (a passive
+            // inline video was never asked to download), so the
+            // drain leaves it pending exactly like browser/video.
+            if row.source == "browser" || row.source == "video" || row.source == "relay" {
                 continue;
             }
             // Browser cookies (S13 finish): rebuild the validated
@@ -2430,7 +2477,10 @@ impl DownloadManager {
         headers_json: Option<&str>,
     ) -> Result<ProbeInfo> {
         let header = cookies_json.and_then(|json| cookies_to_header(&cookies_from_json(json)).ok());
-        let headers = Self::headers_from_json(headers_json);
+        // Round 88 — the headers were recorded for this URL, so
+        // its origin is the recorded origin (the `Sec-Fetch-Site`
+        // rule needs it).
+        let headers = Self::headers_from_json_with_origin(headers_json, Some(url));
         self.probe_url_with_headers(url, header.as_deref(), Some(&headers))
             .await
     }
@@ -2535,12 +2585,21 @@ impl DownloadManager {
         let resolved_filename = filename
             .filter(|f| !f.trim().is_empty())
             .or_else(|| row.filename.clone());
-        let headers = Self::headers_from_json(row.headers.as_deref());
+        // Round 88 — the headers were recorded for this row's
+        // URL (the relayed `finalUrl`), so its origin is the
+        // recorded origin (the `Sec-Fetch-Site` rule needs it).
+        let headers = Self::headers_from_json_with_origin(row.headers.as_deref(), Some(&row.url));
         let headers = if headers.is_empty() {
             None
         } else {
             Some(headers)
         };
+        // Round 88 — a relayed HLS / DASH manifest (`.m3u8` /
+        // `.mpd` URL, relay source) routes to the direct yt-dlp
+        // path below, never to the probe+segment path (see
+        // `is_relay_manifest_url`).
+        let relay_manifest =
+            row.source == "relay" && is_relay_manifest_url(&row.url, row.filename.as_deref());
         // Round 78 — a (B) fragmented download is created
         // without a probe or segments: yt-dlp downloads the
         // manifest format itself, and the manifest URL is not a
@@ -2586,7 +2645,59 @@ impl DownloadManager {
                 || is_tiktok_stream_host(&row.url));
         let mut use_direct = row.fragmented;
         let mut effective_format_id = row.format_id.clone();
-        let add = if row.fragmented {
+        // Round 88 — the page URL a re-resolve / direct run
+        // downloads from. A relayed manifest downloads from the
+        // manifest URL itself (the branch below overrides this
+        // to `row.url`); every other direct row downloads from
+        // the resolver's page URL.
+        let mut meta_source_url = row.source_url.clone();
+        let add = if relay_manifest {
+            // Round 88 — a relayed `.m3u8` / `.mpd` does NOT go
+            // down the probe+segment path (the engine saves a
+            // playlist as-is today — a playlist is not the
+            // video). It is routed to the existing direct yt-dlp
+            // path, which handles HLS/DASH natively and merges
+            // the segments, with the relayed headers + cookies
+            // (the same forwarding the resolved-video path
+            // already does — `--add-header` and `--cookies`,
+            // all before `--`, see `build_direct_ytdlp_args`).
+            // The dialog offers it as a video, not as a
+            // playlist file: the filename carries `.mp4` (the
+            // merge format) and the runner downloads the
+            // manifest URL itself with format "best".
+            use_direct = true;
+            meta_source_url = Some(row.url.clone());
+            effective_format_id = Some(RELAY_MANIFEST_FORMAT_ID.to_string());
+            let manifest_name = relay_manifest_filename(resolved_filename.clone(), &row.url);
+            match self
+                .add_direct_ytdlp_download(
+                    &row.url,
+                    Some(manifest_name.clone()),
+                    folder,
+                    explicit_folder,
+                    category_id,
+                    queue_id,
+                    cookies,
+                    headers,
+                    row.filesize,
+                )
+                .await
+            {
+                Ok(download_id) => Ok((
+                    download_id,
+                    ProbeInfo {
+                        size: row.filesize.filter(|s| *s > 0).map(|s| s as u64),
+                        accept_ranges: false,
+                        etag: None,
+                        last_modified: None,
+                        filename: Some(manifest_name),
+                        content_type: None,
+                        final_url: row.url.clone(),
+                    },
+                )),
+                Err(e) => Err(e),
+            }
+        } else if row.fragmented {
             match self
                 .add_direct_ytdlp_download(
                     &row.url,
@@ -2707,9 +2818,12 @@ impl DownloadManager {
                 // took the direct branch above records
                 // `direct_ytdlp`, so a later Resume uses the
                 // yt-dlp runner instead of the segmented one.
+                // Round 88 — a relayed manifest records the
+                // manifest URL itself as the source URL (the
+                // runner downloads from it) with format "best".
                 let _ = self.store.set_download_ytdlp_meta(
                     &download_id,
-                    row.source_url.as_deref(),
+                    meta_source_url.as_deref(),
                     effective_format_id.as_deref(),
                     use_direct,
                 );
@@ -6242,6 +6356,14 @@ impl DownloadManager {
     /// Build a `RequestHeaders` from yt-dlp's `http_headers`
     /// map (the same Cookie-key rule as `headers_from_json`:
     /// only User-Agent / Referer survive).
+    ///
+    /// Round 88 — the same allow-list as `headers_from_json`
+    /// now (the relay's kept set): yt-dlp's `http_headers`
+    /// can also carry Accept-Language / Origin / Sec-Fetch-* /
+    /// Sec-CH-UA*, and they ride the probe and the segments the
+    /// same way. No recorded origin here — yt-dlp headers
+    /// carry no provenance, so a `Sec-Fetch-Site` among them
+    /// is parsed but never forwarded (see `apply_headers`).
     fn headers_map_from_http_headers(
         map: &std::collections::HashMap<String, String>,
     ) -> crate::probe::RequestHeaders {
@@ -6254,6 +6376,15 @@ impl DownloadManager {
             match k.to_ascii_lowercase().as_str() {
                 "user-agent" => out.user_agent = Some(s.to_string()),
                 "referer" => out.referer = Some(s.to_string()),
+                "accept-language" => out.accept_language = Some(s.to_string()),
+                "origin" => out.origin = Some(s.to_string()),
+                "sec-fetch-site" => out.sec_fetch_site = Some(s.to_string()),
+                "sec-fetch-mode" => out.sec_fetch_mode = Some(s.to_string()),
+                "sec-fetch-dest" => out.sec_fetch_dest = Some(s.to_string()),
+                "sec-fetch-user" => out.sec_fetch_user = Some(s.to_string()),
+                "sec-ch-ua" => out.sec_ch_ua = Some(s.to_string()),
+                "sec-ch-ua-mobile" => out.sec_ch_ua_mobile = Some(s.to_string()),
+                "sec-ch-ua-platform" => out.sec_ch_ua_platform = Some(s.to_string()),
                 _ => {}
             }
         }
@@ -7523,6 +7654,32 @@ impl DownloadManager {
         // resolve is cookieless), so no retry is possible there.
         let req_headers = self.headers_for(id);
         let mut cookies_file: Option<crate::ytdlp::CookieTempFile> = None;
+        // Round 88 — a relayed manifest WITH cookies sends them
+        // on the FIRST attempt (see
+        // `direct_relay_cookies_first`): unlike the Round 87
+        // TikTok path, there is no platform-specific login
+        // retry flow for a generic login-walled site, so a
+        // cookieless first attempt would fail a download that
+        // could have succeeded. The file is built from the
+        // stored pairs (domain/path intact), like the retry's
+        // file below — and like the retry, a missing file only
+        // costs the cookies, never the attempt.
+        let has_cookies = self.cookie_pairs.lock().unwrap().contains_key(id)
+            || self.cookies.lock().unwrap().contains_key(id);
+        if direct_relay_cookies_first(&source_url, has_cookies) {
+            let host = url_host(&source_url).unwrap_or_default();
+            match self.direct_retry_cookies_file(id, &host) {
+                Ok(Some(file)) => {
+                    cookies_file = Some(file);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    let _ = self.store.log(&format!(
+                        "direct yt-dlp download {id}: could not write a cookies file for the relayed manifest ({e}) — first attempt runs cookieless"
+                    ));
+                }
+            }
+        }
         // Round 85 (Claude delta) — the whole argv is built by
         // ONE pure function (`build_direct_ytdlp_args`,
         // ytdlp.rs): the R84 bug was `--ffmpeg-location` /
@@ -7556,7 +7713,11 @@ impl DownloadManager {
         // LoginRequired failure retries, once, with the
         // capture's cookies. The argv is rebuilt per attempt —
         // the retry's argv carries `--cookies`, the first
-        // attempt's never does.
+        // attempt's never does. Round 88 — the one exception is
+        // a relayed manifest with cookies (see the
+        // `cookies_file` setup above): its first attempt already
+        // carries `--cookies`, so the retry below only fires
+        // when the first attempt had none to send.
         let mut attempt_no = 0u32;
         'attempts: loop {
             attempt_no += 1;
@@ -7567,6 +7728,15 @@ impl DownloadManager {
                 cookies_file: cookies_file.as_ref().map(|f| f.path.clone()),
                 user_agent: req_headers.as_ref().and_then(|h| h.user_agent.clone()),
                 referer: req_headers.as_ref().and_then(|h| h.referer.clone()),
+                // Round 88 — the relay's extra kept headers ride
+                // as `--add-header` too (before `--`, like every
+                // other flag — see `build_direct_ytdlp_args`).
+                // `Sec-Fetch-Site` is included only when the
+                // recorded origin matches this URL's origin.
+                extra_headers: req_headers
+                    .as_ref()
+                    .map(|h| h.extra_headers_for_url(&source_url))
+                    .unwrap_or_default(),
                 ffmpeg_dir: if paths.ffmpeg.is_some() && paths.ffprobe.is_some() {
                     paths
                         .ffmpeg
@@ -10842,7 +11012,12 @@ async fn download_segment_once(
         // Round 78 — per-download headers (User-Agent / Referer
         // from yt-dlp): the stream host expects them, and the
         // global "Fetchline/0.1" UA is answered with 403.
-        req = crate::probe::apply_headers(req, headers.as_ref());
+        // Round 88 — the relay's extra kept headers ride here
+        // too (Accept-Language, Origin, Sec-Fetch-*,
+        // Sec-CH-UA*); `apply_headers` drops `Sec-Fetch-Site`
+        // when this segment's URL is another origin than the
+        // one the headers were recorded for.
+        req = crate::probe::apply_headers(req, headers.as_ref(), Some(url));
         if let Some((user, pass)) = proxy_basic {
             req = req.header("proxy-authorization", basic_proxy_auth_header(user, pass));
         }
@@ -11520,6 +11695,85 @@ pub(crate) fn is_tiktok_stream_host(url: &str) -> bool {
     }
 }
 
+/// Round 88 — the format id a relayed manifest records:
+/// yt-dlp downloads the manifest URL itself with "best"
+/// (`direct_download_format_selector` keeps the
+/// `b[ext=mp4]/b` fallback chain on it, so the merge lands
+/// as mp4).
+pub(crate) const RELAY_MANIFEST_FORMAT_ID: &str = "best";
+
+/// Round 88 — is this a relayed HLS / DASH manifest? The
+/// pending row has no kind column, so the confirm path keys
+/// off the URL (and, as a fallback, the filename): a path
+/// ending in `.m3u8` / `.mpd` (query and fragment stripped,
+/// case-insensitive). A manifest served from an extensionless
+/// URL is the one case this misses (see
+/// `enqueue_pending_link_relay`).
+pub(crate) fn is_relay_manifest_url(url: &str, filename: Option<&str>) -> bool {
+    let path = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if path.ends_with(".m3u8") || path.ends_with(".mpd") {
+        return true;
+    }
+    filename
+        .map(|f| f.trim().to_ascii_lowercase())
+        .map(|f| f.ends_with(".m3u8") || f.ends_with(".mpd"))
+        .unwrap_or(false)
+}
+
+/// Round 88 — the filename a relayed manifest is offered and
+/// saved under: the dialog offers it as a video, not as a
+/// playlist file, so a `.m3u8` / `.mpd` extension becomes
+/// `.mp4` (the merge format) and a bare title gains `.mp4`.
+/// The URL stem is the fallback when no filename was captured.
+pub(crate) fn relay_manifest_filename(filename: Option<String>, url: &str) -> String {
+    let name = filename
+        .map(|f| f.trim().to_string())
+        .filter(|f| !f.is_empty())
+        .or_else(|| {
+            url.split(['?', '#'])
+                .next()
+                .unwrap_or("")
+                .rsplit('/')
+                .next()
+                .map(str::to_string)
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| "video".to_string());
+    let lower = name.to_ascii_lowercase();
+    let stem = if lower.ends_with(".m3u8") {
+        &name[..name.len() - 5]
+    } else if lower.ends_with(".mpd") {
+        &name[..name.len() - 4]
+    } else {
+        &name[..]
+    };
+    let stem = stem.trim();
+    if stem.is_empty() {
+        "video.mp4".to_string()
+    } else {
+        format!("{stem}.mp4")
+    }
+}
+
+/// Round 88 — does this direct yt-dlp run send the capture's
+/// cookies on the FIRST attempt? Only a relayed manifest does:
+/// login-walled generic sites have no platform-specific login
+/// retry flow, so withholding cookies first would fail a
+/// download that could have succeeded (plan §5, Revision 1).
+/// Every other direct download keeps the Round 87 cookieless
+/// first attempt (cookies only on the LoginRequired / TikTok
+/// CdnRefused retry). The manifest is recognised by its
+/// source URL — a relayed manifest's source URL IS the
+/// manifest — and `has_cookies` is whether the download
+/// carries any session at all.
+pub(crate) fn direct_relay_cookies_first(source_url: &str, has_cookies: bool) -> bool {
+    has_cookies && is_relay_manifest_url(source_url, None)
+}
+
 /// Round 86 — the `expire=` query parameter of a signed stream
 /// URL (googlevideo and the TikTok CDN both carry it), as a unix
 /// epoch. `None` when the URL has no `expire=` (a plain file, or
@@ -12169,6 +12423,175 @@ mod tests {
         assert!(should_delete_empty_part(-1));
         assert!(!should_delete_empty_part(1));
         assert!(!should_delete_empty_part(43_464_728));
+    }
+
+    // -- Round 88 (relay): header allow-list, manifest routing ---------
+    // `headers_from_json` carries exactly the relay's kept set
+    // and strips everything else (defence in depth — the
+    // extension already strips Cookie, the engine must not
+    // trust that); a relayed manifest is recognised by its
+    // `.m3u8` / `.mpd` URL and takes the direct yt-dlp path
+    // with cookies on the first attempt.
+
+    #[test]
+    fn headers_from_json_carries_the_relay_set_and_strips_the_rest() {
+        let h = DownloadManager::headers_from_json(Some(
+            "{\"User-Agent\": \"Mozilla/5.0\", \"Referer\": \"https://example.com/\", \
+             \"Accept-Language\": \"en-US,en;q=0.9\", \"Origin\": \"https://example.com\", \
+             \"Sec-Fetch-Site\": \"same-origin\", \"Sec-Fetch-Mode\": \"navigate\", \
+             \"Sec-Fetch-Dest\": \"video\", \"Sec-Fetch-User\": \"?1\", \
+             \"Sec-CH-UA\": \"\\\"Chromium\\\";v=\\\"140\\\"\", \"Sec-CH-UA-Mobile\": \"?0\", \
+             \"Sec-CH-UA-Platform\": \"\\\"Windows\\\"\", \
+             \"Cookie\": \"SID=abc\", \"cookie\": \"other=1\", \"Host\": \"example.com\", \
+             \"Range\": \"bytes=0-\", \"Content-Length\": \"123\", \
+             \"Transfer-Encoding\": \"chunked\", \"X-Custom\": \"yes\"}",
+        ));
+        assert_eq!(h.user_agent.as_deref(), Some("Mozilla/5.0"));
+        assert_eq!(h.referer.as_deref(), Some("https://example.com/"));
+        assert_eq!(h.accept_language.as_deref(), Some("en-US,en;q=0.9"));
+        assert_eq!(h.origin.as_deref(), Some("https://example.com"));
+        assert_eq!(h.sec_fetch_site.as_deref(), Some("same-origin"));
+        assert_eq!(h.sec_fetch_mode.as_deref(), Some("navigate"));
+        assert_eq!(h.sec_fetch_dest.as_deref(), Some("video"));
+        assert_eq!(h.sec_fetch_user.as_deref(), Some("?1"));
+        assert_eq!(h.sec_ch_ua.as_deref(), Some("\"Chromium\";v=\"140\""));
+        assert_eq!(h.sec_ch_ua_mobile.as_deref(), Some("?0"));
+        assert_eq!(h.sec_ch_ua_platform.as_deref(), Some("\"Windows\""));
+        assert!(!h.is_empty());
+        // The stripped names never survive, whatever the case.
+        let _ = h;
+        let h = DownloadManager::headers_from_json(Some(
+            "{\"Cookie\": \"SID=abc\", \"Host\": \"example.com\", \"Range\": \"bytes=0-\", \
+             \"Content-Length\": \"123\", \"Transfer-Encoding\": \"chunked\"}",
+        ));
+        assert!(h.is_empty(), "only forbidden names must mean no headers");
+        // A value that is not a string is skipped, never sent.
+        let h = DownloadManager::headers_from_json(Some(
+            "{\"User-Agent\": 42, \"Referer\": \"https://example.com/\"}",
+        ));
+        assert_eq!(h.user_agent, None);
+        assert_eq!(h.referer.as_deref(), Some("https://example.com/"));
+    }
+
+    #[test]
+    fn headers_from_json_with_origin_records_the_origin() {
+        let h = DownloadManager::headers_from_json_with_origin(
+            Some("{\"Sec-Fetch-Site\": \"same-origin\"}"),
+            Some("https://example.com/v/movie.mp4?sig=1"),
+        );
+        assert_eq!(
+            h.recorded_origin.as_deref(),
+            Some("https://example.com"),
+            "the recorded origin is the URL's origin, not the URL"
+        );
+        assert_eq!(h.sec_fetch_site.as_deref(), Some("same-origin"));
+        let h = DownloadManager::headers_from_json_with_origin(None, Some("https://example.com/x"));
+        // No headers at all — but the origin is still recorded,
+        // so a later header set on the same struct is guarded.
+        assert!(h.is_empty());
+        assert_eq!(h.recorded_origin.as_deref(), Some("https://example.com"));
+        let h = DownloadManager::headers_from_json_with_origin(None, None);
+        assert!(h.is_empty());
+        assert_eq!(h.recorded_origin, None);
+    }
+
+    #[test]
+    fn is_relay_manifest_url_matches_m3u8_and_mpd() {
+        assert!(is_relay_manifest_url(
+            "https://cdn.example.com/hls/master.m3u8",
+            None
+        ));
+        assert!(is_relay_manifest_url(
+            "https://cdn.example.com/dash/manifest.mpd?token=abc",
+            None
+        ));
+        assert!(is_relay_manifest_url(
+            "https://cdn.example.com/hls/MASTER.M3U8#frag",
+            None
+        ));
+        // The filename is the fallback: a manifest URL that
+        // carries no extension in the path still routes when
+        // the captured filename says so.
+        assert!(is_relay_manifest_url(
+            "https://cdn.example.com/stream/abc123",
+            Some("master.m3u8")
+        ));
+        assert!(!is_relay_manifest_url(
+            "https://cdn.example.com/v/movie.mp4",
+            Some("movie.mp4")
+        ));
+        assert!(!is_relay_manifest_url(
+            "https://cdn.example.com/v/movie.mp4",
+            None
+        ));
+        // A playlist extension in the QUERY is not a manifest.
+        assert!(!is_relay_manifest_url(
+            "https://cdn.example.com/v/movie.mp4?x=master.m3u8",
+            None
+        ));
+    }
+
+    #[test]
+    fn relay_manifest_filename_becomes_an_mp4_video_name() {
+        assert_eq!(
+            relay_manifest_filename(
+                Some("master.m3u8".to_string()),
+                "https://cdn.example.com/hls/master.m3u8"
+            ),
+            "master.mp4"
+        );
+        assert_eq!(
+            relay_manifest_filename(
+                Some("manifest.MPD".to_string()),
+                "https://cdn.example.com/dash/manifest.mpd"
+            ),
+            "manifest.mp4"
+        );
+        assert_eq!(
+            relay_manifest_filename(
+                Some("My Video".to_string()),
+                "https://cdn.example.com/hls/master.m3u8"
+            ),
+            "My Video.mp4"
+        );
+        assert_eq!(
+            relay_manifest_filename(None, "https://cdn.example.com/hls/master.m3u8"),
+            "master.mp4"
+        );
+        assert_eq!(
+            relay_manifest_filename(None, "https://cdn.example.com/hls/"),
+            "video.mp4"
+        );
+    }
+
+    #[test]
+    fn direct_relay_cookies_first_only_for_a_manifest_with_cookies() {
+        // A relayed manifest WITH cookies: first attempt.
+        assert!(direct_relay_cookies_first(
+            "https://cdn.example.com/hls/master.m3u8",
+            true
+        ));
+        assert!(direct_relay_cookies_first(
+            "https://cdn.example.com/dash/manifest.mpd",
+            true
+        ));
+        // No cookies: nothing to send first, whatever the URL.
+        assert!(!direct_relay_cookies_first(
+            "https://cdn.example.com/hls/master.m3u8",
+            false
+        ));
+        // A plain direct download keeps the Round 87 cookieless
+        // first attempt even when it carries cookies — the
+        // TikTok / fragmented paths retry with cookies only
+        // after a LoginRequired (or TikTok CdnRefused) failure.
+        assert!(!direct_relay_cookies_first(
+            "https://www.tiktok.com/@user/video/123",
+            true
+        ));
+        assert!(!direct_relay_cookies_first(
+            "https://cdn.example.com/v/movie.mp4",
+            true
+        ));
     }
 
     /// Round 87.1 — the debug-only env overrides fire ONLY

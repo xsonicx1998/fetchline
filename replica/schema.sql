@@ -213,6 +213,11 @@ CREATE TABLE IF NOT EXISTS settings (
   language TEXT NOT NULL DEFAULT 'en',
   theme TEXT NOT NULL DEFAULT 'dark' CHECK (theme IN ('light','dark')),
   browser_integration INTEGER NOT NULL DEFAULT 1,
+  -- Relay master switch (Round 88, 2026-11-23): 1 = the browser
+  -- extension may relay videos/files playing in the browser to
+  -- the app (default); 0 = no relay capture of any kind. The
+  -- browser_integration switch above still gates everything.
+  relay_enabled INTEGER NOT NULL DEFAULT 1,
   -- Clipboard monitoring (Round 52, 2026-11-16): 1 = copying a
   -- download link offers to download it (default); 0 = the
   -- clipboard is never looked at.
@@ -347,7 +352,7 @@ CREATE TABLE IF NOT EXISTS pending_links (
   url TEXT NOT NULL,
   referrer TEXT,
   source TEXT NOT NULL DEFAULT 'browser'
-    CHECK (source IN ('browser', 'download_all', 'video')),
+    CHECK (source IN ('browser', 'download_all', 'video', 'relay')), -- Round 88: relay captures
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending', 'accepted', 'rejected')),
   download_id TEXT REFERENCES downloads(id) ON DELETE SET NULL,

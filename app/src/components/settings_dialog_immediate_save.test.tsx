@@ -55,6 +55,7 @@ function baseSettings(): Settings {
     platform_downloads_enabled: true,
     browser_start_drained: true,
     clipboard_monitoring: true,
+    relay_enabled: true,
     show_progress_window: true,
     show_download_complete_dialog: true,
     excluded_sites: [],
@@ -324,5 +325,60 @@ describe('clipboard checkbox placement (Round 87.8)', () => {
     )
     expect(catchIdx).toBeGreaterThanOrEqual(0)
     expect(clipboardIdx).toBe(catchIdx + 1)
+  })
+})
+
+describe('relay master switch (Round 88)', () => {
+  test('the relay checkbox renders, checked by default, right after the clipboard checkbox', async () => {
+    await openGeneralTab()
+    const checkbox = screen.getByLabelText(
+      'Catch videos and files playing in the browser (relay)',
+    ) as HTMLInputElement
+    expect(checkbox.checked).toBe(true)
+
+    // Round 88 — the switch lives in the browser-catch cluster
+    // at the top of General, directly under the clipboard
+    // checkbox (the 87.8 test pins the clipboard checkbox as
+    // the one right after "Catch downloads from the browser",
+    // so the relay switch goes after it, not between).
+    const checkboxLabels = Array.from(document.querySelectorAll('label')).filter((label) =>
+      label.querySelector('input[type="checkbox"]'),
+    )
+    const clipboardIdx = checkboxLabels.findIndex((label) =>
+      label.textContent?.includes('Watch the clipboard for download links'),
+    )
+    const relayIdx = checkboxLabels.findIndex((label) =>
+      label.textContent?.includes('Catch videos and files playing in the browser (relay)'),
+    )
+    expect(clipboardIdx).toBeGreaterThanOrEqual(0)
+    expect(relayIdx).toBe(clipboardIdx + 1)
+  })
+
+  test('flipping the relay toggle writes at once, with no Save click', async () => {
+    await openGeneralTab()
+    const checkbox = screen.getByLabelText(
+      'Catch videos and files playing in the browser (relay)',
+    ) as HTMLInputElement
+
+    fireEvent.click(checkbox)
+
+    await waitFor(
+      () => expect(vi.mocked(api.updateSettings)).toHaveBeenCalledTimes(1),
+      { timeout: 5000 },
+    )
+    expect(vi.mocked(api.updateSettings).mock.calls[0][0].relay_enabled).toBe(false)
+    expect(checkbox.checked).toBe(false)
+  })
+
+  test('the relay toggle is disabled while catching from the browser is off', async () => {
+    vi.mocked(api.getSettings).mockResolvedValue({
+      ...baseSettings(),
+      browser_integration: false,
+    })
+    await openGeneralTab()
+    const checkbox = screen.getByLabelText(
+      'Catch videos and files playing in the browser (relay)',
+    ) as HTMLInputElement
+    expect(checkbox.disabled).toBe(true)
   })
 })

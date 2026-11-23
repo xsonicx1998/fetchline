@@ -18,7 +18,7 @@
 // Run with: npm run test:ui
 
 import { describe, expect, test, vi } from 'vitest'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { getPendingLink } from '../lib/api'
 import { StandaloneAddUrlWindow } from './StandaloneAddUrlWindow'
 
@@ -49,6 +49,29 @@ vi.mock('../lib/api', () => ({
   getCategories: () => Promise.resolve([]),
   getSettings: () => Promise.resolve(null),
   resolvePendingLink: () => Promise.resolve(),
+  // Round 88 — the dialog's own api surface, so a rendered
+  // capture row mounts the real dialog (probe + submit paths).
+  // The probe resolves a size; nothing is ever submitted here.
+  addDownload: vi.fn(),
+  addResolvedVideoDownload: vi.fn(),
+  confirmPendingLink: vi.fn(),
+  probeUrl: vi.fn(() =>
+    Promise.resolve({
+      size: 238_000_000,
+      accept_ranges: true,
+      etag: null,
+      last_modified: null,
+      filename: 'movie.mp4',
+      content_type: 'video/mp4',
+      final_url: 'https://cdn.example.com/v/movie.mp4',
+    }),
+  ),
+  setDownloadDescription: vi.fn(),
+  setDownloadSpeedLimit: vi.fn(),
+  setSettingField: vi.fn(),
+  startDownload: vi.fn(),
+  updateCategory: vi.fn(),
+  ytdlpResolve: vi.fn(),
 }))
 
 describe('StandaloneAddUrlWindow drag (Round 87)', () => {
@@ -101,5 +124,52 @@ describe('StandaloneAddUrlWindow manual mode (Round 87.2)', () => {
     fireEvent.mouseDown(screen.getByText('Add URL'))
     expect(startDraggingMock).not.toHaveBeenCalled()
     expect(invokeMock).not.toHaveBeenCalled()
+  })
+})
+
+// -- Round 88 — the row's source reaches the dialog ------------------------
+// The standalone window passes the pending row's `source` through
+// to the dialog as `captureSource`, so the dialog can say where
+// the capture came from (plan §6): "Caught from the browser
+// (relay)" for a relayed row, "Caught from the extension" for a
+// click/button capture. This test renders the REAL window with a
+// relay row and with a browser row — not just the dialog.
+describe('StandaloneAddUrlWindow relay source (Round 88)', () => {
+  function relayRow(source: string) {
+    return {
+      id: '11111111-2222-3333-4444-555555555555',
+      url: 'https://cdn.example.com/v/movie.mp4',
+      referrer: 'https://example.com/watch/123',
+      source,
+      status: 'pending',
+      download_id: null,
+      error: null,
+      cookies: null,
+      created_at: '2026-11-23T00:00:00Z',
+      filename: 'movie.mp4',
+      headers: null,
+      source_url: null,
+      format_id: null,
+      audio_url: null,
+      fragmented: false,
+    }
+  }
+
+  test('a relay row shows the relay source line in the dialog', async () => {
+    vi.mocked(getPendingLink).mockResolvedValue(relayRow('relay'))
+    render(<StandaloneAddUrlWindow linkId="11111111-2222-3333-4444-555555555555" />)
+    await waitFor(
+      () => expect(screen.getByText('Caught from the browser (relay)')).toBeTruthy(),
+      { timeout: 5000 },
+    )
+  })
+
+  test('a browser row shows the extension source line', async () => {
+    vi.mocked(getPendingLink).mockResolvedValue(relayRow('browser'))
+    render(<StandaloneAddUrlWindow linkId="11111111-2222-3333-4444-555555555555" />)
+    await waitFor(
+      () => expect(screen.getByText('Caught from the extension')).toBeTruthy(),
+      { timeout: 5000 },
+    )
   })
 })

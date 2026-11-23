@@ -825,18 +825,25 @@ test("cookiesFor failure is logged with host + reason, not swallowed", async () 
   );
 });
 
-test("manifest declares the narrow TikTok host_permissions", async () => {
-  // Round 86 — `chrome.cookies.getAll` needs host permission
-  // for the queried URL; `activeTab` covers only the active tab
-  // host, NOT the v16 CDN host. The narrowest fix is these two
-  // patterns only — no other site is added.
+test("manifest declares webRequest and the http(s) host_permissions (Round 88 relay)", async () => {
+  // Round 88 — the relay (user-approved 2026-11-23) needs
+  // observe-only `webRequest` plus host access to every http(s)
+  // site; <all_urls> stays forbidden (it would also claim
+  // file:// and ftp://). The narrow TikTok patterns from Round
+  // 86 are subsumed by the http(s) patterns. See
+  // validate_manifest.py, which enforces the same rule.
   const manifest = JSON.parse(
     fs.readFileSync(path.join(__dirname, "..", "manifest.json"), "utf8"),
   );
-  assert.deepEqual(manifest.host_permissions, [
-    "https://*.tiktok.com/*",
-    "https://*.tiktokcdn.com/*",
-  ]);
+  assert.deepEqual(manifest.host_permissions, ["http://*/*", "https://*/*"]);
+  assert.ok(
+    !manifest.host_permissions.includes("<all_urls>"),
+    "host_permissions must never contain <all_urls>",
+  );
+  assert.ok(
+    (manifest.permissions || []).includes("webRequest"),
+    "the webRequest permission is declared for the relay",
+  );
   assert.ok(
     (manifest.permissions || []).includes("cookies"),
     "the cookies permission itself stays declared",
