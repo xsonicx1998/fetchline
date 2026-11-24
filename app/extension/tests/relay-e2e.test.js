@@ -34,6 +34,68 @@ const contentSrc = fs.readFileSync(path.join(__dirname, "..", "content.js"), "ut
 const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
 const TAB = 5;
 
+// Round 88.4 — the webRequest fake validates addListener the way
+// Chrome 157's generated bindings do: the filter argument is
+// REQUIRED (a bare addListener(callback) throws "No matching
+// signature"), and extraInfoSpec items must be in the event's
+// allowed set (web_request.json). See relay.test.js — the old
+// lenient fake let background.js's two filter-less relay
+// registrations pass the suite while killing the real service
+// worker at startup (registration failed, status 15).
+const WEBREQUEST_EXTRA_INFO = {
+  onSendHeaders: new Set(["requestHeaders", "extraHeaders"]),
+  onBeforeRedirect: new Set(["responseHeaders", "extraHeaders"]),
+  onHeadersReceived: new Set([
+    "blocking",
+    "responseHeaders",
+    "extraHeaders",
+    "securityInfo",
+    "securityInfoRawDer",
+  ]),
+  onCompleted: new Set(["responseHeaders", "extraHeaders", "securityInfo", "securityInfoRawDer"]),
+  onErrorOccurred: new Set(["extraHeaders"]),
+};
+const WEBREQUEST_STORE_KEYS = {
+  onSendHeaders: "sendHeaders",
+  onBeforeRedirect: "beforeRedirect",
+  onHeadersReceived: "headersReceived",
+  onCompleted: "completed",
+  onErrorOccurred: "error",
+};
+
+function strictWebRequestFake(store) {
+  const fake = {};
+  for (const [event, allowed] of Object.entries(WEBREQUEST_EXTRA_INFO)) {
+    fake[event] = {
+      addListener(callback, filter, extraInfoSpec) {
+        if (typeof callback !== "function") throw new TypeError("No matching signature.");
+        if (
+          !filter ||
+          typeof filter !== "object" ||
+          !Array.isArray(filter.urls) ||
+          filter.urls.some((u) => typeof u !== "string")
+        ) {
+          throw new TypeError("No matching signature.");
+        }
+        if (
+          filter.types !== undefined &&
+          (!Array.isArray(filter.types) || filter.types.some((t) => typeof t !== "string"))
+        ) {
+          throw new TypeError("No matching signature.");
+        }
+        if (
+          extraInfoSpec !== undefined &&
+          (!Array.isArray(extraInfoSpec) || extraInfoSpec.some((o) => !allowed.has(o)))
+        ) {
+          throw new TypeError("No matching signature.");
+        }
+        store[WEBREQUEST_STORE_KEYS[event]] = callback;
+      },
+    };
+  }
+  return fake;
+}
+
 // --- background harness (modelled on relay.test.js) -----------------------
 function loadBackground({
   nativeReply = { ok: true },
@@ -131,13 +193,7 @@ function loadBackground({
       },
       onRemoved: { addListener(fn) { tabRemoved.push(fn); } },
     },
-    webRequest: {
-      onSendHeaders: { addListener(fn) { webRequest.sendHeaders = fn; } },
-      onBeforeRedirect: { addListener(fn) { webRequest.beforeRedirect = fn; } },
-      onHeadersReceived: { addListener(fn) { webRequest.headersReceived = fn; } },
-      onCompleted: { addListener(fn) { webRequest.completed = fn; } },
-      onErrorOccurred: { addListener(fn) { webRequest.error = fn; } },
-    },
+    webRequest: strictWebRequestFake(webRequest),
   };
   const context = vm.createContext({
     chrome,

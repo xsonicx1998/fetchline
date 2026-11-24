@@ -24,6 +24,73 @@ const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
 const PAGE = "https://example.com/watch/123";
 const CLIP = "https://cdn.example.com/v/movie.mp4";
 
+// Round 88.4 — the webRequest fake validates addListener the way
+// Chrome 157's generated bindings do. The old fake accepted any
+// arguments, so background.js's two filter-less relay
+// registrations (onCompleted / onErrorOccurred with no filter)
+// passed the whole suite while killing the real service worker at
+// startup: each bare addListener throws "No matching signature"
+// during worker evaluation, Chrome reports "Service worker
+// registration failed. Status code: 15", and the worker never
+// runs — no relay, no watcher, no host start (the Round 88.3 VPS
+// failure; reproduced + bisected in real Chromium 157). The
+// filter is REQUIRED for every webRequest event
+// (web_request.json), and extraInfoSpec items must be in the
+// event's allowed set.
+const WEBREQUEST_EXTRA_INFO = {
+  onSendHeaders: new Set(["requestHeaders", "extraHeaders"]),
+  onBeforeRedirect: new Set(["responseHeaders", "extraHeaders"]),
+  onHeadersReceived: new Set([
+    "blocking",
+    "responseHeaders",
+    "extraHeaders",
+    "securityInfo",
+    "securityInfoRawDer",
+  ]),
+  onCompleted: new Set(["responseHeaders", "extraHeaders", "securityInfo", "securityInfoRawDer"]),
+  onErrorOccurred: new Set(["extraHeaders"]),
+};
+const WEBREQUEST_STORE_KEYS = {
+  onSendHeaders: "sendHeaders",
+  onBeforeRedirect: "beforeRedirect",
+  onHeadersReceived: "headersReceived",
+  onCompleted: "completed",
+  onErrorOccurred: "error",
+};
+
+function strictWebRequestFake(store) {
+  const fake = {};
+  for (const [event, allowed] of Object.entries(WEBREQUEST_EXTRA_INFO)) {
+    fake[event] = {
+      addListener(callback, filter, extraInfoSpec) {
+        if (typeof callback !== "function") throw new TypeError("No matching signature.");
+        if (
+          !filter ||
+          typeof filter !== "object" ||
+          !Array.isArray(filter.urls) ||
+          filter.urls.some((u) => typeof u !== "string")
+        ) {
+          throw new TypeError("No matching signature.");
+        }
+        if (
+          filter.types !== undefined &&
+          (!Array.isArray(filter.types) || filter.types.some((t) => typeof t !== "string"))
+        ) {
+          throw new TypeError("No matching signature.");
+        }
+        if (
+          extraInfoSpec !== undefined &&
+          (!Array.isArray(extraInfoSpec) || extraInfoSpec.some((o) => !allowed.has(o)))
+        ) {
+          throw new TypeError("No matching signature.");
+        }
+        store[WEBREQUEST_STORE_KEYS[event]] = callback;
+      },
+    };
+  }
+  return fake;
+}
+
 function loadBackground({
   nativeReply = { ok: true },
   cookies = [],
@@ -148,13 +215,7 @@ function loadBackground({
         addListener(fn) { tabRemoved.push(fn); },
       },
     },
-    webRequest: {
-      onSendHeaders: { addListener(fn) { webRequest.sendHeaders = fn; } },
-      onBeforeRedirect: { addListener(fn) { webRequest.beforeRedirect = fn; } },
-      onHeadersReceived: { addListener(fn) { webRequest.headersReceived = fn; } },
-      onCompleted: { addListener(fn) { webRequest.completed = fn; } },
-      onErrorOccurred: { addListener(fn) { webRequest.error = fn; } },
-    },
+    webRequest: strictWebRequestFake(webRequest),
   };
   const context = vm.createContext({
     chrome,
@@ -249,6 +310,51 @@ function sendHeaders({ requestId = "r1", url = CLIP, headers = {} } = {}) {
 }
 
 const MP4_HEADERS = { "Content-Type": "video/mp4", "Content-Length": "238000000" };
+
+// -- worker registration (Round 88.4) --------------------------------------
+// The Round 88.3 VPS failure: the service worker never registered
+// ("Service worker registration failed. Status code: 15" +
+// "Uncaught TypeError: No matching signature."), so no relay row
+// ever appeared and the host never started. The cause was the two
+// filter-less webRequest registrations in background.js — each
+// bare addListener throws during worker evaluation in real Chrome.
+// These tests load the REAL background.js under the strict fake:
+// they fail while the registrations are filter-less and pass once
+// every registration carries its filter.
+test("worker registers: background.js top-level evaluation succeeds under a Chrome-strict webRequest fake", () => {
+  const env = loadBackground();
+  // All five relay listeners registered — including the two that
+  // were filter-less before the fix (onCompleted/onErrorOccurred).
+  assert.equal(typeof env.webRequest.sendHeaders, "function");
+  assert.equal(typeof env.webRequest.beforeRedirect, "function");
+  assert.equal(typeof env.webRequest.headersReceived, "function");
+  assert.equal(typeof env.webRequest.completed, "function");
+  assert.equal(typeof env.webRequest.error, "function");
+});
+
+test("strict webRequest fake rejects a filter-less addListener the way Chrome does", () => {
+  const store = {};
+  const fake = strictWebRequestFake(store);
+  assert.throws(
+    () => fake.onCompleted.addListener(() => {}),
+    /No matching signature/,
+    "a bare addListener(callback) must throw, like Chrome 157",
+  );
+  assert.throws(
+    () => fake.onErrorOccurred.addListener(() => {}),
+    /No matching signature/,
+  );
+  assert.throws(
+    () => fake.onSendHeaders.addListener(() => {}, { urls: ["http://*/*"] }, ["bogusOption"]),
+    /No matching signature/,
+    "an extraInfoSpec item outside the event's allowed set must throw",
+  );
+  // And the valid forms register.
+  fake.onCompleted.addListener(() => {}, { urls: ["http://*/*"] });
+  assert.equal(typeof store.completed, "function");
+  fake.onSendHeaders.addListener(() => {}, { urls: ["http://*/*"] }, ["requestHeaders"]);
+  assert.equal(typeof store.sendHeaders, "function");
+});
 
 // -- classifier matrix ----------------------------------------------------
 

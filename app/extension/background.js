@@ -823,7 +823,13 @@ if (chrome.webRequest && chrome.webRequest.onSendHeaders) {
   chrome.webRequest.onSendHeaders.addListener(
     (details) => relayRememberSentHeaders(details),
     { urls: RELAY_WEBREQUEST_URLS, types: RELAY_WEBREQUEST_TYPES },
-    ["requestHeaders", "extraHeaders"],
+    // Round 88.4 — "extraHeaders" dropped: in MV3 it buys
+    // nothing the relay reads (User-Agent, Referer, Origin,
+    // Accept-Language and the Sec-* headers are all in the
+    // MV3-visible set; Cookie is never read from headers by
+    // design), and the shipped form is the one proven to
+    // register in real Chrome (see below).
+    ["requestHeaders"],
   );
 }
 if (chrome.webRequest && chrome.webRequest.onBeforeRedirect) {
@@ -842,10 +848,24 @@ if (chrome.webRequest && chrome.webRequest.onHeadersReceived) {
   );
 }
 if (chrome.webRequest && chrome.webRequest.onCompleted) {
-  chrome.webRequest.onCompleted.addListener((details) => relayForgetRequest(details.requestId));
+  // Round 88.4 — the filter is REQUIRED: Chrome's webRequest
+  // bindings throw "No matching signature" when addListener is
+  // called without one, so the bare call below killed the whole
+  // service worker at startup (registration failed, status 15 —
+  // the Round 88.3 VPS failure). Same filter as the other relay
+  // listeners: the relay only ever tracks http(s) requests of
+  // these types, so nothing it stored is missed.
+  chrome.webRequest.onCompleted.addListener(
+    (details) => relayForgetRequest(details.requestId),
+    { urls: RELAY_WEBREQUEST_URLS, types: RELAY_WEBREQUEST_TYPES },
+  );
 }
 if (chrome.webRequest && chrome.webRequest.onErrorOccurred) {
-  chrome.webRequest.onErrorOccurred.addListener((details) => relayForgetRequest(details.requestId));
+  // Round 88.4 — same required filter, same reason as above.
+  chrome.webRequest.onErrorOccurred.addListener(
+    (details) => relayForgetRequest(details.requestId),
+    { urls: RELAY_WEBREQUEST_URLS, types: RELAY_WEBREQUEST_TYPES },
+  );
 }
 
 async function loadState() {
