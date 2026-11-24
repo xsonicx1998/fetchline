@@ -47,8 +47,10 @@ interface DownloadTableProps {
   /** Right-click menu: remove the row (the confirm setting
    *  decides whether a dialog runs first). */
   onRemove: (download: DownloadRow) => void
-  /** Right-click menu: move the download into a queue. */
-  onMoveToQueue: (id: string, queueId: string) => void
+  /** Right-click menu: move the download into a queue.
+   *  Round 88.9 (7) — the whole selection, in table order
+   *  (not just the right-clicked row). */
+  onMoveToQueue: (ids: string[], queueId: string) => void
   /** Right-click menu: take the download out of its queue. */
   onDeleteFromQueue: (id: string) => void
   /** Right-click menu: show the file's details. */
@@ -130,6 +132,34 @@ export function DownloadTable({
   /** True between a row's dragstart and dragend: a drag over
    *  further rows extends the selection (13b). */
   const dragSelectingRef = useRef(false)
+  /** Round 88.9 (5) — marquee (rubber-band) selection: the
+   *  press-and-drag rectangle from empty table space. */
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const rowRefs = useRef(new Map<string, HTMLTableRowElement>())
+  const [marquee, setMarquee] = useState<{
+    left: number
+    top: number
+    width: number
+    height: number
+  } | null>(null)
+  const marqueeRef = useRef<{
+    x0: number
+    y0: number
+    x1: number
+    y1: number
+    base: Set<string>
+    additive: boolean
+    started: boolean
+    last: Set<string>
+  } | null>(null)
+  /** Round 88.9 (5) — true between a marquee's mouseup and
+   *  the click that follows it: the click must not undo the
+   *  selection the marquee just made (the container's onClick
+   *  deselects on empty space; a row's onClick selects one
+   *  row). It clears itself on the next tick, so a mouseup
+   *  with no click after it (dragged out of the window) never
+   *  swallows a later legitimate click. */
+  const suppressClickRef = useRef(false)
   /** Round 65 — the "Move to queue" section of the row menu is
    *  collapsed until the user opens it, like a submenu; it
    *  resets whenever the menu opens on another row. */
@@ -202,7 +232,100 @@ export function DownloadTable({
     return ids.slice(lo, hi + 1)
   }
 
+  /** Round 88.9 (5) — the rows a viewport rectangle touches.
+   *  `base` is the selection the drag started with (kept, not
+   *  re-read: the live selection changes under the drag). */
+  function marqueeSelection(
+    rect: { left: number; top: number; right: number; bottom: number },
+    base: Set<string>,
+  ): Set<string> {
+    const next = new Set(base)
+    for (const d of downloads) {
+      const el = rowRefs.current.get(d.id)
+      if (!el) continue
+      const r = el.getBoundingClientRect()
+      if (r.right > rect.left && r.left < rect.right && r.bottom > rect.top && r.top < rect.bottom) {
+        next.add(d.id)
+      }
+    }
+    return next
+  }
+
+  /** Round 88.9 (5) — start a marquee from a press on empty
+   *  table space. Rows, the header, the menu and controls
+   *  never start one (rows handle their own drag, 13b). */
+  function startMarquee(e: React.MouseEvent) {
+    if (e.button !== 0) return
+    const target = e.target as HTMLElement | null
+    if (target?.closest?.('tr, [role="menu"], button, a, input, select, textarea')) return
+    const base = new Set(selectedIds)
+    marqueeRef.current = {
+      x0: e.clientX,
+      y0: e.clientY,
+      x1: e.clientX,
+      y1: e.clientY,
+      base,
+      additive: e.ctrlKey || e.metaKey,
+      started: false,
+      last: new Set(base),
+    }
+    const onMove = (ev: MouseEvent) => {
+      const m = marqueeRef.current
+      if (!m) return
+      m.x1 = ev.clientX
+      m.y1 = ev.clientY
+      const rect = {
+        left: Math.min(m.x0, m.x1),
+        top: Math.min(m.y0, m.y1),
+        right: Math.max(m.x0, m.x1),
+        bottom: Math.max(m.y0, m.y1),
+      }
+      // A wiggle under 3 px is a click, not a drag: the normal
+      // empty-space click still deselects.
+      if (!m.started && rect.right - rect.left < 3 && rect.bottom - rect.top < 3) return
+      m.started = true
+      const cRect = containerRef.current?.getBoundingClientRect()
+      setMarquee(
+        cRect
+          ? {
+              left: rect.left - cRect.left,
+              top: rect.top - cRect.top,
+              width: rect.right - rect.left,
+              height: rect.bottom - rect.top,
+            }
+          : null,
+      )
+      const next = marqueeSelection(rect, m.additive ? m.base : new Set())
+      m.last = next
+      commitSelection(next)
+      const touched = downloads.filter((d) => next.has(d.id))
+      anchorRef.current = touched[touched.length - 1]?.id ?? anchorRef.current
+    }
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      const m = marqueeRef.current
+      marqueeRef.current = null
+      setMarquee(null)
+      if (m?.started) {
+        suppressClickRef.current = true
+        setTimeout(() => {
+          suppressClickRef.current = false
+        }, 0)
+        onSelect(m.last.size === 0 ? null : anchorRef.current)
+      }
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }
+
   function handleRowClick(e: React.MouseEvent, d: DownloadRow) {
+    // Round 88.9 (5) — the click after a marquee mouseup must
+    // not collapse the selection the marquee just made.
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false
+      return
+    }
     const next = new Set(selectedIds)
     if (e.ctrlKey || e.metaKey) {
       // Ctrl/Cmd-click toggles just this row.
@@ -249,6 +372,14 @@ export function DownloadTable({
     }
   }
 
+  /** Round 88.9 (7) — the rows a Move to queue / sidebar
+   *  drop acts on: the whole selection (in table order) when
+   *  the row is part of it, else just that row. */
+  function moveIdsFor(d: DownloadRow): string[] {
+    if (!selectedIds.has(d.id)) return [d.id]
+    return downloads.filter((row) => selectedIds.has(row.id)).map((row) => row.id)
+  }
+
   function closeMenu(action: () => void) {
     return () => {
       setMenu(null)
@@ -281,7 +412,11 @@ export function DownloadTable({
 
   return (
     <div
+      ref={containerRef}
       className="relative min-h-full bg-[#0B0F24]"
+      // Round 88.9 (5) — marquee: press-and-drag from empty
+      // space draws a selection rectangle.
+      onMouseDown={startMarquee}
       // Round 87.2 — clicking empty table space deselects:
       // only a click landing directly on this container (not
       // on a row, cell or menu) clears the selection and the
@@ -292,6 +427,12 @@ export function DownloadTable({
       // stretches the container over the whole scroll area, so
       // the empty space below the last row is clickable too.
       onClick={(e) => {
+        // Round 88.9 (5) — the click after a marquee mouseup
+        // must not deselect what the marquee just selected.
+        if (suppressClickRef.current) {
+          suppressClickRef.current = false
+          return
+        }
         if (e.target !== e.currentTarget) return
         commitSelection(new Set())
         onSelect(null)
@@ -327,16 +468,26 @@ export function DownloadTable({
               <tr
                 key={d.id}
                 draggable
+                ref={(el) => {
+                  // Round 88.9 (5) — the marquee hit-tests rows
+                  // by their live rectangles.
+                  if (el) rowRefs.current.set(d.id, el)
+                  else rowRefs.current.delete(d.id)
+                }}
                 onDragStart={(e) => {
-                  e.dataTransfer.setData('text/plain', JSON.stringify({ type: 'download', id: d.id }))
+                  e.dataTransfer.setData(
+                    'text/plain',
+                    JSON.stringify({ type: 'download', id: d.id, ids: moveIdsFor(d) }),
+                  )
                   e.dataTransfer.effectAllowed = 'move'
                   // Round 87 (13b) — a drag starts a row drag:
                   // dragging a row that is not selected selects
                   // just it; dragging a selected row keeps the
                   // multi-selection, and rows the drag passes
-                  // over join it (onDragEnter below). The drop
-                  // itself still moves the dragged row (the
-                  // sidebar reads one id, unchanged).
+                  // over join it (onDragEnter below). Round 88.9
+                  // (7) — the drop moves the whole drag
+                  // selection now (the sidebar reads `ids`),
+                  // not just the dragged row.
                   dragSelectingRef.current = true
                   if (!selectedIds.has(d.id)) {
                     anchorRef.current = d.id
@@ -362,12 +513,16 @@ export function DownloadTable({
                 onDoubleClick={() => onOpenProgress(d.id)}
                 onContextMenu={(e) => {
                   e.preventDefault()
-                  // A right-click selects just this row (so the
-                  // menu's Remove acts on it, not on a stale
-                  // multi-selection).
-                  anchorRef.current = d.id
-                  commitSelection(new Set([d.id]))
-                  onSelect(d.id)
+                  // Round 88.9 (7) — a right-click on a row that
+                  // is already selected keeps the multi-selection
+                  // (so Move to queue / Remove act on all of it);
+                  // a right-click on an unselected row selects
+                  // just it, as before.
+                  if (!selectedIds.has(d.id)) {
+                    anchorRef.current = d.id
+                    commitSelection(new Set([d.id]))
+                    onSelect(d.id)
+                  }
                   setQueueSubOpen(false)
                   setMenu({ x: e.clientX, y: e.clientY, download: d })
                 }}
@@ -377,6 +532,18 @@ export function DownloadTable({
                   // Round 87 (13b) — Delete removes ALL selected
                   // rows at once.
                   else if (e.key === 'Delete') removeSelected(d)
+                  // Round 88.9 (6) — Ctrl/Cmd+A selects every
+                  // row in the current view. Rows are focusable
+                  // (tabIndex 0), so this fires exactly when the
+                  // table has focus — never while typing in a
+                  // text input, which holds focus itself.
+                  else if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A')) {
+                    e.preventDefault()
+                    const ids = downloads.map((row) => row.id)
+                    commitSelection(new Set(ids))
+                    anchorRef.current = ids[ids.length - 1] ?? null
+                    onSelect(anchorRef.current)
+                  }
                 }}
                 className={`cursor-pointer border-b border-border ${selected ? 'bg-accent-soft' : 'hover:bg-surface'}`}
                 aria-selected={selected}
@@ -431,6 +598,21 @@ export function DownloadTable({
           })}
         </tbody>
       </table>
+      {/* Round 88.9 (5) — the marquee rectangle, drawn over
+          the table while the drag runs. pointer-events-none so
+          it never becomes a mousemove target itself. */}
+      {marquee ? (
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute z-10 border border-accent bg-accent/10"
+          style={{
+            left: marquee.left,
+            top: marquee.top,
+            width: marquee.width,
+            height: marquee.height,
+          }}
+        />
+      ) : null}
       {menu ? (
         <RowMenu
           menuRef={menuRef}
@@ -451,7 +633,7 @@ export function DownloadTable({
           onPause={() => onPause(menu.download.id)}
           onRefreshAddress={() => onRefreshAddress(menu.download)}
           onRemove={() => onRemove(menu.download)}
-          onMoveToQueue={(queueId) => onMoveToQueue(menu.download.id, queueId)}
+          onMoveToQueue={(queueId) => onMoveToQueue(moveIdsFor(menu.download), queueId)}
           onDeleteFromQueue={() => onDeleteFromQueue(menu.download.id)}
           onShowProperties={() => onShowProperties(menu.download)}
           onMoveToCategory={(categoryId) => onMoveToCategory(menu.download.id, categoryId)}

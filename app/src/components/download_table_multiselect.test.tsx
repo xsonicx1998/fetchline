@@ -94,12 +94,14 @@ function tableElement(
     onSelectionChange?: (ids: string[]) => void
     onRemove?: (d: DownloadRow) => void
     onRemoveMany?: (ds: DownloadRow[]) => void
+    onMoveToQueue?: (ids: string[], queueId: string) => void
   },
 ) {
   const onSelect = props?.onSelect ?? noop
   const onSelectionChange = props?.onSelectionChange ?? noop
   const onRemove = props?.onRemove ?? noop
   const onRemoveMany = props?.onRemoveMany ?? noop
+  const onMoveToQueue = props?.onMoveToQueue ?? noop
   return (
     <DownloadTable
       downloads={downloads}
@@ -120,7 +122,7 @@ function tableElement(
       onMoveToCategory={noop}
       onRefreshAddress={noop}
       onRemove={onRemove}
-      onMoveToQueue={noop}
+      onMoveToQueue={onMoveToQueue}
       onDeleteFromQueue={noop}
       onShowProperties={noop}
     />
@@ -133,6 +135,7 @@ function renderTable(
     onSelectionChange?: (ids: string[]) => void
     onRemove?: (d: DownloadRow) => void
     onRemoveMany?: (ds: DownloadRow[]) => void
+    onMoveToQueue?: (ids: string[], queueId: string) => void
   },
   downloads: DownloadRow[] = DOWNLOADS,
 ) {
@@ -356,5 +359,130 @@ describe('empty-space deselect + stale-selection Delete (Round 87.2)', () => {
     fireEvent.keyDown(rowElement('file-b.zip'), { key: 'Delete' })
     expect(onRemoveMany).not.toHaveBeenCalled()
     expect(onRemove).not.toHaveBeenCalled()
+  })
+})
+
+describe('Ctrl+A selects all (Round 88.9, item 6)', () => {
+  test('Ctrl+A selects every row in the view', () => {
+    const onSelectionChange = vi.fn()
+    renderTable({ onSelectionChange })
+    fireEvent.click(rowElement('file-b.zip'))
+    fireEvent.keyDown(rowElement('file-b.zip'), { key: 'a', ctrlKey: true })
+    expect(isSelected('file-a.zip')).toBe(true)
+    expect(isSelected('file-b.zip')).toBe(true)
+    expect(isSelected('file-c.zip')).toBe(true)
+    expect(isSelected('file-d.zip')).toBe(true)
+    expect(onSelectionChange).toHaveBeenLastCalledWith(['d1', 'd2', 'd3', 'd4'])
+  })
+
+  test('Cmd+A selects every row too', () => {
+    const onSelectionChange = vi.fn()
+    renderTable({ onSelectionChange })
+    fireEvent.click(rowElement('file-a.zip'))
+    fireEvent.keyDown(rowElement('file-a.zip'), { key: 'a', metaKey: true })
+    expect(onSelectionChange).toHaveBeenLastCalledWith(['d1', 'd2', 'd3', 'd4'])
+  })
+})
+
+describe('marquee selection (Round 88.9, item 5)', () => {
+  // jsdom lays every row out at 0×0: give each row a real
+  // rectangle so the marquee can touch them.
+  function mockRowRects() {
+    const tops = [0, 20, 40, 60]
+    ;['file-a.zip', 'file-b.zip', 'file-c.zip', 'file-d.zip'].forEach((name, i) => {
+      vi.spyOn(rowElement(name), 'getBoundingClientRect').mockReturnValue({
+        left: 0,
+        top: tops[i],
+        right: 500,
+        bottom: tops[i] + 20,
+        width: 500,
+        height: 20,
+        x: 0,
+        y: tops[i],
+        toJSON: () => ({}),
+      } as DOMRect)
+    })
+  }
+
+  function tableContainer(): HTMLElement {
+    const container = screen.getByRole('table').parentElement
+    if (!container) throw new Error('no table container')
+    return container
+  }
+
+  test('dragging a rectangle from empty space selects the rows it touches', () => {
+    const onSelectionChange = vi.fn()
+    renderTable({ onSelectionChange })
+    mockRowRects()
+    fireEvent.mouseDown(tableContainer(), { button: 0, clientX: 10, clientY: 5 })
+    fireEvent.mouseMove(document, { clientX: 400, clientY: 45 })
+    fireEvent.mouseUp(document)
+    expect(isSelected('file-a.zip')).toBe(true)
+    expect(isSelected('file-b.zip')).toBe(true)
+    expect(isSelected('file-c.zip')).toBe(true)
+    expect(isSelected('file-d.zip')).toBe(false)
+    expect(onSelectionChange).toHaveBeenLastCalledWith(['d1', 'd2', 'd3'])
+  })
+
+  test('Ctrl+drag adds the touched rows to the selection', () => {
+    const onSelectionChange = vi.fn()
+    renderTable({ onSelectionChange })
+    mockRowRects()
+    fireEvent.click(rowElement('file-d.zip'))
+    fireEvent.mouseDown(tableContainer(), { button: 0, clientX: 10, clientY: 5, ctrlKey: true })
+    fireEvent.mouseMove(document, { clientX: 400, clientY: 25 })
+    fireEvent.mouseUp(document)
+    expect(isSelected('file-a.zip')).toBe(true)
+    expect(isSelected('file-b.zip')).toBe(true)
+    expect(isSelected('file-d.zip')).toBe(true)
+    expect(isSelected('file-c.zip')).toBe(false)
+    expect(onSelectionChange).toHaveBeenLastCalledWith(['d4', 'd1', 'd2'])
+  })
+
+  test('a press under 3 px is a click, not a marquee (still deselects)', () => {
+    const onSelectionChange = vi.fn()
+    renderTable({ onSelectionChange })
+    fireEvent.click(rowElement('file-a.zip'))
+    expect(isSelected('file-a.zip')).toBe(true)
+    fireEvent.mouseDown(tableContainer(), { button: 0, clientX: 10, clientY: 100 })
+    fireEvent.mouseMove(document, { clientX: 11, clientY: 101 })
+    fireEvent.mouseUp(document)
+    fireEvent.click(tableContainer())
+    expect(isSelected('file-a.zip')).toBe(false)
+    expect(onSelectionChange).toHaveBeenLastCalledWith([])
+  })
+})
+
+describe('bulk Move to queue (Round 88.9, item 7)', () => {
+  test('right-click on a selected row keeps the multi-selection', () => {
+    renderTable({})
+    fireEvent.click(rowElement('file-a.zip'))
+    fireEvent.click(rowElement('file-b.zip'), { ctrlKey: true })
+    fireEvent.contextMenu(rowElement('file-b.zip'))
+    expect(isSelected('file-a.zip')).toBe(true)
+    expect(isSelected('file-b.zip')).toBe(true)
+    expect(isSelected('file-c.zip')).toBe(false)
+  })
+
+  test('Move to queue from the menu moves the whole selection', () => {
+    const onMoveToQueue = vi.fn()
+    renderTable({ onMoveToQueue })
+    fireEvent.click(rowElement('file-a.zip'))
+    fireEvent.click(rowElement('file-b.zip'), { ctrlKey: true })
+    fireEvent.contextMenu(rowElement('file-b.zip'))
+    fireEvent.click(screen.getByText('Move to queue'))
+    fireEvent.click(screen.getByText('TestQueue'))
+    expect(onMoveToQueue).toHaveBeenCalledTimes(1)
+    expect(onMoveToQueue).toHaveBeenCalledWith(['d1', 'd2'], 'queue-test')
+  })
+
+  test('Move to queue on an unselected row moves just that row', () => {
+    const onMoveToQueue = vi.fn()
+    renderTable({ onMoveToQueue })
+    fireEvent.click(rowElement('file-a.zip'))
+    fireEvent.contextMenu(rowElement('file-c.zip'))
+    fireEvent.click(screen.getByText('Move to queue'))
+    fireEvent.click(screen.getByText('TestQueue'))
+    expect(onMoveToQueue).toHaveBeenCalledWith(['d3'], 'queue-test')
   })
 })

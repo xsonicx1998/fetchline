@@ -52,6 +52,7 @@ import {
 } from './lib/api'
 import { formatBytes, formatEta, formatSpeed } from './lib/format'
 import { BannerDismissals, FailedCaptures, type BannerError } from './lib/bannerErrors'
+import { formatQueueMoveResult, partitionQueueMove } from './lib/queues'
 import { selectCompletedDownloads, selectVisibleRows, useSidebarSelection } from './lib/useSidebarSelection'
 import type { CategoryRow, ClipboardOffer, DownloadRow, GrabberProjectRow, PendingAction, PendingLinkRow, QueueRow, QuotaStatus, Settings, UpdateCheckResult } from './lib/types'
 import { AddCategoryDialog } from './components/AddCategoryDialog'
@@ -176,6 +177,11 @@ export default function App() {
    *  error. Both carry their source (Round 75), so dismissals are
    *  keyed per (source, message). */
   const [bannerError, setBannerError] = useState<BannerError | null>(null)
+  /** Round 88.9 (8) — a bulk-move notice ("Moved N, skipped
+   *  M already finished") in the status bar. Not an error:
+   *  it clears itself after a few seconds, and a new action
+   *  supersedes it (see `run`). */
+  const [statusMessage, setStatusMessage] = useState<string | null>(null)
   /** Round 72 (C) — row-action busy feedback: Resume /
    *  Redownload re-probe first, and against a flaky server the
    *  probe takes up to 16 s with no UI change — the Round 71
@@ -234,6 +240,13 @@ export default function App() {
   function actionError(e: unknown) {
     showBannerError('action', e instanceof Error ? e.message : String(e))
   }
+  // Round 88.9 (8) — a bulk-move notice clears itself after a
+  // few seconds, like a status-bar message, not a sticky error.
+  useEffect(() => {
+    if (statusMessage === null) return
+    const t = setTimeout(() => setStatusMessage(null), 6000)
+    return () => clearTimeout(t)
+  }, [statusMessage])
   /** Round 56 (§7.3): backend-not-responding guard. The 1 s poll
    *  used to fire a new `list_downloads` invoke every second even
    *  when the previous one never returned — a wedged backend
@@ -786,6 +799,9 @@ export default function App() {
     // Round 72 retest showed no feedback at all while the probe
     // retried, and the user read the silence as "nothing
     // happened".
+    // Round 88.9 (8) — a new action supersedes a bulk-move
+    // notice (the action itself reports a new one if needed).
+    setStatusMessage(null)
     if (opts?.immediate) {
       setActionBusy(true)
     } else {
@@ -823,15 +839,56 @@ export default function App() {
     setShowScheduler(true)
   }
 
+  /** Round 88.9 (7, 8) — Move to queue for a whole
+   *  selection (menu or sidebar drop). A single row keeps the
+   *  old behaviour exactly: `addToQueue` runs once and its
+   *  error (e.g. a finished file) surfaces in the banner. A
+   *  bulk move skips finished downloads instead of failing
+   *  the whole move, and reports the count skipped in the
+   *  status bar. A row that finished between the last poll
+   *  and the click is caught the same way (the engine's
+   *  "already finished" error); any other error still aborts
+   *  with the banner. */
+  async function moveManyToQueue(ids: string[], queueId: string) {
+    if (ids.length === 0) return
+    if (ids.length === 1) {
+      await addToQueue(ids[0], queueId)
+      return
+    }
+    const target = queues.find((q) => q.id === queueId)
+    const rows = downloads.filter((d) => ids.includes(d.id))
+    const { movable, skipped } = partitionQueueMove(rows, target)
+    let moved = 0
+    let skippedCount = skipped.length
+    for (const row of movable) {
+      try {
+        await addToQueue(row.id, queueId)
+        moved++
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        if (msg.includes('already finished')) {
+          // Finished between the poll and the click: same
+          // skip as the pre-check above, not a failure.
+          skippedCount++
+          continue
+        }
+        throw e
+      }
+    }
+    setStatusMessage(formatQueueMoveResult(moved, skippedCount, target?.name ?? null))
+  }
+
   async function handleDropDownload(
-    downloadId: string,
+    downloadIds: string[],
     target: { kind: 'category' | 'queue'; id: string },
   ) {
     try {
       if (target.kind === 'category') {
-        await moveToCategory(downloadId, target.id)
+        // Round 88.9 (7) — bulk move is a queue feature: a
+        // category drop still moves just the dragged row.
+        await moveToCategory(downloadIds[0], target.id)
       } else {
-        await addToQueue(downloadId, target.id)
+        await moveManyToQueue(downloadIds, target.id)
       }
       await refreshAll()
     } catch (e) {
@@ -1294,7 +1351,7 @@ export default function App() {
           }
           onNewGrabber={() => setShowSiteGrabber(true)}
           onSyncQueue={(queueId) => void run(() => syncQueueNow(queueId).then(() => undefined))}
-          onDropDownload={(downloadId, target) => void handleDropDownload(downloadId, target)}
+          onDropDownload={(downloadIds, target) => void handleDropDownload(downloadIds, target)}
         />
         {/* Round 47: the main area is a rounded panel with a thin
             glowing border, as in the reference — inset from the
@@ -1340,7 +1397,7 @@ export default function App() {
               onMoveToCategory={(id, categoryId) => void run(() => moveToCategory(id, categoryId))}
               onRefreshAddress={(download) => setRefreshTarget(download)}
               onRemove={(download) => requestRemove(download)}
-              onMoveToQueue={(id, queueId) => void run(() => addToQueue(id, queueId))}
+              onMoveToQueue={(ids, queueId) => void run(() => moveManyToQueue(ids, queueId))}
               onDeleteFromQueue={(id) => void run(() => removeFromQueue(id))}
               onShowProperties={(download) => setPropertiesTarget(download)}
             />
@@ -1352,6 +1409,8 @@ export default function App() {
         <span>
           {actionBusy ? (
             'Working…'
+          ) : statusMessage !== null ? (
+            statusMessage
           ) : (
             <>
               {runningCount} downloading · {runningCount > 0 ? formatSpeed(totalSpeed) : '—'} ·{' '}
@@ -1383,6 +1442,10 @@ export default function App() {
       <AddDownloadDialog
         open={showAdd}
         categories={categories}
+        // Round 88.9 (2) — the queue picker defaults to the
+        // queue being viewed (null = All downloads → main queue).
+        queues={queues}
+        initialQueueId={selectedQueue}
         defaultAction={settings?.default_action ?? 'start_now'}
         defaultFolder={settings?.default_download_folder ?? ''}
         lastUsedFolder={settings?.last_used_folder ?? ''}

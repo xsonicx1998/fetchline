@@ -16,7 +16,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import { AddDownloadDialog, applySaveAsEdit, bestQualityRow, isHttpUrl, isVideoPageUrl, normalizeUrlScheme } from './AddDownloadDialog'
 import * as api from '../lib/api'
-import type { ProbeInfo, QualityRow, YtdlpResolveResult } from '../lib/types'
+import type { ProbeInfo, QualityRow, QueueRow, YtdlpResolveResult } from '../lib/types'
 
 vi.mock('../lib/api', () => ({
   addDownload: vi.fn(),
@@ -761,5 +761,88 @@ describe('Remember this path checkbox', () => {
     expect(call.explicitFolder).toBeNull()
     expect(vi.mocked(api.setSettingField)).not.toHaveBeenCalled()
     expect(vi.mocked(api.updateCategory)).not.toHaveBeenCalled()
+  })
+})
+
+// -- queue picker (Round 88.9, item 2) --------------------------------------
+
+describe('queue picker', () => {
+  const QUEUES: QueueRow[] = [
+    {
+      id: 'queue-main', name: 'Main download queue', type: 'main', is_main: true,
+      schedule_type: 'none', start_at: null, stop_at: null, start_on_startup: false,
+      on_complete_action: 'none', on_complete_program: null, sync_interval_minutes: null,
+      last_sync_at: null, last_sync_changed: 0, last_sync_unchanged: 0, last_sync_removed: 0,
+      last_sync_failed: 0, last_sync_skipped: 0, running: false, file_count: 3,
+    },
+    {
+      id: 'queue-test', name: 'TestQueue', type: 'custom', is_main: false,
+      schedule_type: 'none', start_at: null, stop_at: null, start_on_startup: false,
+      on_complete_action: 'none', on_complete_program: null, sync_interval_minutes: null,
+      last_sync_at: null, last_sync_changed: 0, last_sync_unchanged: 0, last_sync_removed: 0,
+      last_sync_failed: 0, last_sync_skipped: 0, running: false, file_count: 2,
+    },
+  ]
+
+  function renderWithQueue(initialQueueId: string | null) {
+    return render(
+      <AddDownloadDialog
+        open
+        categories={[]}
+        queues={QUEUES}
+        initialQueueId={initialQueueId}
+        initialUrl="https://example.com/file.zip"
+        onClose={() => {}}
+        onAdded={() => {}}
+        onLateError={() => {}}
+      />,
+    )
+  }
+
+  test('defaults to the queue being viewed', () => {
+    renderWithQueue('queue-test')
+    expect((screen.getByLabelText('Queue') as HTMLSelectElement).value).toBe('queue-test')
+  })
+
+  test('defaults to the main queue when viewing All downloads', () => {
+    renderWithQueue(null)
+    expect((screen.getByLabelText('Queue') as HTMLSelectElement).value).toBe('queue-main')
+  })
+
+  test('Download Later files the download in the picked queue', async () => {
+    renderWithQueue('queue-test')
+    await waitFor(() => expect(vi.mocked(api.probeUrl)).toHaveBeenCalled(), {
+      timeout: 5000,
+    })
+    fireEvent.click(screen.getByText('Download Later'))
+    await waitFor(() => expect(vi.mocked(api.addDownload)).toHaveBeenCalledTimes(1), {
+      timeout: 5000,
+    })
+    expect(vi.mocked(api.addDownload).mock.calls[0][0].queue).toBe('queue-test')
+  })
+
+  test('Start Download ignores the picker (starts right away)', async () => {
+    renderWithQueue('queue-test')
+    await waitFor(() => expect(vi.mocked(api.probeUrl)).toHaveBeenCalled(), {
+      timeout: 5000,
+    })
+    fireEvent.click(screen.getByText('Start Download'))
+    await waitFor(() => expect(vi.mocked(api.addDownload)).toHaveBeenCalledTimes(1), {
+      timeout: 5000,
+    })
+    expect(vi.mocked(api.addDownload).mock.calls[0][0].queue).toBeNull()
+  })
+
+  test('changing the picker changes the queue', async () => {
+    renderWithQueue(null)
+    fireEvent.change(screen.getByLabelText('Queue'), { target: { value: 'queue-test' } })
+    await waitFor(() => expect(vi.mocked(api.probeUrl)).toHaveBeenCalled(), {
+      timeout: 5000,
+    })
+    fireEvent.click(screen.getByText('Download Later'))
+    await waitFor(() => expect(vi.mocked(api.addDownload)).toHaveBeenCalledTimes(1), {
+      timeout: 5000,
+    })
+    expect(vi.mocked(api.addDownload).mock.calls[0][0].queue).toBe('queue-test')
   })
 })

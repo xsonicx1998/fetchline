@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ArrowDown, ArrowUp, List, Play, Plus, Square, X } from 'lucide-react'
 import {
+  createQueue,
   getQueueFiles,
   removeFromQueue,
   reorderQueue,
@@ -56,6 +57,15 @@ export function SchedulerDialog({
   const [syncResult, setSyncResult] = useState<SyncResult | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
+  /** Round 88.9 (1) — the scheduler creates its queue
+   *  implicitly while this is true: the dialog opens with no
+   *  queues and no form, so the empty state would otherwise be
+   *  a dead end ("No queues yet — create one to begin"). */
+  const [creatingQueue, setCreatingQueue] = useState(false)
+  /** Round 88.9 (1) — one implicit creation per open: the
+   *  effect re-runs when the queue list refreshes after the
+   *  creation, and must not create a second queue. */
+  const autoCreatedRef = useRef(false)
 
   const selected = queues.find((q) => q.id === selectedId) ?? queues[0] ?? null
 
@@ -67,6 +77,51 @@ export function SchedulerDialog({
       setSaved(false)
     }
     // Load the freshly opened dialog from props only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
+
+  // Round 88.9 (1) — a schedule never needs a hand-made
+  // queue: opening the scheduler with no queues creates one
+  // implicitly in the background ("Schedule 1", then "Schedule
+  // 2", … — the first free name), selects it, and the form is
+  // usable at once. The engine still schedules queues; only
+  // the creation is implicit. The queue is an ordinary queue —
+  // renameable and deletable like any other — so closing the
+  // dialog without saving leaves a harmless empty queue behind
+  // instead of a dead end.
+  useEffect(() => {
+    if (!open) {
+      autoCreatedRef.current = false
+      return
+    }
+    if (queues.length > 0 || autoCreatedRef.current) return
+    autoCreatedRef.current = true
+    let cancelled = false
+    setCreatingQueue(true)
+    const taken = new Set(queues.map((q) => q.name))
+    let n = 1
+    while (taken.has(`Schedule ${n}`)) n++
+    createQueue(`Schedule ${n}`)
+      .then((q) => {
+        if (cancelled) return
+        setSelectedId(q.id)
+        onChanged()
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return
+        // Let the user retry with "New queue": the guard is
+        // released so a later open tries again.
+        autoCreatedRef.current = false
+        setError(e instanceof Error ? e.message : String(e))
+      })
+      .finally(() => {
+        if (!cancelled) setCreatingQueue(false)
+      })
+    return () => {
+      cancelled = true
+    }
+    // `queues` is read, not watched: the refresh after the
+    // creation re-runs nothing (the guard stops a second one).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 
@@ -273,7 +328,9 @@ export function SchedulerDialog({
                 className={`flex items-center gap-2 rounded-md px-2 py-2 text-left text-base ${selected?.id === q.id ? 'bg-accent-soft font-semibold text-accent' : 'text-text hover:bg-surface-2'}`}
               >
                 <List className="h-4 w-4 shrink-0" aria-hidden="true" />
-                <span className="min-w-0 flex-1 truncate">{q.name}</span>
+                {/* Round 88.9 (4) — the name truncates in this
+                    narrow list, so hover shows the full name. */}
+                <span className="min-w-0 flex-1 truncate" title={q.name}>{q.name}</span>
                 <span className="shrink-0 text-xs text-text-muted">
                   {q.file_count} file{q.file_count === 1 ? '' : 's'}
                 </span>
@@ -318,7 +375,22 @@ export function SchedulerDialog({
             </div>
 
             {selected === null ? (
-              <p className="p-6 text-base text-text-muted">No queues yet — create one to begin.</p>
+              <div className="p-6">
+                <p className="text-base text-text-muted">
+                  {creatingQueue
+                    ? 'Creating a schedule…'
+                    : 'No queues yet — create one to begin.'}
+                </p>
+                {/* Round 88.9 (1) — an implicit creation that
+                    fails must say so: the error otherwise only
+                    renders inside the selected-queue branches,
+                    and with no queue the failure was silent. */}
+                {error ? (
+                  <p role="alert" className="mt-2 text-sm text-danger">
+                    {error}
+                  </p>
+                ) : null}
+              </div>
             ) : tab === 'schedule' ? (
               <div className="flex flex-col gap-4 overflow-y-auto p-6">
                 <div>

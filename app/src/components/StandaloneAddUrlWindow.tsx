@@ -4,9 +4,10 @@ import {
   getCategories,
   getPendingLink,
   getSettings,
+  listQueues,
   resolvePendingLink,
 } from '../lib/api'
-import type { CategoryRow, PendingLinkRow, Settings } from '../lib/types'
+import type { CategoryRow, PendingLinkRow, QueueRow, Settings } from '../lib/types'
 import { AddDownloadDialog, filenameFromUrl } from './AddDownloadDialog'
 import { Button } from './Button'
 import { TitleBar } from './TitleBar'
@@ -54,6 +55,10 @@ export function StandaloneAddUrlWindow({
   const [linkError, setLinkError] = useState<string | null>(null)
   const [categories, setCategories] = useState<CategoryRow[]>([])
   const [settings, setSettings] = useState<Settings | null>(null)
+  /** Round 88.9 (2) — the queue picker in the dialog needs
+   *  the queues; the standalone window has no sidebar queue,
+   *  so the picker defaults to the main queue. */
+  const [queues, setQueues] = useState<QueueRow[]>([])
   const [lateError, setLateError] = useState<string | null>(null)
   /** The dialog already submitted the capture, so closing the
    *  window must not resolve it as rejected (same guard as the
@@ -92,6 +97,11 @@ export function StandaloneAddUrlWindow({
     void getCategories()
       .then((rows) => {
         if (!stopped) setCategories(rows)
+      })
+      .catch(() => undefined)
+    void listQueues()
+      .then((rows) => {
+        if (!stopped) setQueues(rows)
       })
       .catch(() => undefined)
     void getSettings()
@@ -214,6 +224,8 @@ export function StandaloneAddUrlWindow({
               standalone
               captureMode={!manual}
               categories={categories}
+              queues={queues}
+              initialQueueId={null}
               defaultAction={settings?.default_action ?? 'start_now'}
               defaultFolder={settings?.default_download_folder ?? ''}
               lastUsedFolder={settings?.last_used_folder ?? ''}

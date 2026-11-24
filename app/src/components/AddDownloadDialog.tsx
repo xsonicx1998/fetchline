@@ -14,7 +14,7 @@ import {
   ytdlpResolve,
 } from '../lib/api'
 import { categoryForExtension } from '../lib/categories'
-import type { CategoryRow, ProbeInfo, QualityRow, YtdlpResolveResult } from '../lib/types'
+import type { CategoryRow, ProbeInfo, QualityRow, QueueRow, YtdlpResolveResult } from '../lib/types'
 import { Button } from './Button'
 
 interface AddDownloadDialogProps {
@@ -58,6 +58,16 @@ interface AddDownloadDialogProps {
    *  (App renders it after this dialog in the DOM, so it paints
    *  on top). */
   onAddCategory?: () => void
+  /** Round 88.9 (2) — the queues the new download can go to.
+   *  The main queue is always available ("Main queue"); custom
+   *  queues come from the caller. Empty in the standalone
+   *  window when the caller has not loaded them yet. */
+  queues?: QueueRow[]
+  /** Round 88.9 (2) — the queue the user is currently viewing
+   *  in the sidebar (null = All downloads). The picker defaults
+   *  to it, so adding while inside a queue lands in that queue
+   *  instead of the main list. */
+  initialQueueId?: string | null
   /** Round 67: a browser-extension capture waiting for its
    *  confirm — the submit confirms this row (through the real
    *  add path, with its cookies) instead of adding a fresh
@@ -273,11 +283,21 @@ export function AddDownloadDialog({
   captureSource = null,
   alreadyInList = false,
   standalone = false,
+  queues = [],
+  initialQueueId = null,
 }: AddDownloadDialogProps) {
   const [url, setUrl] = useState('')
   const [filename, setFilename] = useState('')
   const [folder, setFolder] = useState('')
   const [category, setCategory] = useState('')
+  /** Round 88.9 (2) — which queue a "Download Later" goes
+   *  to. 'queue-main' is the main queue; a custom queue id
+   *  files it there instead. "Start Download" ignores it
+   *  (queue: null — the download starts right away). Reset on
+   *  open to the queue the user is viewing, else the main
+   *  queue — the old behaviour (always 'queue-main') is what
+   *  stranded adds made inside a queue view in the main list. */
+  const [queue, setQueue] = useState('queue-main')
   /** Round 87.5 (E4) — the user picked a category by hand (the
    *  select, including "Pick automatically"): the auto-pick
    *  below must never override that choice. Reset on open. */
@@ -381,6 +401,17 @@ export function AddDownloadDialog({
       setFolder(lastUsedFolder?.trim() ?? '')
       setCategory('')
       userPickedCategory.current = false
+      // Round 88.9 (2) — default to the queue being viewed
+      // (a custom queue id the caller knows); anything else
+      // falls back to the main queue. `queues` /
+      // `initialQueueId` are deliberately NOT in this effect's
+      // deps (same reason as `lastUsedFolder` above): a late
+      // arrival must not wipe a URL already typed.
+      setQueue(
+        initialQueueId !== null && queues.some((q) => q.id === initialQueueId)
+          ? initialQueueId
+          : 'queue-main',
+      )
       setCap(0)
       setDescription('')
       setFileSize(null)
@@ -790,7 +821,7 @@ export function AddDownloadDialog({
           folder: folderValue,
           explicitFolder,
           category: categoryValue,
-          queue: startNow ? null : 'queue-main',
+          queue: startNow ? null : queue,
           speedLimitKbps: cap > 0 ? cap : null,
           startNow,
         })
@@ -847,7 +878,7 @@ export function AddDownloadDialog({
           folder: folderValue,
           explicitFolder,
           category: categoryValue,
-          queue: startNow ? null : 'queue-main',
+          queue: startNow ? null : queue,
           speedLimitKbps: cap > 0 ? cap : null,
           startNow,
         })
@@ -868,7 +899,7 @@ export function AddDownloadDialog({
         category: categoryValue,
         // "Save for later" files the download in the main queue, so
         // the scheduler (or Start Now) can pick it up later.
-        queue: startNow ? null : 'queue-main',
+        queue: startNow ? null : queue,
       })
       // Round 67 — the Description note, stored right after the
       // add. Non-fatal: the download is already added.
@@ -1134,6 +1165,40 @@ export function AddDownloadDialog({
                 <Plus className="h-4 w-4" aria-hidden="true" />
               </button>
             </div>
+          </div>
+
+          {/* Round 88.9 (2) — the queue a "Download Later"
+              goes to. Defaults to the queue being viewed, so an
+              add made inside a queue lands in that queue. "Start
+              Download" ignores it: the download starts right
+              away instead of waiting in a queue. */}
+          <div>
+            <label
+              htmlFor="add-queue"
+              className="mb-1 block text-xs font-semibold text-text-muted"
+            >
+              Queue
+            </label>
+            <select
+              id="add-queue"
+              value={queue}
+              onChange={(e) => setQueue(e.target.value)}
+              disabled={busy}
+              title="Used for Download Later — Start Download starts right away"
+              className="h-9 w-full rounded-md border border-border-input bg-surface px-3 text-[13px] focus:border-accent focus:outline-none"
+            >
+              <option value="queue-main">Main queue</option>
+              {queues
+                .filter((q) => !q.is_main)
+                .map((q) => (
+                  <option key={q.id} value={q.id}>
+                    {q.name}
+                  </option>
+                ))}
+            </select>
+            <p className="mt-1 text-xs text-text-muted">
+              Only used for Download Later.
+            </p>
           </div>
 
           <div>

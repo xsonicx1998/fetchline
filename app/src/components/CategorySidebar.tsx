@@ -46,7 +46,7 @@ interface CategorySidebarProps {
    *  its downloads, untagged). */
   onDeleteGrabber?: (project: GrabberProjectRow) => void
   /** A download row was dropped on a category or queue. */
-  onDropDownload: (downloadId: string, target: { kind: 'category' | 'queue'; id: string }) => void
+  onDropDownload: (downloadIds: string[], target: { kind: 'category' | 'queue'; id: string }) => void
 }
 
 /** S04 + S05 — categories and queues sidebar (components.md:
@@ -117,14 +117,28 @@ export function CategorySidebar({
   function handleDrop(e: React.DragEvent, target: { kind: 'category' | 'queue'; id: string }) {
     e.preventDefault()
     setDropTarget(null)
-    let downloadId = ''
+    // Round 88.9 (7) — the drag carries the whole drag
+    // selection (`ids`); an old payload with only `id` still
+    // works (one row).
+    let downloadIds: string[] = []
     try {
-      const data = JSON.parse(e.dataTransfer.getData('text/plain')) as { type?: string; id?: string }
-      if (data.type === 'download' && data.id) downloadId = data.id
+      const data = JSON.parse(e.dataTransfer.getData('text/plain')) as {
+        type?: string
+        id?: string
+        ids?: string[]
+      }
+      if (data.type === 'download') {
+        downloadIds =
+          Array.isArray(data.ids) && data.ids.length > 0
+            ? data.ids
+            : data.id
+              ? [data.id]
+              : []
+      }
     } catch {
       return
     }
-    if (downloadId) onDropDownload(downloadId, target)
+    if (downloadIds.length > 0) onDropDownload(downloadIds, target)
   }
 
   const dropProps = (key: string, target: { kind: 'category' | 'queue'; id: string }) => ({
@@ -198,6 +212,9 @@ export function CategorySidebar({
             // null and the click did nothing.
             onClick={() => onSelectCategory(c.id)}
             aria-current={selectedCategory === c.id || undefined}
+            // Round 88.9 (4) — the name truncates, so hover
+            // shows the full name (same as the queue rows).
+            title={c.name}
             className={`${rowClass(selectedCategory === c.id, `cat:${c.id}`)} flex-1`}
           >
             <PackIcon name="category-folder" className="h-5 w-5 icon-glow-purple" />

@@ -5,8 +5,8 @@
 //
 // Run with: npm run test:ui
 
-import { describe, expect, test } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { describe, expect, test, vi } from 'vitest'
+import { fireEvent, render, screen } from '@testing-library/react'
 import type { CategoryRow, DownloadRow, QueueRow } from '../lib/types'
 import { CategorySidebar } from './CategorySidebar'
 
@@ -92,5 +92,68 @@ describe('sidebar queues (Round 87)', () => {
     )
     expect(screen.queryByText('Main download queue')).toBeNull()
     expect(screen.getByText('New queue')).toBeTruthy()
+  })
+})
+
+describe('sidebar drop (Round 88.9, item 7)', () => {
+  function renderSidebar(onDropDownload = vi.fn()) {
+    render(
+      <CategorySidebar
+        categories={CATEGORIES}
+        downloads={DOWNLOADS}
+        queues={QUEUES}
+        grabberProjects={[]}
+        selectedCategory={null}
+        selectedQueue={null}
+        selectedFilter="all"
+        selectedGrabberId={null}
+        onSelectCategory={noop}
+        onSelectQueue={noop}
+        onSelectFilter={noop}
+        onAddCategory={noop}
+        onAddQueue={noop}
+        onDeleteCategory={noop}
+        onOpenScheduler={noop}
+        onRunGrabber={noop}
+        onNewGrabber={noop}
+        onSyncQueue={noop}
+        onDropDownload={onDropDownload}
+      />,
+    )
+    return onDropDownload
+  }
+
+  function queueDropTarget(): HTMLElement {
+    const button = screen.getByText('TestQueue').closest('button')
+    if (!button?.parentElement) throw new Error('no queue row')
+    return button.parentElement
+  }
+
+  test('dropping a drag selection on a queue passes all ids', () => {
+    const onDropDownload = renderSidebar()
+    fireEvent.drop(queueDropTarget(), {
+      dataTransfer: {
+        getData: () =>
+          JSON.stringify({ type: 'download', id: 'd1', ids: ['d1', 'd2'] }),
+      },
+    })
+    expect(onDropDownload).toHaveBeenCalledTimes(1)
+    expect(onDropDownload).toHaveBeenCalledWith(['d1', 'd2'], {
+      kind: 'queue',
+      id: 'queue-test',
+    })
+  })
+
+  test('an old single-id payload still drops one row', () => {
+    const onDropDownload = renderSidebar()
+    fireEvent.drop(queueDropTarget(), {
+      dataTransfer: {
+        getData: () => JSON.stringify({ type: 'download', id: 'd1' }),
+      },
+    })
+    expect(onDropDownload).toHaveBeenCalledWith(['d1'], {
+      kind: 'queue',
+      id: 'queue-test',
+    })
   })
 })

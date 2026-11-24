@@ -48,6 +48,10 @@ vi.mock('../lib/api', () => ({
   getPendingLink: vi.fn(() => new Promise(() => {})),
   getCategories: () => Promise.resolve([]),
   getSettings: () => Promise.resolve(null),
+  // Round 88.9 (2) — the queue picker in the dialog needs the
+  // queues; the standalone window has no sidebar queue, so the
+  // picker defaults to the main queue.
+  listQueues: () => Promise.resolve([]),
   resolvePendingLink: () => Promise.resolve(),
   // Round 88 — the dialog's own api surface, so a rendered
   // capture row mounts the real dialog (probe + submit paths).

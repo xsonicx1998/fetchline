@@ -60,7 +60,12 @@ export function AddQueueDialog({ open, onClose, onAdded }: AddQueueDialogProps) 
       role="dialog"
       aria-modal="true"
       aria-labelledby="add-queue-title"
-      className="fixed inset-0 z-10 flex items-center justify-center bg-black/50 p-4"
+      // Round 88.9 (3) — z-20, above the scheduler (z-10): the
+      // scheduler's "New queue" button opens this dialog, and at
+      // z-10 it painted UNDER the scheduler (App renders this
+      // dialog before the scheduler in the DOM, same z-index),
+      // so the user could not see or reach it.
+      className="fixed inset-0 z-20 flex items-center justify-center bg-black/50 p-4"
     >
       <div className="w-full max-w-md rounded-lg border border-border bg-surface-raised p-6 shadow-pop">
         <div className="mb-4 flex items-start justify-between gap-4">
