@@ -285,14 +285,26 @@ export function AddDownloadDialog({
   /** Per-download speed cap in KB/s (S12); 0 = no cap, the global cap still applies. */
   const [cap, setCap] = useState(0)
   const [description, setDescription] = useState('')
-  /** Round 87.5 (E5/R77c) — the "Remember this path" checkbox
-   *  is gone: it only worked with a category picked by hand,
-   *  and categories never auto-picked, so in practice the path
-   *  was never remembered at all. A folder the user picks (the
-   *  "..." picker or a folder typed into Save As) is now
-   *  remembered on submit — the category's Save To, or the
-   *  global default folder when no category is set (see
-   *  `submit`). */
+  /** "Remember this path" (restored) — checked by default, so a
+   *  picked folder is remembered exactly as before. Unchecked,
+   *  the folder is used for this download only: `submit` passes
+   *  `explicitFolder: null`, so neither the frontend write (the
+   *  category's Save To / the global default folder) nor the
+   *  engine's `remember_explicit_folder` (category default +
+   *  last-used folder) runs. The download itself still lands in
+   *  the picked folder — that comes from `folder`, not from
+   *  `explicitFolder`. Reset on open. */
+  const [rememberPath, setRememberPath] = useState(true)
+  /** "Remember this path" is back as a real checkbox (default
+   *  checked). It was removed in Round 87.5 because it only
+   *  worked with a category picked by hand, and categories never
+   *  auto-picked, so in practice the path was never remembered
+   *  at all — the remember then became automatic. The checkbox
+   *  now gates that automatic remember (see `submit`): a folder
+   *  the user picks (the "..." picker or a folder typed into
+   *  Save As) is remembered on submit only while it is checked
+   *  — the category's Save To, or the global default folder
+   *  when no category is set. */
   /** File size from the URL probe, for the cyan size on the
    *  remember-path row; null while unknown / unprobed. */
   const [fileSize, setFileSize] = useState<number | null>(null)
@@ -379,6 +391,7 @@ export function AddDownloadDialog({
       resolvedForUrl.current = ''
       setError(null)
       setBusy(false)
+      setRememberPath(true)
       folderEdited.current = false
       setSaveAsDraft(null)
       folderExplicitRef.current = null
@@ -735,7 +748,14 @@ export function AddDownloadDialog({
       // half of the 87.6 drift, beside the engine's
       // remember-on-every-add. A failure here must not block the
       // download itself.
-      const explicitFolder = folderExplicitRef.current
+      // "Remember this path" gates the whole remember: unchecked,
+      // `explicitFolder` is null, so this write is skipped AND
+      // the engine's `remember_explicit_folder` (reached through
+      // the `explicitFolder` arg of the add calls below) sees
+      // nothing to remember. The download still lands in the
+      // picked folder — that comes from `folderValue`, not from
+      // `explicitFolder`.
+      const explicitFolder = rememberPath ? folderExplicitRef.current : null
       if (explicitFolder) {
         try {
           if (categoryValue) {
@@ -1148,11 +1168,23 @@ export function AddDownloadDialog({
           </div>
 
           <div className="flex items-center gap-2 text-xs text-text-muted">
-            <span className="min-w-0 grow truncate">
-              {category
-                ? `A folder you pick is remembered for “${categoryName}”`
-                : 'A folder you pick is remembered for next time'}
-            </span>
+            <label className="flex min-w-0 grow cursor-pointer items-center gap-2">
+              <input
+                type="checkbox"
+                checked={rememberPath}
+                onChange={(e) => setRememberPath(e.target.checked)}
+                disabled={busy}
+                aria-label="Remember this path"
+                className="h-3.5 w-3.5 shrink-0 accent-[#8B20FF]"
+              />
+              <span className="min-w-0 truncate">
+                {rememberPath
+                  ? category
+                    ? `A folder you pick is remembered for “${categoryName}”`
+                    : 'A folder you pick is remembered for next time'
+                  : 'This folder is used for this download only'}
+              </span>
+            </label>
             {fileSize !== null && (
               <span className="shrink-0 text-[13px] font-semibold text-info">
                 {formatBytes(fileSize)}

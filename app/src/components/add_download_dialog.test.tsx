@@ -13,6 +13,7 @@
 
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import { AddDownloadDialog, applySaveAsEdit, bestQualityRow, isHttpUrl, isVideoPageUrl, normalizeUrlScheme } from './AddDownloadDialog'
 import * as api from '../lib/api'
 import type { ProbeInfo, QualityRow, YtdlpResolveResult } from '../lib/types'
@@ -638,5 +639,127 @@ describe('capture source line (Round 88)', () => {
   test('no source means no source line (manual / clipboard)', () => {
     renderCapture(null)
     expect(screen.queryByText(/Caught from/)).toBeNull()
+  })
+})
+
+// -- "Remember this path" checkbox (restored) ---------------------------
+// The checkbox was removed in Round 87.5 because it never
+// persisted anything, so the remember became automatic. The user
+// asked for it back, working: sometimes he does NOT want the
+// folder saved. Default CHECKED (today's behavior); unchecked,
+// the picked folder is used for this download only and nothing
+// is remembered — no category/default write, and the engine's
+// remember sees `explicitFolder: null`. The download itself
+// still lands in the picked folder either way.
+describe('Remember this path checkbox', () => {
+  const FILE_URL = 'https://example.com/file.zip'
+  const PICKED = 'C:\\Users\\Administrator\\Downloads\\Picked'
+  const OTHER = 'C:\\Users\\Administrator\\Downloads\\Other'
+
+  const saveFolderValue = () =>
+    (screen.getByLabelText('Save folder') as HTMLInputElement).value
+
+  async function renderAndWaitForProbe() {
+    const rendered = renderDialog(FILE_URL)
+    await waitFor(() => expect(vi.mocked(api.probeUrl)).toHaveBeenCalled(), {
+      timeout: 5000,
+    })
+    return rendered
+  }
+
+  async function pickViaDialog() {
+    vi.mocked(openDialog).mockResolvedValue(PICKED)
+    fireEvent.click(screen.getByLabelText('Choose folder'))
+    await waitFor(() => expect(saveFolderValue()).toBe(`${PICKED}\\`), {
+      timeout: 5000,
+    })
+  }
+
+  async function changeFolderViaSaveAs(folder: string) {
+    const saveAs = screen.getByLabelText('Save As') as HTMLInputElement
+    fireEvent.change(saveAs, { target: { value: `${folder}\\file.zip` } })
+    fireEvent.blur(saveAs)
+    await waitFor(() => expect(saveFolderValue()).toBe(`${folder}\\`), {
+      timeout: 5000,
+    })
+  }
+
+  async function submitAndWaitAdded(onAdded: ReturnType<typeof vi.fn>) {
+    fireEvent.click(screen.getByText('Start Download'))
+    await waitFor(() => expect(onAdded).toHaveBeenCalledWith('dl-2'), {
+      timeout: 5000,
+    })
+    return vi.mocked(api.addDownload).mock.calls[0][0]
+  }
+
+  test('the checkbox is present and checked by default', async () => {
+    await renderAndWaitForProbe()
+    const checkbox = screen.getByLabelText('Remember this path') as HTMLInputElement
+    expect(checkbox.checked).toBe(true)
+    expect(
+      screen.getByText('A folder you pick is remembered for next time'),
+    ).toBeTruthy()
+  })
+
+  test('checked + "..." pick remembers the folder', async () => {
+    const { onAdded } = await renderAndWaitForProbe()
+    await pickViaDialog()
+    const call = await submitAndWaitAdded(onAdded)
+
+    // The download lands in the picked folder...
+    expect(call.folder).toBe(PICKED)
+    // ...and the pick is remembered: the engine gets the
+    // explicit folder, and the global default is written (no
+    // category is picked, so the category write does not run).
+    expect(call.explicitFolder).toBe(PICKED)
+    expect(vi.mocked(api.setSettingField)).toHaveBeenCalledWith(
+      'default_download_folder',
+      PICKED,
+    )
+    expect(vi.mocked(api.updateCategory)).not.toHaveBeenCalled()
+  })
+
+  test('unchecked + "..." pick uses the folder once and remembers nothing', async () => {
+    const { onAdded } = await renderAndWaitForProbe()
+    await pickViaDialog()
+    fireEvent.click(screen.getByLabelText('Remember this path'))
+    expect(
+      screen.getByText('This folder is used for this download only'),
+    ).toBeTruthy()
+    const call = await submitAndWaitAdded(onAdded)
+
+    // The download still lands in the picked folder...
+    expect(call.folder).toBe(PICKED)
+    // ...but nothing is remembered: no write of any kind, and
+    // the engine gets no explicit folder.
+    expect(call.explicitFolder).toBeNull()
+    expect(vi.mocked(api.setSettingField)).not.toHaveBeenCalled()
+    expect(vi.mocked(api.updateCategory)).not.toHaveBeenCalled()
+  })
+
+  test('checked + Save As folder change remembers the folder', async () => {
+    const { onAdded } = await renderAndWaitForProbe()
+    await changeFolderViaSaveAs(OTHER)
+    const call = await submitAndWaitAdded(onAdded)
+
+    expect(call.folder).toBe(OTHER)
+    expect(call.explicitFolder).toBe(OTHER)
+    expect(vi.mocked(api.setSettingField)).toHaveBeenCalledWith(
+      'default_download_folder',
+      OTHER,
+    )
+    expect(vi.mocked(api.updateCategory)).not.toHaveBeenCalled()
+  })
+
+  test('unchecked + Save As folder change remembers nothing', async () => {
+    const { onAdded } = await renderAndWaitForProbe()
+    fireEvent.click(screen.getByLabelText('Remember this path'))
+    await changeFolderViaSaveAs(OTHER)
+    const call = await submitAndWaitAdded(onAdded)
+
+    expect(call.folder).toBe(OTHER)
+    expect(call.explicitFolder).toBeNull()
+    expect(vi.mocked(api.setSettingField)).not.toHaveBeenCalled()
+    expect(vi.mocked(api.updateCategory)).not.toHaveBeenCalled()
   })
 })
