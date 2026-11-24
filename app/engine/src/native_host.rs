@@ -283,6 +283,16 @@ pub struct HostReply {
     pub enqueued: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_integration: Option<bool>,
+    // Round 88.3 — the relay master switch, read from the same
+    // settings row. The host NEVER sent this before (the
+    // GetSettings handler set browser_integration and
+    // excluded_sites only), so the extension's
+    // `reply.relay_enabled !== false` always read `undefined`
+    // and the capture gate was stuck ON — the app's relay
+    // checkbox could never gate capture (only the engine-side
+    // click-time check in enqueue_relay enforced it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub excluded_sites: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -428,6 +438,7 @@ impl HostReply {
             pending_link_id: None,
             enqueued: None,
             browser_integration: None,
+            relay_enabled: None,
             excluded_sites: None,
             pending_count: None,
             app_alive: None,
@@ -451,6 +462,7 @@ impl HostReply {
             pending_link_id: None,
             enqueued: None,
             browser_integration: None,
+            relay_enabled: None,
             excluded_sites: None,
             pending_count: None,
             app_alive: None,
@@ -539,6 +551,11 @@ pub fn handle_host_message(store: &Store, msg: &HostMessage) -> HostReply {
             let settings = store.get_settings().unwrap_or_default();
             let mut reply = HostReply::ok("settings");
             reply.browser_integration = Some(settings.browser_integration);
+            // Round 88.3 — the relay switch rides the same reply
+            // (it never did before: the extension's capture gate
+            // read `reply.relay_enabled`, which was always
+            // undefined, so the gate was stuck ON).
+            reply.relay_enabled = Some(settings.relay_enabled);
             reply.excluded_sites = Some(settings.excluded_sites);
             reply.with_pending_count(store)
         }

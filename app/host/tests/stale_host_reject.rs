@@ -176,3 +176,27 @@ fn startup_line_carries_the_build_identity() {
         "the first host.log line must carry the build identity (head=… built=…): {first}"
     );
 }
+
+#[test]
+fn get_settings_reply_carries_relay_enabled() {
+    // Round 88.3 — the host never sent `relay_enabled` in its
+    // get_settings reply, so the extension's capture gate read
+    // `undefined` and was stuck ON: the app's relay checkbox
+    // could never gate capture. A fresh database defaults the
+    // relay ON, and the reply must carry that.
+    let dir = tmpdir();
+    let db = dir.join("app.db");
+    let mut host = HostChild::spawn(&db);
+    let reply = host.send(&serde_json::json!({ "type": "get_settings" }));
+    assert_eq!(
+        reply.get("ok"),
+        Some(&serde_json::Value::Bool(true)),
+        "get_settings must answer ok: {reply}"
+    );
+    assert_eq!(
+        reply.get("relay_enabled"),
+        Some(&serde_json::Value::Bool(true)),
+        "get_settings must carry the relay switch (fresh DB defaults ON): {reply}"
+    );
+    host.finish();
+}

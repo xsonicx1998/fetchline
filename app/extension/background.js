@@ -421,6 +421,25 @@ function relayBufferRemove(tabId, url) {
 }
 
 function relayClearTab(tabId) {
+  // Round 88.3 — a cleared tab's URLs must also leave the
+  // seen-set: the buffer is gone, so a later response for the
+  // same URL is a re-capture, not a duplicate. Before this,
+  // the seen entry survived the clear, and the dedupe in
+  // handleRelayHeaders (plus the 206 start>0 rule in
+  // relayClassify) dropped every later fetch for two minutes
+  // — a same-tab navigation to a media URL lost its relay row
+  // with no way back, exactly the Round 88.2 live failure.
+  // (A send is different: relayBufferRemove consumes the item
+  // WITHOUT forgetting it, so a handed-off URL is never
+  // re-captured — that path is untouched here.)
+  const tab = relayBuffer.get(tabId);
+  if (tab) {
+    for (const item of tab.values()) {
+      if (!item) continue;
+      if (item.finalUrl) relaySeen.delete(item.finalUrl);
+      if (item.url) relaySeen.delete(item.url);
+    }
+  }
   relayBuffer.delete(tabId);
   relayManifestFolders.delete(tabId);
   const api = relaySessionApi();
@@ -1036,17 +1055,30 @@ async function refreshDesktopSettings() {
   try {
     const reply = await sendToHost({ type: "get_settings" });
     if (reply && reply.ok) {
-      const update = {
-        [STORE_KEYS.desktopIntegration]: reply.browser_integration !== false,
-        [STORE_KEYS.desktopExcluded]: reply.excluded_sites || [],
-        // Round 88 — the relay switch rides the same reply
-        // (the engine side adds the setting; absent means ON).
-        [STORE_KEYS.relayEnabled]: reply.relay_enabled !== false,
-      };
+      // Round 88.3 — only a field the host actually carries
+      // updates the cache. A reply that omits a setting must
+      // not reset it to a default: an older host sends no
+      // relay_enabled, and clobbering the cache with a default
+      // would erase a value the user set. (Absent still means
+      // ON at read time — loadState defaults relayEnabled to
+      // true when nothing is stored.)
+      const update = {};
+      if (typeof reply.browser_integration === "boolean") {
+        update[STORE_KEYS.desktopIntegration] = reply.browser_integration;
+      }
+      if (Array.isArray(reply.excluded_sites)) {
+        update[STORE_KEYS.desktopExcluded] = reply.excluded_sites;
+      }
+      // Round 88 — the relay switch rides the same reply.
+      if (typeof reply.relay_enabled === "boolean") {
+        update[STORE_KEYS.relayEnabled] = reply.relay_enabled;
+      }
       if (typeof reply.pending_count === "number") {
         update[STORE_KEYS.pendingCount] = reply.pending_count;
       }
-      await chrome.storage.local.set(update);
+      if (Object.keys(update).length > 0) {
+        await chrome.storage.local.set(update);
+      }
     }
   } catch {
     // Host unreachable: keep the last cached values.

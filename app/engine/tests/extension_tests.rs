@@ -205,6 +205,10 @@ fn host_ping_and_get_settings() {
     let settings = handle_host_message(&store, &HostMessage::GetSettings);
     assert!(settings.ok);
     assert_eq!(settings.browser_integration, Some(true));
+    // Round 88.3 — the reply carries the relay switch too: a
+    // fresh database defaults it ON, and the extension's
+    // capture gate reads it from this reply.
+    assert_eq!(settings.relay_enabled, Some(true));
     assert_eq!(settings.excluded_sites.as_deref(), Some(&[] as &[String]));
 }
 
@@ -1011,6 +1015,22 @@ fn host_get_settings_reports_pending_count() {
     }
     let reply = handle_host_message(&store, &HostMessage::GetSettings);
     assert_eq!(reply.pending_count, Some(2));
+}
+
+#[test]
+fn host_get_settings_reports_relay_enabled_off_when_the_app_turns_it_off() {
+    // Round 88.3 — the app's relay toggle must reach the
+    // extension through this reply: OFF in the DB means OFF
+    // in the reply (before this round the host never sent the
+    // field at all, so the extension's gate was stuck ON).
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let mut s = store.get_settings().unwrap();
+    s.relay_enabled = false;
+    store.update_settings(&s).unwrap();
+    let reply = handle_host_message(&store, &HostMessage::GetSettings);
+    assert!(reply.ok);
+    assert_eq!(reply.relay_enabled, Some(false));
 }
 
 #[tokio::test]

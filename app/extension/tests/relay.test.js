@@ -966,6 +966,78 @@ test("page_context mirror: page_url + title come from content.js; navigation cle
   assert.equal(items[0].page_url, "https://example.com/watch/456");
 });
 
+test("same-tab navigation to a media URL: the cleared capture is re-captured, not lost to the seen-set", async () => {
+  // Round 88.3 — the Round 88.2 live failure: a same-tab
+  // navigation to Big Buck Bunny buffered the mp4, then the
+  // media document's page_context (new URL) cleared the
+  // buffer — and the seen-set survived the clear, so every
+  // later fetch for the same URL was dropped as a duplicate
+  // for two minutes and the relay row never appeared.
+  const env = loadBackground();
+  await env.setPageContext(5, PAGE, "Watch");
+  // The navigation's main_frame response IS the mp4 (not HTML).
+  env.headersReceived(headersReceived({
+    url: CLIP,
+    type: "main_frame",
+    status: 206,
+    headers: {
+      "Content-Type": "video/mp4",
+      "Content-Range": "bytes 0-237999999/238000000",
+      "Content-Length": "238000000",
+    },
+    requestId: "r1",
+    initiator: "",
+  }));
+  await tick();
+  assert.equal((await env.buffered(5)).length, 1, "the direct-navigation mp4 is buffered");
+  // The media document loads and mirrors its URL — a new
+  // top-level page, so the old buffer is cleared.
+  await env.setPageContext(5, CLIP, "");
+  assert.deepEqual(await env.buffered(5), [], "the navigation clears the old buffer");
+  // The player keeps fetching (a seek): the re-capture must
+  // land in the buffer instead of being dropped as "seen".
+  env.headersReceived(headersReceived({
+    url: CLIP,
+    type: "media",
+    status: 206,
+    headers: {
+      "Content-Type": "video/mp4",
+      "Content-Range": "bytes 1000000-237999999/238000000",
+      "Content-Length": "237000000",
+    },
+    requestId: "r2",
+    initiator: "",
+  }));
+  await tick();
+  const items = await env.buffered(5);
+  assert.equal(items.length, 1, "the seek re-captures the cleared item");
+  assert.equal(items[0].finalUrl, CLIP);
+});
+
+test("closing a tab forgets its seen URLs, so reopening the same URL captures again", async () => {
+  // Round 88.3 — same trap, other trigger: closing a tab
+  // cleared its buffer but not the seen-set, so reopening
+  // the same video in a new tab within two minutes never
+  // buffered (the first fetch was dropped as a duplicate).
+  const env = loadBackground();
+  await env.setPageContext(5, PAGE, "Watch");
+  env.headersReceived(headersReceived({ headers: MP4_HEADERS }));
+  await tick();
+  assert.equal((await env.buffered(5)).length, 1);
+  env.removeTab(5);
+  await tick();
+  assert.deepEqual(await env.buffered(5), []);
+  // Reopen the same URL in a new tab.
+  await env.setPageContext(6, PAGE, "Watch");
+  env.headersReceived(headersReceived({
+    tabId: 6,
+    headers: MP4_HEADERS,
+    requestId: "r2",
+  }));
+  await tick();
+  assert.equal((await env.buffered(6)).length, 1, "the reopened URL captures again");
+});
+
 test("closing a tab clears its buffered relay items and manifest folders", async () => {
   const env = loadBackground();
   await env.setPageContext(5, PAGE, "Watch");

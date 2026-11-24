@@ -702,6 +702,89 @@ test("Bunny-like direct navigation: the mp4 page buffers, and the relay row clic
   }
 });
 
+test("same-tab navigation to the mp4 keeps the relay row in the dropdown", async () => {
+  // Round 88.3 — the Round 88.2 live failure, end to end: the
+  // tab first shows an HTML page, then navigates to the mp4
+  // itself. The mp4's 206 is buffered, the media document's
+  // page_context clears the buffer for the new page, and the
+  // player's next fetch must re-capture — otherwise the
+  // dropdown shows only the direct row, exactly as the VPS
+  // retest saw.
+  const { server, baseUrl } = await startFixtureServer();
+  try {
+    const clipUrl = `${baseUrl}${RELAY_CLIP_PATH}`;
+    const pageUrl = `${baseUrl}${RELAY_VIDEO_PATH}`;
+    const clipHeaders = await realClipHeaders(baseUrl);
+
+    const bg = loadBackground();
+    const content = loadContent({
+      pageUrl,
+      initialVideoSpec: { url: clipUrl },
+      wire: wireTo(bg),
+    });
+    await tick(50);
+    // The first page: an HTML video page (its own page_context
+    // arrives from content.js on load).
+    bg.headersReceived(headersReceived({
+      url: pageUrl,
+      type: "main_frame",
+      status: 200,
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+      requestId: "r0",
+      initiator: "",
+    }));
+    await tick();
+    // The tab navigates to the mp4 itself: the main_frame 206
+    // is captured straight away.
+    bg.headersReceived(headersReceived({
+      url: clipUrl,
+      type: "main_frame",
+      status: 206,
+      headers: clipHeaders,
+      requestId: "r1",
+      initiator: "",
+    }));
+    await tick();
+    assert.equal((await bg.buffered(TAB)).length, 1, "the direct-navigation mp4 is buffered");
+    // The media document's content script mirrors the new page
+    // URL — a new top-level page, so the buffer is cleared.
+    bg.listeners.message(
+      { type: "page_context", pageUrl: clipUrl, title: "" },
+      { tab: { id: TAB } },
+      () => {},
+    );
+    await tick();
+    assert.equal((await bg.buffered(TAB)).length, 0, "the navigation clears the old buffer");
+    // The player keeps fetching (a seek): the re-capture must
+    // land in the buffer.
+    bg.headersReceived(headersReceived({
+      url: clipUrl,
+      type: "media",
+      status: 206,
+      headers: {
+        "Content-Type": "video/mp4",
+        "Content-Range": `bytes 262144-${RELAY_CLIP_SIZE - 1}/${RELAY_CLIP_SIZE}`,
+        "Content-Length": String(RELAY_CLIP_SIZE - 262144),
+      },
+      requestId: "r2",
+      initiator: "",
+    }));
+    await tick();
+    assert.equal((await bg.buffered(TAB)).length, 1, "the seek re-captures the cleared item");
+
+    // The dropdown shows the relay row below the direct row.
+    content.click(content.findButton());
+    const dropdown = content.findDropdown();
+    await tick(50);
+    const rows = dropdown.children.filter((c) => c.tagName === "BUTTON");
+    const relayRow = rows.find((r) => r.children[1] && r.children[1].textContent === "Relay");
+    assert.ok(relayRow, "a relay row with the Relay mark is listed after the navigation");
+    assert.match(relayRow.children[0].textContent, /relay-clip\.mp4/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test("a relay row click from a stale content script (extension reloaded) renders the failure in the dropdown", async () => {
   const { server, baseUrl } = await startFixtureServer();
   try {

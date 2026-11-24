@@ -30,7 +30,7 @@
 // still fails on its own if the sidecar is missing entirely,
 // and a `cargo check` flow that never bundles must not break.
 // Windows only: the sidecar is a Windows artifact.
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// The sidecar name Tauri resolves for `binaries/fetchline-host`
 /// on Windows x86_64.
@@ -121,6 +121,11 @@ pub fn outcome_line(outcome: &SyncOutcome) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Round 88.3 — PathBuf lives here, not at the top of the
+    // file: only the tests use it, and a top-level import warns
+    // (`unused import`) on every non-test build (the VPS build
+    // log showed it).
+    use std::path::PathBuf;
     use std::time::Duration;
 
     fn tmpdir(tag: &str) -> PathBuf {

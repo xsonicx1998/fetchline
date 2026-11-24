@@ -92,6 +92,18 @@ document.addEventListener("DOMContentLoaded", () => {
   void refreshStatus();
   void refreshScanLine();
   void refreshRelayLine();
+  // Round 88.3 — re-read the desktop settings whenever the
+  // popup opens, so an app-side toggle (relay, integration)
+  // reaches the background worker's capture gate without
+  // waiting for a browser restart: the worker otherwise
+  // refreshes only at install / startup, and a same-version
+  // reload does not fire onInstalled. Fire-and-forget — the
+  // popup shows the connection state, not the settings — and
+  // rejection-safe (no background listening yet must never
+  // surface as an unhandled rejection).
+  void chrome.runtime
+    .sendMessage({ type: "refresh_desktop_settings" })
+    .catch(() => {});
 });
 
 // Round 69 — show the last video-scan outcome, so "Find videos on
