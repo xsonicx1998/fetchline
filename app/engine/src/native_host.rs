@@ -577,7 +577,7 @@ pub fn handle_host_message(store: &Store, msg: &HostMessage) -> HostReply {
             final_url,
             page_url,
             referrer,
-            content_type: _,
+            content_type,
             content_length,
             filename,
             kind,
@@ -589,6 +589,7 @@ pub fn handle_host_message(store: &Store, msg: &HostMessage) -> HostReply {
             final_url.as_deref(),
             page_url.as_deref().or(referrer.as_deref()),
             kind.as_deref(),
+            content_type.as_deref(),
             *content_length,
             filename.as_deref(),
             headers,
@@ -741,6 +742,48 @@ fn enqueue_one(
     store.enqueue_pending_link_with_cookies(url, referrer, source, cookies_json.as_deref())
 }
 
+/// Round 88.6 — host-side mirror of the extension's
+/// `relayIsFileAttachment` (background.js, Round 88.5).
+/// `filename` is the capture's filename (the disposition name
+/// when the server sent one — the extension's `relayFilename`
+/// returns it first — else the URL basename), `content_type`
+/// the response type (parameters, if a stale worker sent them,
+/// are stripped here), `url` the download target. A named file
+/// is a file whatever the server claims its type is (a
+/// mislabeled PDF is still a PDF); an unnamed JSON/text
+/// attachment, and the canonical "f.txt" name, never are. The
+/// extension list is `CAPTURE_EXTENSIONS` (clipboard.rs), the
+/// documented mirror of the extension's
+/// `DEFAULT_CATCH_EXTENSIONS` — the two stay in sync there.
+fn relay_is_file_attachment(filename: Option<&str>, content_type: Option<&str>, url: &str) -> bool {
+    let name = filename.map(str::trim).filter(|s| !s.is_empty());
+    let ext = name
+        .and_then(|n| n.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()))
+        .filter(|e| !e.is_empty())
+        .or_else(|| crate::video::extension_of_url(url));
+    if let Some(ext) = ext {
+        if crate::clipboard::CAPTURE_EXTENSIONS.contains(&ext.as_str()) {
+            return true;
+        }
+    }
+    let content_type = content_type
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if content_type == "application/json" || content_type.starts_with("text/") {
+        return false;
+    }
+    if let Some(name) = name {
+        if name.eq_ignore_ascii_case("f.txt") {
+            return false;
+        }
+    }
+    true
+}
+
 /// Round 88 — enqueue one relay capture, after the same
 /// host-boundary checks as `DownloadLink` (integration flag,
 /// excluded site, cookie validation) plus the relay master
@@ -758,12 +801,25 @@ fn enqueue_one(
 /// Headers are stored on the row's existing `headers` column
 /// as a JSON map, the same column
 /// `enqueue_pending_link_resolved` writes.
+/// Round 88.6 — a kind=="file" capture must also pass the
+/// `relay_is_file_attachment` rule above: the extension
+/// classifies attachments, but a STALE worker (an unpacked
+/// extension does not reload when the files on disk change —
+/// the Round 88.5 VPS retest's f.txt storm was captured by the
+/// resident 88.4 worker before the explicit Reload) can still
+/// send a "file" capture the current gate would block, and
+/// the host is the last line of defence — refused here, no
+/// pending row and no Add URL dialog is ever created for it.
+/// Media/manifest captures reach the host only through an
+/// explicit user click (`relaySendBuffered`), which a
+/// heuristic must never block, so the rule gates "file" only.
 fn enqueue_relay(
     store: &Store,
     url: &str,
     final_url: Option<&str>,
     referrer: Option<&str>,
     kind: Option<&str>,
+    content_type: Option<&str>,
     content_length: Option<i64>,
     filename: Option<&str>,
     headers: &std::collections::HashMap<String, String>,
@@ -799,6 +855,19 @@ fn enqueue_relay(
                 "This site is excluded in Settings (excluded sites): {host}"
             )));
         }
+    }
+    // Round 88.6 — the host-side file-attachment gate (see
+    // `relay_is_file_attachment` above): a kind=="file" capture
+    // that is not a file by this rule is refused before any row
+    // is created, so a stale worker can never storm the Add URL
+    // dialog with API answers dressed as attachments.
+    if kind.map(str::trim) == Some("file")
+        && !relay_is_file_attachment(filename, content_type, target)
+    {
+        return Err(EngineError::InvalidState(
+            "Relay capture is not a downloadable file (API answer served as an attachment)"
+                .to_string(),
+        ));
     }
     let cookies_json = if cookies.is_empty() {
         None

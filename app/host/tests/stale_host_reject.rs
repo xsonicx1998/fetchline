@@ -200,3 +200,49 @@ fn get_settings_reply_carries_relay_enabled() {
     );
     host.finish();
 }
+
+#[test]
+fn stale_worker_f_txt_capture_gets_a_framed_error() {
+    // Round 88.6 — process-level: the host-side file gate.
+    // The Round 88.5 VPS retest's f.txt storm was captured by
+    // the resident 88.4 worker (no gate) before the explicit
+    // Reload. That worker sends kind=="file" for pagead/id's
+    // `application/json` + `attachment; filename="f.txt"` answer.
+    // The host must refuse it with a framed error — no pending
+    // row, no Add URL dialog — even though the sender is stale.
+    // The no-row half is pinned by the engine tests
+    // (`host_relay_file_gate_*` in round88_tests.rs); here the
+    // real binary's reply is pinned.
+    let dir = tmpdir();
+    let db = dir.join("app.db");
+    let mut host = HostChild::spawn(&db);
+    let reply = host.send(&serde_json::json!({
+        "type": "relay_capture",
+        "url": "https://googleads.g.doubleclick.net/pagead/id?slf_rd=1",
+        "finalUrl": "https://googleads.g.doubleclick.net/pagead/id?slf_rd=1",
+        "page_url": "https://www.youtube.com/watch?v=abc",
+        "content_type": "application/json",
+        "contentLength": 133,
+        "filename": "f.txt",
+        "kind": "file",
+        "headers": {},
+        "cookies": []
+    }));
+    assert_eq!(
+        reply.get("ok"),
+        Some(&serde_json::Value::Bool(false)),
+        "an f.txt JSON capture must be refused: {reply}"
+    );
+    let error = reply
+        .get("error")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        error.contains("not a downloadable file"),
+        "the refusal must name the file gate: {reply}"
+    );
+    // The host stays alive and answers a ping afterwards.
+    let pong = host.send(&serde_json::json!({ "type": "ping" }));
+    assert_eq!(pong.get("ok"), Some(&serde_json::Value::Bool(true)));
+    host.finish();
+}

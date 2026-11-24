@@ -371,6 +371,154 @@ fn host_relay_capture_refuses_excluded_site_and_integration_off_and_relay_off() 
     assert!(reply.ok, "relay off must not block a link click: {reply:?}");
 }
 
+// -- Round 88.6: host-side file-attachment gate --------------------------
+// The extension's `relayIsFileAttachment` gate (Round 88.5) is
+// correct, but it only runs in the worker that is resident —
+// the Round 88.5 VPS retest's f.txt storm was captured by the
+// resident 88.4 worker (an unpacked extension does not reload
+// when the files on disk change) before the explicit Reload,
+// so the gate never saw those captures. The host is the last
+// line of defence: a kind=="file" capture that is not a file
+// by this rule is refused here, before any pending row exists.
+// These tests drive `handle_host_message` with the exact live
+// spam shapes (pagead/id: application/json + f.txt, proven
+// live 2026-11-24; sodar + the Validate endpoint's sibling
+// CheckTriggerService: f.txt with a non-JSON type — only the
+// name gate saves those, and their live content-type is
+// session-gated so it is left as the worst case here).
+
+/// A kind=="file" relay capture with the given filename /
+/// content-type / URL, built on the shared `relay_capture`
+/// helper (kind "media" by default).
+fn file_capture(url: &str, filename: &str, content_type: &str) -> HostMessage {
+    let mut msg = relay_capture(url, url);
+    if let HostMessage::RelayCapture {
+        kind,
+        filename: name,
+        content_type: ctype,
+        content_length,
+        ..
+    } = &mut msg
+    {
+        *kind = Some("file".to_string());
+        *name = Some(filename.to_string());
+        *ctype = Some(content_type.to_string());
+        *content_length = Some(6300);
+    }
+    msg
+}
+
+#[test]
+fn host_relay_file_gate_refuses_f_txt_json_answers() {
+    // pagead/id, live: application/json + attachment f.txt.
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let reply = handle_host_message(
+        &store,
+        &file_capture(
+            "https://googleads.g.doubleclick.net/pagead/id?slf_rd=1",
+            "f.txt",
+            "application/json",
+        ),
+    );
+    assert!(!reply.ok, "an f.txt JSON answer must refuse: {reply:?}");
+    assert!(store.list_pending_links(None).unwrap().is_empty());
+}
+
+#[test]
+fn host_relay_file_gate_refuses_f_txt_by_name_alone() {
+    // sodar + CheckTriggerService (new in the 88.5 storm):
+    // even with a non-JSON, non-text type the canonical f.txt
+    // name is never a file — no content-type can save it.
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    for url in [
+        "https://ep1.adtrafficquality.google/getconfig/sodar?sv=200&tid=oos&tv=2593",
+        "https://www.google.com/httpservice/retry/BatchAsyncTaskTriggerService/CheckTriggerService",
+    ] {
+        let reply = handle_host_message(
+            &store,
+            &file_capture(url, "f.txt", "application/octet-stream"),
+        );
+        assert!(!reply.ok, "{url} must refuse: {reply:?}");
+    }
+    assert!(store.list_pending_links(None).unwrap().is_empty());
+}
+
+#[test]
+fn host_relay_file_gate_refuses_json_and_text_attachments() {
+    // A JSON attachment with a generic name, and a text/plain
+    // one, are API answers — never file captures.
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let reply = handle_host_message(
+        &store,
+        &file_capture(
+            "https://api.example.com/data",
+            "data.json",
+            "application/json",
+        ),
+    );
+    assert!(!reply.ok, "a JSON attachment must refuse: {reply:?}");
+    let reply = handle_host_message(
+        &store,
+        &file_capture("https://api.example.com/notes", "notes.txt", "text/plain"),
+    );
+    assert!(!reply.ok, "a text attachment must refuse: {reply:?}");
+    assert!(store.list_pending_links(None).unwrap().is_empty());
+}
+
+#[test]
+fn host_relay_file_gate_keeps_a_mislabeled_pdf_and_a_real_file() {
+    // The 88.5 guarantee, now enforced on the host too: a
+    // named file is a file whatever the server claims its type
+    // is — a PDF served as text/plain is still captured, and
+    // so is a real archive.
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let reply = handle_host_message(
+        &store,
+        &file_capture(
+            "https://cdn.example.com/download?id=123",
+            "doc.pdf",
+            "text/plain",
+        ),
+    );
+    assert!(reply.ok, "a mislabeled PDF must queue: {reply:?}");
+    let reply = handle_host_message(
+        &store,
+        &file_capture(
+            "https://cdn.example.com/archive.rar",
+            "archive.rar",
+            "application/octet-stream",
+        ),
+    );
+    assert!(reply.ok, "a real archive must queue: {reply:?}");
+    let pending = store.list_pending_links(Some("pending")).unwrap();
+    assert_eq!(pending.len(), 2);
+    assert_eq!(pending[0].filename.as_deref(), Some("doc.pdf"));
+    assert_eq!(pending[1].filename.as_deref(), Some("archive.rar"));
+}
+
+#[test]
+fn host_relay_file_gate_never_blocks_a_user_clicked_video() {
+    // Media/manifest captures reach the host only through an
+    // explicit click (`relaySendBuffered`): the heuristic must
+    // never block them — a user-clicked video is queued even
+    // though no attachment is involved at all.
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let reply = handle_host_message(
+        &store,
+        &relay_capture(
+            "https://cdn.example.com/v/movie.mp4",
+            "https://cdn.example.com/v/movie.mp4",
+        ),
+    );
+    assert!(reply.ok, "a clicked video must queue: {reply:?}");
+    assert_eq!(store.list_pending_links(None).unwrap().len(), 1);
+}
+
 #[test]
 fn relay_message_over_16mib_is_refused_at_the_framing() {
     // The 16 MiB limit is enforced by `decode_message` for

@@ -596,6 +596,42 @@ test("an f.txt attachment with octet-stream is not a file capture (name gate alo
   assert.deepEqual(await env.buffered(5), []);
 });
 
+test("the two new 88.5-storm URLs (sodar, CheckTriggerService) never reach the host (Round 88.6)", async () => {
+  // Round 88.5 VPS retest: besides pagead/id + bgasy, the storm
+  // also opened dialogs for ep1.adtrafficquality.google
+  // getconfig/sodar and google.com httpservice
+  // BatchAsyncTaskTriggerService — two URLs the 88.5 tests did
+  // not cover. Both served an "f.txt" attachment (the dialog
+  // filename proves the disposition name); their live
+  // content-type is session-gated, so this pins the worst case
+  // for the gate — a non-JSON, non-text type, where ONLY the
+  // canonical-name check saves the user from a dialog.
+  const env = loadBackground();
+  await env.setPageContext(5, PAGE, "Watch");
+  env.headersReceived(headersReceived({
+    type: "xmlhttprequest",
+    url: "https://ep1.adtrafficquality.google/getconfig/sodar?sv=200&tid=oos&tv=2593",
+    headers: {
+      "Content-Type": "application/octet-stream",
+      "Content-Disposition": 'attachment; filename="f.txt"',
+      "Content-Length": "7600",
+    },
+  }));
+  env.headersReceived(headersReceived({
+    type: "other",
+    url: "https://www.google.com/httpservice/retry/BatchAsyncTaskTriggerService/CheckTriggerService",
+    headers: {
+      "Content-Type": "application/octet-stream",
+      "Content-Disposition": 'attachment; filename="f.txt"',
+      "Content-Length": "6300",
+    },
+    requestId: "r2",
+  }));
+  await tick();
+  assert.equal(env.sentMessages.length, 0, "no API answer opens the Add URL dialog");
+  assert.deepEqual(await env.buffered(5), [], "no API answer is buffered either");
+});
+
 test("a mislabeled PDF attachment (named file, wrong content-type) is still a file capture", async () => {
   // The gate must not swallow real files: the disposition
   // filename is the user's signal, whatever the server claims
