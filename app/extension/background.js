@@ -102,6 +102,59 @@ function extensionOfFilename(filename) {
   return base.slice(dot + 1).toLowerCase();
 }
 
+// Round 88.8 — MIME fallback for the download watcher: a download
+// whose URL and filename carry no recognizable extension (an opaque
+// proxy link like https://tunnel5.dlproxy.uk/download/<token>?sig=...)
+// is still a real file when the server says so with the MIME type.
+// Only consulted when the extension is NOT in
+// DEFAULT_CATCH_EXTENSIONS. Allow-list only: text/html, any text/*,
+// application/json and images are never caught here — an HTML page
+// or a JSON/text attachment must never open an Add URL dialog (the
+// f.txt spam lesson, Rounds 88.5/88.6; the relay gate is untouched
+// by this change).
+const WATCHER_CATCH_MIME_TYPES = new Set([
+  // Generic binary attachment.
+  "application/octet-stream",
+  // Archives.
+  "application/zip",
+  "application/x-zip-compressed",
+  "application/x-rar-compressed",
+  "application/x-rar",
+  "application/vnd.rar",
+  "application/x-7z-compressed",
+  "application/x-tar",
+  "application/gzip",
+  "application/x-gzip",
+  // Documents.
+  "application/pdf",
+  "application/epub+zip",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.ms-powerpoint",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  // Executables / installers / disk images.
+  "application/x-msdownload",
+  "application/x-msi",
+  "application/vnd.android.package-archive",
+  "application/x-apple-diskimage",
+  "application/x-iso9660-image",
+]);
+
+// Round 88.8 — true when the download's MIME type (Chrome's
+// DownloadItem.mime) maps to a downloadable file kind. Parameters
+// ("; charset=...") are stripped and the type is lower-cased before
+// the lookup. video/* and audio/* are caught as a family; everything
+// else must match the exact allow-list above.
+function isDownloadableMime(mime) {
+  if (typeof mime !== "string") return false;
+  const base = mime.split(";")[0].trim().toLowerCase();
+  if (!base) return false;
+  if (base.startsWith("video/") || base.startsWith("audio/")) return true;
+  return WATCHER_CATCH_MIME_TYPES.has(base);
+}
+
 function isExcluded(host, state) {
   if (!host) return false;
   const lists = [state[STORE_KEYS.excludedSites] || [], state[STORE_KEYS.desktopExcluded] || []];
@@ -1507,18 +1560,40 @@ chrome.downloads.onCreated.addListener(async (item) => {
     if (!item.url.startsWith("http://") && !item.url.startsWith("https://")) return;
     if (item.state && item.state !== "in_progress") return;
     const state = await loadState();
-    if (!state[STORE_KEYS.catchEnabled]) return;
+    // Round 88.8 — record WHY a download was skipped: the popup
+    // shows the last hand-off, so a miss is diagnosable instead of
+    // silent (the live dlproxy case: Connected popup, no dialog,
+    // no trace anywhere). Only the reason is stored — never a URL.
+    if (!state[STORE_KEYS.catchEnabled]) {
+      await recordHandoff(false, "Download catching is turned off in the extension");
+      return;
+    }
     // Desktop setting wins: off means do not catch, whatever the
     // extension toggle says. Unknown (host never answered) means
     // the extension toggle decides on its own.
-    if (state[STORE_KEYS.desktopIntegration] === false) return;
+    if (state[STORE_KEYS.desktopIntegration] === false) {
+      await recordHandoff(false, "Browser integration is turned off in Sonic Manager settings");
+      return;
+    }
     const host = hostOf(item.url);
-    if (isExcluded(host, state)) return;
+    if (isExcluded(host, state)) {
+      await recordHandoff(false, `This site is opted out: ${host || "unknown site"}`);
+      return;
+    }
     // The filename's own suffix first (Chrome reports the local
     // path, which may be the only place the type appears — a
     // download URL need not end in .zip); fall back to the URL.
+    // Round 88.8 — MIME fallback: an opaque download link (a proxy
+    // token URL with no extension anywhere) is still a real file
+    // when the server's MIME type says so. Only reached when the
+    // extension is not recognized; text/html, any text/* and
+    // application/json are never caught here.
     const ext = extensionOfFilename(item.filename) || extensionOf(item.url);
-    if (!DEFAULT_CATCH_EXTENSIONS.includes(ext)) return;
+    if (!DEFAULT_CATCH_EXTENSIONS.includes(ext) && !isDownloadableMime(item.mime)) {
+      const signal = (typeof item.mime === "string" && item.mime.split(";")[0].trim()) || ext || "unknown type";
+      await recordHandoff(false, `Not a downloadable file type (${signal})`);
+      return;
+    }
     // Round 69 (a) — NEVER cancel the browser download until the
     // app confirms receipt. The old order cancelled first and
     // handed over second, so a failed hand-off silently swallowed
@@ -1551,7 +1626,13 @@ chrome.downloads.onCreated.addListener(async (item) => {
     // proceeds natively — nothing is ever paused, nothing is
     // ever lost. The ping is cheap (~ms when the host is alive).
     const hostUp = await pingHost();
-    if (!hostUp) return;
+    if (!hostUp) {
+      // Round 88.8 — the ping is the silent killer: it fails with
+      // no trace while the popup (15 s budget) still says
+      // Connected. Record it so the popup names the cause.
+      await recordHandoff(false, "Sonic Manager did not answer the ping within 3 seconds");
+      return;
+    }
     let paused = false;
     try {
       await chrome.downloads.pause(item.id);

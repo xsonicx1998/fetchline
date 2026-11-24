@@ -136,6 +136,35 @@ fn host_enqueues_download_link() {
 }
 
 #[test]
+fn host_enqueues_extensionless_download_link() {
+    // Round 88.8 — the live dlproxy case: an opaque token URL with
+    // no extension anywhere must still reach the pending queue;
+    // the probe derives the real filename from Content-Disposition
+    // (probe.rs `from_headers`), so no engine change is needed
+    // beyond this pin.
+    let dir = tmpdir();
+    let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());
+    let reply = handle_host_message(
+        &store,
+        &HostMessage::DownloadLink {
+            url: "https://tunnel5.dlproxy.uk/download/nGw5A-kxTG7-bukYw_8crDs9rYodE8GaaTGSu1gvA?sig=VgA7APPUYnL3RQLg"
+                .to_string(),
+            referrer: None,
+            cookies: vec![],
+        },
+    );
+    assert!(reply.ok, "reply should be ok: {:?}", reply);
+    let pending = store.list_pending_links(Some("pending")).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+        pending[0].url,
+        "https://tunnel5.dlproxy.uk/download/nGw5A-kxTG7-bukYw_8crDs9rYodE8GaaTGSu1gvA?sig=VgA7APPUYnL3RQLg"
+    );
+    assert_eq!(pending[0].source, "browser");
+    assert_eq!(pending[0].status, "pending");
+}
+
+#[test]
 fn host_rejects_invalid_url_without_enqueueing() {
     let dir = tmpdir();
     let store = Arc::new(Store::open(&dir.join("app.db")).unwrap());

@@ -92,6 +92,7 @@ document.addEventListener("DOMContentLoaded", () => {
   void refreshStatus();
   void refreshScanLine();
   void refreshRelayLine();
+  void refreshHandoffLine();
   // Round 88.3 — re-read the desktop settings whenever the
   // popup opens, so an app-side toggle (relay, integration)
   // reaches the background worker's capture gate without
@@ -105,6 +106,28 @@ document.addEventListener("DOMContentLoaded", () => {
     .sendMessage({ type: "refresh_desktop_settings" })
     .catch(() => {});
 });
+
+// Round 88.8 — show the last download hand-off, or why the last
+// download was NOT caught: the background worker records every
+// refusal reason in `lastHandoff`, and this is the only place the
+// user can see it. Without it, a Connected popup with a download
+// sailing past into Chrome is undiagnosable. A success reads as
+// confirmation ("Last download: Sent to Sonic Manager"); a
+// refusal names the gate that stopped it.
+async function refreshHandoffLine() {
+  const el = $("handoffLine");
+  if (!el) return;
+  try {
+    const stored = await chrome.storage.local.get("lastHandoff");
+    const handoff = stored && stored.lastHandoff;
+    if (!handoff || !handoff.message) return;
+    el.textContent = handoff.ok
+      ? `Last download: ${handoff.message}`
+      : `Last download skipped: ${handoff.message}`;
+  } catch {
+    // Storage unreadable: the line simply stays hidden.
+  }
+}
 
 // Round 69 — show the last video-scan outcome, so "Find videos on
 // this page" doing nothing is diagnosable: the content script

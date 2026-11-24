@@ -219,7 +219,10 @@ test("watcher never pauses when the host does not answer the ping (Round 71)", a
   assert.deepEqual(env.erased, []);
   assert.equal(env.sentMessages.length, 1);
   assert.equal(env.sentMessages[0].type, "ping");
-  assert.equal(env.storage.lastHandoff, undefined);
+  // Round 88.8 — the ping refusal is recorded so the popup can
+  // say why (the silent killer in the live dlproxy case).
+  assert.equal(env.storage.lastHandoff.ok, false);
+  assert.match(env.storage.lastHandoff.message, /did not answer the ping within 3 seconds/);
 });
 
 test("watcher attaches the target URL's cookies to the hand-off", async () => {
@@ -269,7 +272,9 @@ test("watcher leaves an excluded site's download alone", async () => {
   assert.deepEqual(env.cancelled, []);
   assert.deepEqual(env.erased, []);
   assert.equal(env.sentMessages.length, 0);
-  assert.equal(env.storage.lastHandoff, undefined);
+  // Round 88.8 — the refusal is recorded so the popup can say why.
+  assert.equal(env.storage.lastHandoff.ok, false);
+  assert.match(env.storage.lastHandoff.message, /opted out: 127\.0\.0\.1/);
 });
 
 test("watcher leaves downloads alone when desktop integration is off", async () => {
@@ -278,6 +283,9 @@ test("watcher leaves downloads alone when desktop integration is off", async () 
   assert.deepEqual(env.cancelled, []);
   assert.deepEqual(env.erased, []);
   assert.equal(env.sentMessages.length, 0);
+  // Round 88.8 — the refusal is recorded so the popup can say why.
+  assert.equal(env.storage.lastHandoff.ok, false);
+  assert.match(env.storage.lastHandoff.message, /Browser integration is turned off/);
 });
 
 test("watcher ignores a file type outside the catch list", async () => {
@@ -292,6 +300,9 @@ test("watcher ignores a file type outside the catch list", async () => {
   assert.deepEqual(env.cancelled, []);
   assert.deepEqual(env.erased, []);
   assert.equal(env.sentMessages.length, 0);
+  // Round 88.8 — the refusal is recorded so the popup can say why.
+  assert.equal(env.storage.lastHandoff.ok, false);
+  assert.match(env.storage.lastHandoff.message, /Not a downloadable file type \(txt\)/);
 });
 
 test("the same URL twice is handed over twice (the drain de-duplicates by path)", async () => {
@@ -436,4 +447,117 @@ test("watcher falls back to try-cancel when downloads.search rejects (Round 73 G
   assert.deepEqual(env.erased, [1]);
   assert.equal(env.sentMessages.length, 2);
   assert.equal(env.storage.lastHandoff.ok, true);
+});
+
+// Round 88.8 — MIME fallback: an opaque proxy link carries no
+// extension in the URL or the filename, so the watcher must use
+// the download's MIME type instead. The live case is a RAR from
+// https://tunnel5.dlproxy.uk/download/<token>?sig=<token>.
+const opaqueDownload = (id, mime) => ({
+  id,
+  url: "https://tunnel5.dlproxy.uk/download/nGw5A-kxTG7-bukYw_8crDs9rYodE8GaaTGSu1gvA?sig=VgA7APPUYnL3RQLg",
+  filename: "download",
+  mime,
+  state: "in_progress",
+  referrer: "https://tunnel5.dlproxy.uk/page.html",
+});
+
+test("watcher still catches a .rar by filename with no extension in the URL (Round 88.8)", async () => {
+  // Existing behavior pinned: the filename alone decides when it
+  // carries a catch-list extension, whatever the URL looks like.
+  const env = loadBackground({ seed: { desktopIntegration: true } });
+  await env.fireDownload({
+    id: 1,
+    url: "https://tunnel5.dlproxy.uk/download/nGw5A-kxTG7-bukYw_8crDs9rYodE8GaaTGSu1gvA?sig=VgA7APPUYnL3RQLg",
+    filename: "archive.rar",
+    state: "in_progress",
+    referrer: "https://tunnel5.dlproxy.uk/page.html",
+  });
+  assert.deepEqual(env.paused, [1]);
+  assert.deepEqual(env.cancelled, [1]);
+  assert.deepEqual(env.erased, [1]);
+  assert.equal(env.sentMessages.length, 2);
+  assert.equal(
+    env.sentMessages[1].url,
+    "https://tunnel5.dlproxy.uk/download/nGw5A-kxTG7-bukYw_8crDs9rYodE8GaaTGSu1gvA?sig=VgA7APPUYnL3RQLg",
+  );
+  assert.equal(env.storage.lastHandoff.ok, true);
+});
+
+test("watcher catches an extensionless download when the MIME type is a RAR archive (Round 88.8)", async () => {
+  // The live defect: neither the URL nor the filename carries
+  // .rar, so the extension check alone skips a real file. The
+  // server's MIME type is the signal that catches it.
+  const env = loadBackground({ seed: { desktopIntegration: true } });
+  await env.fireDownload(opaqueDownload(1, "application/x-rar-compressed"));
+  assert.deepEqual(env.paused, [1]);
+  assert.deepEqual(env.cancelled, [1]);
+  assert.deepEqual(env.erased, [1]);
+  assert.equal(env.sentMessages.length, 2);
+  assert.equal(
+    env.sentMessages[1].url,
+    "https://tunnel5.dlproxy.uk/download/nGw5A-kxTG7-bukYw_8crDs9rYodE8GaaTGSu1gvA?sig=VgA7APPUYnL3RQLg",
+  );
+  assert.equal(env.storage.lastHandoff.ok, true);
+});
+
+test("watcher catches an extensionless download served as application/octet-stream (Round 88.8)", async () => {
+  const env = loadBackground({ seed: { desktopIntegration: true } });
+  await env.fireDownload(opaqueDownload(1, "application/octet-stream"));
+  assert.deepEqual(env.paused, [1]);
+  assert.deepEqual(env.cancelled, [1]);
+  assert.deepEqual(env.erased, [1]);
+  assert.equal(env.sentMessages.length, 2);
+  assert.equal(env.storage.lastHandoff.ok, true);
+});
+
+test("watcher catches an extensionless download served as video/mp4 (Round 88.8)", async () => {
+  const env = loadBackground({ seed: { desktopIntegration: true } });
+  await env.fireDownload(opaqueDownload(1, "video/mp4"));
+  assert.deepEqual(env.paused, [1]);
+  assert.deepEqual(env.cancelled, [1]);
+  assert.deepEqual(env.erased, [1]);
+  assert.equal(env.sentMessages.length, 2);
+  assert.equal(env.storage.lastHandoff.ok, true);
+});
+
+test("watcher does not catch an extensionless download served as text/html (Round 88.8)", async () => {
+  // An HTML page must never open an Add URL dialog.
+  const env = loadBackground({ seed: { desktopIntegration: true } });
+  await env.fireDownload(opaqueDownload(1, "text/html"));
+  assert.deepEqual(env.paused, []);
+  assert.deepEqual(env.cancelled, []);
+  assert.deepEqual(env.erased, []);
+  assert.equal(env.sentMessages.length, 0);
+});
+
+test("watcher does not catch an extensionless download served as application/json (Round 88.8)", async () => {
+  // The f.txt spam lesson (Rounds 88.5/88.6): a JSON attachment
+  // is never a file, whatever the URL looks like.
+  const env = loadBackground({ seed: { desktopIntegration: true } });
+  await env.fireDownload(opaqueDownload(1, "application/json"));
+  assert.deepEqual(env.paused, []);
+  assert.deepEqual(env.cancelled, []);
+  assert.deepEqual(env.erased, []);
+  assert.equal(env.sentMessages.length, 0);
+});
+
+test("watcher does not catch an extensionless download served as text/plain (Round 88.8)", async () => {
+  const env = loadBackground({ seed: { desktopIntegration: true } });
+  await env.fireDownload(opaqueDownload(1, "text/plain"));
+  assert.deepEqual(env.paused, []);
+  assert.deepEqual(env.cancelled, []);
+  assert.deepEqual(env.erased, []);
+  assert.equal(env.sentMessages.length, 0);
+});
+
+test("watcher still skips an extensionless download with no MIME type (Round 88.8)", async () => {
+  // No extension anywhere and no MIME signal: the old behavior
+  // is preserved — nothing to classify the download with.
+  const env = loadBackground({ seed: { desktopIntegration: true } });
+  await env.fireDownload(opaqueDownload(1, undefined));
+  assert.deepEqual(env.paused, []);
+  assert.deepEqual(env.cancelled, []);
+  assert.deepEqual(env.erased, []);
+  assert.equal(env.sentMessages.length, 0);
 });

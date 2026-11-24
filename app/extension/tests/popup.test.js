@@ -53,9 +53,9 @@ function fakeElement() {
   return el;
 }
 
-function loadPopup({ nativeReply = { ok: true }, lastVideoScan = null, scanReply = null, tabUrl = "http://127.0.0.1/page.html", tabId = null, sessionRelay = null, relayReply = null } = {}) {
+function loadPopup({ nativeReply = { ok: true }, lastVideoScan = null, lastHandoff = null, scanReply = null, tabUrl = "http://127.0.0.1/page.html", tabId = null, sessionRelay = null, relayReply = null } = {}) {
   const elements = {};
-  for (const id of ["status", "statusText", "statusDetail", "scanLine", "relayLine", "relayList"]) elements[id] = fakeElement();
+  for (const id of ["status", "statusText", "statusDetail", "scanLine", "relayLine", "relayList", "handoffLine"]) elements[id] = fakeElement();
   let nativeHandler = () => nativeReply;
   let lastError = null;
   const sentMessages = [];
@@ -99,8 +99,12 @@ function loadPopup({ nativeReply = { ok: true }, lastVideoScan = null, scanReply
     },
     storage: {
       local: {
-        async get(_key) {
-          return lastVideoScan ? { lastVideoScan } : {};
+        async get(key) {
+          const keys = Array.isArray(key) ? key : [key];
+          const out = {};
+          if (lastVideoScan && keys.includes("lastVideoScan")) out.lastVideoScan = lastVideoScan;
+          if (lastHandoff && keys.includes("lastHandoff")) out.lastHandoff = lastHandoff;
+          return out;
         },
       },
       // Round 88 — the session mirror of the relay buffer.
@@ -413,4 +417,35 @@ test("popup shows no relay line when the tab has no buffered items (Round 88)", 
   await tick();
   assert.equal(env.elements.relayLine.textContent, "");
   assert.equal(env.elements.relayList.children.length, 0);
+});
+
+test("popup shows the last download refusal from the watcher (Round 88.8)", async () => {
+  // The live dlproxy case: Connected popup, no dialog, no trace.
+  // The watcher records the refusal reason in lastHandoff and the
+  // popup is the only place the user can see it.
+  const env = loadPopup({
+    lastHandoff: { at: Date.now(), ok: false, message: "Sonic Manager did not answer the ping within 3 seconds" },
+  });
+  await env.domContentLoaded();
+  await tick();
+  assert.equal(
+    env.elements.handoffLine.textContent,
+    "Last download skipped: Sonic Manager did not answer the ping within 3 seconds",
+  );
+});
+
+test("popup shows the last successful hand-off (Round 88.8)", async () => {
+  const env = loadPopup({
+    lastHandoff: { at: Date.now(), ok: true, message: "Sent to Sonic Manager" },
+  });
+  await env.domContentLoaded();
+  await tick();
+  assert.equal(env.elements.handoffLine.textContent, "Last download: Sent to Sonic Manager");
+});
+
+test("popup shows no hand-off line when nothing was ever handed over (Round 88.8)", async () => {
+  const env = loadPopup({});
+  await env.domContentLoaded();
+  await tick();
+  assert.equal(env.elements.handoffLine.textContent, "");
 });
