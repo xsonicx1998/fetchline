@@ -508,6 +508,115 @@ test("attachment on a non-navigation type and a catch-list extension go to the h
   assert.deepEqual(await env.buffered(5), [], "file captures are not buffered");
 });
 
+test("Google JSON API answers served as attachment f.txt never reach the host (Round 88.5)", async () => {
+  // Round 88.4 retest, defect 1: the Add URL dialog stormed
+  // for Chrome/Google service requests — googleads pagead/id,
+  // google.com/async/bgasy, the variations Validate endpoint —
+  // because Google serves its JSON API answers as
+  // `Content-Disposition: attachment; filename="f.txt"` and the
+  // old "any attachment on a non-navigation request is a file"
+  // rule auto-opened the dialog for every one. The pagead/id
+  // headers below are the real ones (fetched live 2026-11-24).
+  const env = loadBackground();
+  await env.setPageContext(5, PAGE, "Watch");
+  env.headersReceived(headersReceived({
+    type: "xmlhttprequest",
+    url: "https://googleads.g.doubleclick.net/pagead/id?slf_rd=1",
+    headers: {
+      "Content-Type": "application/json; charset=UTF-8",
+      "Content-Disposition": 'attachment; filename="f.txt"',
+      "Content-Length": "133",
+    },
+  }));
+  env.headersReceived(headersReceived({
+    type: "xmlhttprequest",
+    url: "https://www.google.com/async/bgasy?opi=89978449",
+    headers: {
+      "Content-Type": "text/html; charset=UTF-8",
+      "Content-Disposition": 'attachment; filename="f.txt"',
+      "Content-Length": "6300",
+    },
+    requestId: "r2",
+  }));
+  env.headersReceived(headersReceived({
+    type: "other",
+    url: "https://www.google.com/httpservice/retry/ValidationAsyncService/Validate?rlz=1C1",
+    headers: {
+      "Content-Type": "application/json; charset=UTF-8",
+      "Content-Disposition": 'attachment; filename="f.txt"',
+      "Content-Length": "210",
+    },
+    requestId: "r3",
+  }));
+  await tick();
+  assert.equal(env.sentMessages.length, 0, "no API answer opens the Add URL dialog");
+  assert.deepEqual(await env.buffered(5), [], "no API answer is buffered either");
+});
+
+test("a JSON attachment with a generic name and a text/plain attachment are not file captures", async () => {
+  const env = loadBackground();
+  await env.setPageContext(5, PAGE, "Watch");
+  env.headersReceived(headersReceived({
+    type: "xmlhttprequest",
+    url: "https://api.example.com/data",
+    headers: {
+      "Content-Type": "application/json",
+      "Content-Disposition": 'attachment; filename="data.json"',
+      "Content-Length": "420",
+    },
+  }));
+  env.headersReceived(headersReceived({
+    type: "xmlhttprequest",
+    url: "https://api.example.com/notes",
+    headers: {
+      "Content-Type": "text/plain",
+      "Content-Disposition": 'attachment; filename="notes.txt"',
+      "Content-Length": "80",
+    },
+    requestId: "r2",
+  }));
+  await tick();
+  assert.equal(env.sentMessages.length, 0, "API answers never auto-open the dialog");
+});
+
+test("an f.txt attachment with octet-stream is not a file capture (name gate alone)", async () => {
+  const env = loadBackground();
+  await env.setPageContext(5, PAGE, "Watch");
+  env.headersReceived(headersReceived({
+    type: "xmlhttprequest",
+    url: "https://svc.example.com/answer",
+    headers: {
+      "Content-Type": "application/octet-stream",
+      "Content-Disposition": 'attachment; filename="f.txt"',
+      "Content-Length": "512",
+    },
+  }));
+  await tick();
+  assert.equal(env.sentMessages.length, 0, "the canonical f.txt name is never a file");
+  assert.deepEqual(await env.buffered(5), []);
+});
+
+test("a mislabeled PDF attachment (named file, wrong content-type) is still a file capture", async () => {
+  // The gate must not swallow real files: the disposition
+  // filename is the user's signal, whatever the server claims
+  // the type is.
+  const env = loadBackground();
+  await env.setPageContext(5, PAGE, "Watch");
+  env.headersReceived(headersReceived({
+    type: "xmlhttprequest",
+    url: "https://cdn.example.com/download?id=123",
+    headers: {
+      "Content-Type": "text/plain",
+      "Content-Disposition": 'attachment; filename="doc.pdf"',
+      "Content-Length": "12345",
+    },
+  }));
+  await tick();
+  assert.equal(env.sentMessages.length, 1);
+  assert.equal(env.sentMessages[0].kind, "file");
+  assert.equal(env.sentMessages[0].filename, "doc.pdf");
+});
+
 test("googlevideo.com/videoplayback is skipped outright", async () => {
   const env = loadBackground();
   await env.setPageContext(5, "https://www.youtube.com/watch?v=abc", "Video");

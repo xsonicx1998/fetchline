@@ -496,7 +496,7 @@ async function realClipHeaders(baseUrl) {
   assert.equal(res.status, 206, "fixture serves the first fetch as 206");
   const headers = {};
   for (const [k, v] of res.headers.entries()) headers[k] = v;
-  // The body is 1 MiB; drain it so the server can close cleanly.
+  // The body is ~1 MiB; drain it so the server can close cleanly.
   await res.arrayBuffer();
   return headers;
 }
@@ -836,6 +836,83 @@ test("same-tab navigation to the mp4 keeps the relay row in the dropdown", async
     const relayRow = rows.find((r) => r.children[1] && r.children[1].textContent === "Relay");
     assert.ok(relayRow, "a relay row with the Relay mark is listed after the navigation");
     assert.match(relayRow.children[0].textContent, /relay-clip\.mp4/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("same-tab navigation: the relay row click after the seek re-capture sends relay_capture", async () => {
+  // Round 88.5 — the Round 88.4 live failure: the row re-appears
+  // after the same-tab navigation (88.3 fixed that), but clicking
+  // it only showed the "Sent to Sonic Manager" toast — no Add URL
+  // dialog, no download. This test drives the click itself and
+  // asserts the capture reaches the host.
+  const { server, baseUrl } = await startFixtureServer();
+  try {
+    const clipUrl = `${baseUrl}${RELAY_CLIP_PATH}`;
+    const pageUrl = `${baseUrl}${RELAY_VIDEO_PATH}`;
+    const clipHeaders = await realClipHeaders(baseUrl);
+
+    const bg = loadBackground();
+    const content = loadContent({
+      pageUrl,
+      initialVideoSpec: { url: clipUrl },
+      wire: wireTo(bg),
+    });
+    await tick(50);
+    bg.headersReceived(headersReceived({
+      url: pageUrl,
+      type: "main_frame",
+      status: 200,
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+      requestId: "r0",
+      initiator: "",
+    }));
+    await tick();
+    bg.headersReceived(headersReceived({
+      url: clipUrl,
+      type: "main_frame",
+      status: 206,
+      headers: clipHeaders,
+      requestId: "r1",
+      initiator: "",
+    }));
+    await tick();
+    assert.equal((await bg.buffered(TAB)).length, 1, "the direct-navigation mp4 is buffered");
+    bg.listeners.message(
+      { type: "page_context", pageUrl: clipUrl, title: "" },
+      { tab: { id: TAB } },
+      () => {},
+    );
+    await tick();
+    assert.equal((await bg.buffered(TAB)).length, 0, "the navigation clears the old buffer");
+    bg.headersReceived(headersReceived({
+      url: clipUrl,
+      type: "media",
+      status: 206,
+      headers: {
+        "Content-Type": "video/mp4",
+        "Content-Range": `bytes 262144-${RELAY_CLIP_SIZE - 1}/${RELAY_CLIP_SIZE}`,
+        "Content-Length": String(RELAY_CLIP_SIZE - 262144),
+      },
+      requestId: "r2",
+      initiator: "",
+    }));
+    await tick();
+    assert.equal((await bg.buffered(TAB)).length, 1, "the seek re-captures the cleared item");
+
+    content.click(content.findButton());
+    const dropdown = content.findDropdown();
+    await tick(50);
+    const rows = dropdown.children.filter((c) => c.tagName === "BUTTON");
+    const relayRow = rows.find((r) => r.children[1] && r.children[1].textContent === "Relay");
+    assert.ok(relayRow, "a relay row with the Relay mark is listed after the navigation");
+    content.click(relayRow);
+    await tick(50);
+    const captures = bg.sentMessages.filter((m) => m.type === "relay_capture");
+    assert.equal(captures.length, 1, "one relay_capture reaches the host after the same-tab click");
+    assert.equal(captures[0].finalUrl, clipUrl);
+    assert.equal((await bg.buffered(TAB)).length, 0, "the sent item leaves the buffer");
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

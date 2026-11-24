@@ -541,8 +541,9 @@ const RELAY_CONTENT_TYPE_EXT = {
   "application/pdf": "pdf",
 };
 
-function relayFilename(disposition, url, pageTitle, contentType) {
-  // filename*= (UTF-8, RFC 5987) first, then filename=.
+// The filename a Content-Disposition header names, if any:
+// filename*= (UTF-8, RFC 5987) first, then filename=.
+function relayAttachmentFilename(disposition) {
   const starred = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(disposition || "");
   if (starred) {
     try {
@@ -556,6 +557,34 @@ function relayFilename(disposition, url, pageTitle, contentType) {
     const name = (plain[1] || plain[2] || "").trim();
     if (name) return name;
   }
+  return "";
+}
+
+// Round 88.5 — is this attachment a real file, or an API answer
+// dressed as one? Google serves its JSON API responses
+// (googleads pagead/id, google.com/async/bgasy, the variations
+// Validate endpoint, …) as `Content-Disposition: attachment;
+// filename="f.txt"` — an anti-JSON-hijack measure — and the
+// relay's old "any attachment on a non-navigation request is a
+// file" rule auto-opened the Add URL dialog for every one of
+// those background service requests (Round 88.4 retest: the
+// dialog stormed on every YouTube page load, and Cancel could
+// not suppress it because each request is a new URL). A named
+// file is a file whatever the server claims its type is (a
+// mislabeled PDF is still a PDF); an unnamed JSON/text
+// attachment, and the canonical "f.txt" name, never are.
+function relayIsFileAttachment(contentType, disposition, url) {
+  const name = relayAttachmentFilename(disposition);
+  const ext = extensionOfFilename(name) || extensionOf(url);
+  if (ext && DEFAULT_CATCH_EXTENSIONS.includes(ext)) return true;
+  if (contentType === "application/json" || contentType.startsWith("text/")) return false;
+  if (name && name.toLowerCase() === "f.txt") return false;
+  return true;
+}
+
+function relayFilename(disposition, url, pageTitle, contentType) {
+  const name = relayAttachmentFilename(disposition);
+  if (name) return name;
   try {
     const base = decodeURIComponent(new URL(url).pathname.split("/").pop() || "");
     if (base) return base;
@@ -659,9 +688,19 @@ function relayClassify(details, page) {
     kind = "manifest";
   } else if (contentType === "application/dash+xml" || ext === "mpd") {
     kind = "manifest";
-  } else if (isAttachment && type !== "main_frame" && type !== "sub_frame") {
+  } else if (
+    isAttachment &&
+    type !== "main_frame" &&
+    type !== "sub_frame" &&
+    relayIsFileAttachment(contentType, disposition, url)
+  ) {
     // An attachment on a non-navigation type is an explicit
     // file capture — the only kind that auto-opens the dialog.
+    // (Gated by relayIsFileAttachment: Google's JSON API
+    // answers arrive as `attachment; filename="f.txt"` and
+    // must never auto-open the dialog — Round 88.4 defect 1.
+    // A gated-out attachment falls through below: a text/plain
+    // one may still be recorded as a "maybe", never offered.)
     kind = "file";
   } else if (
     contentType.startsWith("video/") ||
